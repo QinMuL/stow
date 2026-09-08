@@ -62,7 +62,7 @@ class TmdbClient:
         # 先按媒体类型搜索:剧集优先 tv,电影优先 movie,各自带年份
         order = ("tv", "movie") if media.is_tv else ("movie", "tv")
         for mtype in order:
-            params = {"query": media.title, "include_adult": "false"}
+            params = {"query": media.title, "include_adult": "false", "language": "zh-CN"}
             if year:
                 params["first_air_date_year" if mtype == "tv" else "year"] = year
             data = await self._get(f"/search/{mtype}", params)
@@ -82,7 +82,9 @@ class TmdbClient:
         # 兜底:不带年份再试一轮(年份缺失时)
         if not year:
             for mtype in order:
-                data = await self._get(f"/search/{mtype}", {"query": media.title})
+                data = await self._get(
+                    f"/search/{mtype}", {"query": media.title, "language": "zh-CN"}
+                )
                 for item in ((data or {}).get("results") or [])[:3]:
                     cand_title = item.get("title") or item.get("name") or ""
                     if title_match(media.title, cand_title):

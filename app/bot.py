@@ -44,9 +44,10 @@ _HELP = (
 
 
 class StowBot:
-    def __init__(self, cfg: Config, store: Store) -> None:
+    def __init__(self, cfg: Config, store: Store, config_path: str | None = None) -> None:
         self.cfg = cfg
         self.store = store
+        self.config_path = config_path
         self.reader = Pan115Reader()
         self.tmdb = TmdbClient(cfg.tmdb_api_key, cfg.proxy_url) if cfg.tmdb_api_key else None
         self._push_lock = asyncio.Lock()  # 投递串行,防 flood
@@ -62,7 +63,26 @@ class StowBot:
         app.add_handler(CommandHandler("help", self._cmd_help))
         app.add_handler(CommandHandler("push", self._cmd_push))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
+        # 频道消息:自动校准 chat_id(Bot 被加为频道管理员后,频道里任意一条消息触发)
+        app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, self._on_channel_post))
         return app
+
+    async def _on_channel_post(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = update.effective_chat
+        if chat is None:
+            return
+        logger.info(
+            "收到频道消息:chat_id=%s title=%s(当前配置 tg_chat_id=%s)",
+            chat.id, chat.title, self.cfg.tg_chat_id,
+        )
+        if str(chat.id) != str(self.cfg.tg_chat_id) and self.config_path:
+            from app.config import read_raw, write_raw
+
+            raw = read_raw(self.config_path)
+            raw["tg_chat_id"] = str(chat.id)
+            write_raw(raw, self.config_path)
+            self.cfg.tg_chat_id = str(chat.id)  # 运行中即时生效,无需重启
+            logger.warning("频道 ID 已自动修正为 %s(%s)", chat.id, chat.title)
 
     # ── 鉴权 ────────────────────────────────────────────────
     def _is_admin(self, update: Update) -> bool:
@@ -183,10 +203,10 @@ class StowBot:
     _bot_ref = None  # run() 时注入
 
 
-def run(cfg: Config, store: Store) -> None:
+def run(cfg: Config, store: Store, config_path: str | None = None) -> None:
     """构建并阻塞运行。启动期网络瞬断自动重试(bootstrap_retries=-1);
     令牌无效仍快速失败,由调用方保持 Web 存活。"""
-    bot = StowBot(cfg, store)
+    bot = StowBot(cfg, store, config_path)
     app = bot.build()
     bot._bot_ref = app.bot
     logger.info("Stow Bot 启动(token 已配置,目标频道 %s)", cfg.tg_chat_id)

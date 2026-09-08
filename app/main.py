@@ -41,7 +41,7 @@ def _run_bot(config_path: str) -> None:
     STATE["bot_running"] = True
     STATE["bot_error"] = ""
     try:
-        run(cfg, store)
+        run(cfg, store, config_path)
     except Exception as exc:  # noqa: BLE001 - Bot 异常不拖垮 Web
         STATE["bot_running"] = False
         STATE["bot_error"] = str(exc)[:200]
