@@ -7,7 +7,7 @@
 <style>
 :root{
   --bg:#161311;--panel:#1f1b17;--panel2:#28221c;--line:#3a322a;
-  --text:#efe8df;--sub:#a89c8c;--faint:#6f6355;
+  --text:#efe8df;--sub:#b3a796;--faint:#8d8071;
   --amber:#e8a33d;--amber-dim:#b57f2e;--ok:#7fb069;--bad:#d96c4f;
   --mono:ui-monospace,'Cascadia Mono',Consolas,monospace;
 }
@@ -48,6 +48,7 @@ body{background:var(--bg);color:var(--text);font:15px/1.6 system-ui,'Segoe UI',s
 #login{max-width:380px;margin:12vh auto 0}
 .hidden{display:none}
 .pwd-note{font-size:12px;color:var(--amber);margin-top:8px}
+.saved-tag{font-size:11px;color:var(--ok);font-family:var(--mono);margin-left:6px}
 code.inline{font-family:var(--mono);background:var(--panel2);padding:1px 6px;border-radius:4px;font-size:12px}
 </style>
 </head>
@@ -141,7 +142,10 @@ async function enter(){
   showMain();
   const [cfg,st,acc]=await Promise.all([api('config'),api('status'),api('account')]);
   const FIELDS=['tg_bot_token','tg_chat_id','tg_admin_ids','tmdb_api_key','proxy_url'];
-  for(const k of FIELDS){const v=cfg[k];$('f-'+k).value=Array.isArray(v)?v.join(','):v;}
+  for(const k of FIELDS){const v=cfg[k];$('f-'+k).value=Array.isArray(v)?v.join(','):v;
+    const lb=$('f-'+k).previousElementSibling;
+    if(lb)lb.querySelector('.saved-tag')?.remove();
+    if(v==='••••••••'&&lb)lb.insertAdjacentHTML('beforeend','<span class="saved-tag">✓ 已保存</span>');}
   $('who').textContent='当前账号:'+acc.username;
   $('acc-warn').classList.toggle('hidden',!acc.default_password);
   renderStatus(st);
