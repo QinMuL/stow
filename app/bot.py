@@ -62,9 +62,13 @@ class StowBot:
         app.add_handler(CommandHandler("start", self._cmd_help))
         app.add_handler(CommandHandler("help", self._cmd_help))
         app.add_handler(CommandHandler("push", self._cmd_push))
+        # 频道消息:自动校准 chat_id(Bot 被加为频道管理员后,频道里任意一条消息触发)。
+        # 必须独立分组:频道消息带文字,同组时会被上面的 TEXT handler 先匹配吃掉
+        app.add_handler(
+            MessageHandler(filters.UpdateType.CHANNEL_POST, self._on_channel_post),
+            group=-1,
+        )
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
-        # 频道消息:自动校准 chat_id(Bot 被加为频道管理员后,频道里任意一条消息触发)
-        app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, self._on_channel_post))
         return app
 
     async def _on_channel_post(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -105,7 +109,10 @@ class StowBot:
         await self._handle(update, link)
 
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        uid = update.effective_user.id if update.effective_user else None
+        # 频道消息无发送者,由 _on_channel_post 处理;这里只响应私聊/群里的用户消息
+        if update.effective_user is None:
+            return
+        uid = update.effective_user.id
         text = update.effective_message.text or ""
         logger.info("收到消息 from=%s: %s", uid, text[:50].replace("\n", " "))
         if not self._is_admin(update):
