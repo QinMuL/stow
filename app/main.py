@@ -65,6 +65,9 @@ def main() -> None:
     if cfg.bot_ready():
         logger.info("配置齐全,启动 Bot(频道 %s)", cfg.tg_chat_id)
         _run_bot(config_path)
+        # Bot 退出(异常/令牌失效)不拖垮 Web:保活等待,网页可查原因、改配置
+        logger.error("Bot 已退出——Web 配置台保持运行,可在总览页查看原因、修改配置后重启")
+        threading.Event().wait()
     else:
         for p in cfg.problems():
             logger.warning("配置缺项:%s", p)

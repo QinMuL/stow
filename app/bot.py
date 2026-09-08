@@ -173,9 +173,10 @@ class StowBot:
 
 
 def run(cfg: Config, store: Store) -> None:
-    """构建并阻塞运行。"""
+    """构建并阻塞运行。启动期网络瞬断自动重试(bootstrap_retries=-1);
+    令牌无效仍快速失败,由调用方保持 Web 存活。"""
     bot = StowBot(cfg, store)
     app = bot.build()
     bot._bot_ref = app.bot
     logger.info("Stow Bot 启动(token 已配置,目标频道 %s)", cfg.tg_chat_id)
-    app.run_polling()
+    app.run_polling(bootstrap_retries=-1)
