@@ -144,3 +144,44 @@ def test_restart_schedules_exit(tmp_path, monkeypatch):
     r = client.post("/api/restart", headers=_h(token))
     assert r.status_code == 200
     assert called.wait(3)  # 1 秒后被调度调用
+
+
+# ── 历史 / 统计 ─────────────────────────────────────────────
+def test_history_endpoint(tmp_path):
+    from app.store import Store
+
+    client = _client(tmp_path)
+    token = _login(client)
+    # 直接写库造两条记录
+    cfg_db = tmp_path / "stow.db"
+
+    cfg_raw = tmp_path / "config.json"
+    import json as _json
+
+    raw = _json.loads(cfg_raw.read_text(encoding="utf-8"))
+    raw["data_dir"] = str(tmp_path)
+    cfg_raw.write_text(_json.dumps(raw), encoding="utf-8")
+    s = Store(tmp_path / "stow.db")
+    s.mark_pushed("c1", "剧A")
+    s.mark_pushed("c2", "影B")
+    s.close()
+
+    r = client.get("/api/history", headers=_h(token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 2 and body["today"] == 2
+    assert body["items"][0]["code"] == "c2"  # 新→旧
+    assert body["items"][0]["title"] == "影B"
+
+
+def test_store_recent_and_stats(tmp_path):
+    from app.store import Store
+
+    s = Store(tmp_path / "t.db")
+    assert s.stats() == {"today": 0, "total": 0}
+    s.mark_pushed("a", "A")
+    s.mark_pushed("b", "B")
+    assert s.stats()["total"] == 2
+    rec = s.recent(1)
+    assert len(rec) == 1 and rec[0]["code"] == "b"
+    s.close()

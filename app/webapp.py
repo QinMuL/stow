@@ -23,6 +23,7 @@ from app.config import (
     read_raw,
     write_raw,
 )
+from app.store import Store
 
 # 进程状态(bot 线程写入,web 读取)
 STATE = {"bot_running": False, "bot_error": ""}
@@ -165,7 +166,7 @@ def create_app(config_path: str | Path) -> FastAPI:
         cfg = load_config(config_path)
         return {"success": True, "bot_ready": cfg.bot_ready(), "missing": cfg.problems()}
 
-    # ── 状态 / 重启 ─────────────────────────────────────────
+    # ── 状态 / 历史 / 重启 ──────────────────────────────────
     @app.get("/api/status")
     def status(request: Request) -> dict:
         _current_user(config_path, _auth_header(request))
@@ -176,6 +177,20 @@ def create_app(config_path: str | Path) -> FastAPI:
             "bot_ready": cfg.bot_ready(),
             "missing": cfg.problems(),
         }
+
+    @app.get("/api/history")
+    def history(request: Request, limit: int = 20) -> dict:
+        """总览数据:最近推送 + 今日/累计统计。"""
+        _current_user(config_path, _auth_header(request))
+        cfg = load_config(config_path)
+        store = Store(cfg.db_path)
+        try:
+            return {
+                "items": store.recent(max(1, min(limit, 100))),
+                **store.stats(),
+            }
+        finally:
+            store.close()
 
     @app.post("/api/restart")
     def restart(request: Request) -> dict:
@@ -190,9 +205,18 @@ def create_app(config_path: str | Path) -> FastAPI:
         threading.Thread(target=_exit_later, daemon=True).start()
         return {"success": True, "message": "服务将在 1 秒后重启(容器自动拉起)"}
 
-    # ── 前端 ────────────────────────────────────────────────
-    @app.get("/")
-    def index() -> FileResponse:
+    # ── 前端(Vite 构建产物:index.html + /assets/*) ────────
+    from fastapi.staticfiles import StaticFiles
+
+    assets_dir = _STATIC.parent / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}")
+    def index(full_path: str) -> FileResponse:
+        candidate = (_STATIC.parent / full_path).resolve()
+        if full_path and candidate.is_file() and candidate.is_relative_to(_STATIC.parent):
+            return FileResponse(candidate)
         return FileResponse(_STATIC)
 
     return app
