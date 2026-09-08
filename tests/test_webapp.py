@@ -185,3 +185,27 @@ def test_store_recent_and_stats(tmp_path):
     rec = s.recent(1)
     assert len(rec) == 1 and rec[0]["code"] == "b"
     s.close()
+
+
+def test_config_get_treats_placeholder_as_empty(tmp_path):
+    """中文占位符不显示为「已保存」(与启动加载同口径)。"""
+    import json as _json
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"tg_bot_token": "123456:ABC-你的BotToken"}), encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    r = client.get("/api/config", headers=_h(token))
+    assert r.json()["tg_bot_token"] == ""
+
+
+def test_config_put_rejects_placeholder(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    r = client.put(
+        "/api/config",
+        json={"values": {"tg_bot_token": "占位符"}},
+        headers=_h(token),
+    )
+    assert r.status_code == 400
+    assert "占位符" in r.json()["detail"]

@@ -131,7 +131,9 @@ def create_app(config_path: str | Path) -> FastAPI:
         for key, kind in EDITABLE.items():
             v = raw.get(key, "" if kind != "i" else 0)
             if key in SENSITIVE_KEYS:
-                out[key] = MASK if str(v or "").strip() else ""
+                # 与启动加载同口径:非 ASCII(如中文占位符)视为未填写
+                s = str(v or "").strip()
+                out[key] = MASK if (s and s.isascii()) else ""
             else:
                 out[key] = v
         return out
@@ -161,7 +163,13 @@ def create_app(config_path: str | Path) -> FastAPI:
                         items.append(int(part))
                 raw[key] = items
             else:
-                raw[key] = str(value).strip()
+                s = str(value).strip()
+                if kind == "s" and key in SENSITIVE_KEYS and s and not s.isascii():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{key} 含非 ASCII 字符(疑似占位符,请填真实值)",
+                    )
+                raw[key] = s
         write_raw(raw, config_path)
         cfg = load_config(config_path)
         return {"success": True, "bot_ready": cfg.bot_ready(), "missing": cfg.problems()}
