@@ -172,6 +172,6 @@ def test_config_placeholder_rejected(tmp_path, capsys):
     }), encoding="utf-8")
     with _pytest.raises(SystemExit):
         from app.config import load_config
-        load_config(p)
+        load_config(p, strict=True)
     out = capsys.readouterr().out
     assert "tg_bot_token" in out

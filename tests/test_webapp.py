@@ -1,0 +1,146 @@
+"""Web 配置台测试:登录 / 配置脱敏读写 / 账号 / 状态 / 重启(不真退)。"""
+
+from __future__ import annotations
+
+from fastapi.testclient import TestClient
+
+from app.webapp import create_app
+
+
+def _client(tmp_path):
+    return TestClient(create_app(tmp_path / "config.json"))
+
+
+def _login(client, username="admin", password="admin") -> str:
+    r = client.post("/api/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return r.json()["token"]
+
+
+def _h(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+# ── 登录 ────────────────────────────────────────────────────
+def test_default_admin_created_and_login(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    assert token
+
+
+def test_login_wrong_password(tmp_path):
+    client = _client(tmp_path)
+    assert client.post("/api/login", json={"username": "admin", "password": "x"}).status_code == 401
+
+
+# ── 配置 ────────────────────────────────────────────────────
+def test_config_requires_auth(tmp_path):
+    client = _client(tmp_path)
+    assert client.get("/api/config").status_code == 401
+
+
+def test_config_get_masks_sensitive(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    client.put(
+        "/api/config",
+        json={"values": {"tg_bot_token": "T0KEN", "tg_chat_id": "-1001"}},
+        headers=_h(token),
+    )
+    r = client.get("/api/config", headers=_h(token))
+    assert r.json()["tg_bot_token"] == "••••••••"  # 已设置 → 掩码
+    assert r.json()["tg_chat_id"] == "-1001"       # 非敏感 → 明文
+
+
+def test_config_put_masked_keeps_old(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    client.put("/api/config", json={"values": {"tg_bot_token": "REAL"}}, headers=_h(token))
+    # 提交掩码 = 未修改,不清空
+    client.put("/api/config", json={"values": {"tg_bot_token": "••••••••"}}, headers=_h(token))
+    import json as _json
+
+    raw = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert raw["tg_bot_token"] == "REAL"
+
+
+def test_config_put_reports_missing(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    r = client.put("/api/config", json={"values": {"tg_bot_token": "t"}}, headers=_h(token))
+    body = r.json()
+    assert body["success"] is True and body["bot_ready"] is False
+    assert any("tg_chat_id" in m for m in body["missing"])
+
+
+def test_config_admin_ids_parsing(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    client.put("/api/config", json={"values": {"tg_admin_ids": "123, 456"}}, headers=_h(token))
+    import json as _json
+
+    raw = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert raw["tg_admin_ids"] == [123, 456]
+
+
+def test_config_rejects_bad_admin_id(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    r = client.put("/api/config", json={"values": {"tg_admin_ids": "abc"}}, headers=_h(token))
+    assert r.status_code == 400
+
+
+# ── 账号 ────────────────────────────────────────────────────
+def test_account_flag_and_change(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    assert client.get("/api/account", headers=_h(token)).json()["default_password"] is True
+    r = client.put(
+        "/api/account",
+        json={"current_password": "admin", "new_password": "newpass6"},
+        headers=_h(token),
+    )
+    assert r.status_code == 200
+    assert client.post("/api/login", json={"username": "admin", "password": "admin"}).status_code == 401
+    token2 = _login(client, password="newpass6")
+    assert client.get("/api/account", headers=_h(token2)).json()["default_password"] is False
+
+
+def test_account_wrong_current(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    r = client.put(
+        "/api/account",
+        json={"current_password": "wrong", "new_password": "x123456"},
+        headers=_h(token),
+    )
+    assert r.status_code == 403
+
+
+# ── 状态 ────────────────────────────────────────────────────
+def test_status_reports_missing(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    body = client.get("/api/status", headers=_h(token)).json()
+    assert body["bot_running"] is False
+    assert body["bot_ready"] is False
+    assert len(body["missing"]) >= 3
+
+
+# ── 重启(不真退) ───────────────────────────────────────────
+def test_restart_schedules_exit(tmp_path, monkeypatch):
+    import threading
+
+    import app.webapp as webapp
+
+    client = _client(tmp_path)
+    token = _login(client)
+    called = threading.Event()
+
+    def fake_exit(code):
+        called.set()
+
+    monkeypatch.setattr(webapp.os, "_exit", fake_exit)
+    r = client.post("/api/restart", headers=_h(token))
+    assert r.status_code == 200
+    assert called.wait(3)  # 1 秒后被调度调用

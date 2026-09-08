@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stow · 配置台</title>
+<style>
+:root{
+  --bg:#161311;--panel:#1f1b17;--panel2:#28221c;--line:#3a322a;
+  --text:#efe8df;--sub:#a89c8c;--faint:#6f6355;
+  --amber:#e8a33d;--amber-dim:#b57f2e;--ok:#7fb069;--bad:#d96c4f;
+  --mono:ui-monospace,'Cascadia Mono',Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:15px/1.6 system-ui,'Segoe UI',sans-serif;min-height:100vh}
+.wrap{max-width:760px;margin:0 auto;padding:32px 20px 60px}
+.brand{display:flex;align-items:baseline;gap:12px;margin-bottom:6px}
+.brand h1{font-size:30px;letter-spacing:2px;font-weight:800;color:var(--amber)}
+.brand small{color:var(--faint);font-family:var(--mono);font-size:12px}
+.tagline{color:var(--sub);font-size:13px;margin-bottom:28px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px;margin-bottom:16px}
+.card h2{font-size:13px;letter-spacing:2px;color:var(--amber);margin-bottom:4px;font-family:var(--mono)}
+.card .desc{color:var(--sub);font-size:12.5px;margin-bottom:16px}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:13px;color:var(--sub);margin-bottom:5px}
+.field label code{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:6px}
+.field input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  color:var(--text);padding:9px 12px;font-size:14px;outline:none}
+.field input:focus{border-color:var(--amber-dim)}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.btn{border:0;border-radius:8px;padding:10px 20px;font-size:14px;cursor:pointer;font-weight:600}
+.btn.primary{background:var(--amber);color:#221a0d}
+.btn.primary:hover{background:#f0b055}
+.btn.ghost{background:transparent;border:1px solid var(--line);color:var(--sub)}
+.btn.ghost:hover{color:var(--text)}
+.btn.danger{background:transparent;border:1px solid var(--bad);color:var(--bad)}
+.btn:disabled{opacity:.5;cursor:default}
+.actions{display:flex;gap:10px;margin-top:6px}
+.msg{border-radius:8px;padding:10px 14px;font-size:13.5px;margin-bottom:14px;display:none}
+.msg.err{background:rgba(217,108,79,.12);color:var(--bad);display:block}
+.msg.ok{background:rgba(127,176,105,.12);color:var(--ok);display:block}
+.msg.warn{background:rgba(232,163,61,.12);color:var(--amber);display:block}
+.statusline{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--sub)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--faint);flex:none}
+.dot.ok{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.dot.bad{background:var(--bad)}
+.missing{color:var(--amber);font-size:12.5px;margin-top:8px;font-family:var(--mono)}
+#login{max-width:380px;margin:12vh auto 0}
+.hidden{display:none}
+.pwd-note{font-size:12px;color:var(--amber);margin-top:8px}
+code.inline{font-family:var(--mono);background:var(--panel2);padding:1px 6px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body>
+<div id="login" class="wrap">
+  <div class="brand"><h1>STOW</h1><small>config</small></div>
+  <p class="tagline">网盘媒体管理工具 · 配置台</p>
+  <div class="card">
+    <h2>登录</h2>
+    <div class="desc">首次部署默认账号 admin / admin</div>
+    <div class="msg" id="login-msg"></div>
+    <div class="field"><label>用户名</label><input id="login-user" autocomplete="username"></div>
+    <div class="field"><label>密码</label><input id="login-pass" type="password" autocomplete="current-password"></div>
+    <button class="btn primary" style="width:100%" onclick="doLogin()">登 录</button>
+  </div>
+</div>
+
+<div id="main" class="wrap hidden">
+  <div class="brand"><h1>STOW</h1><small id="ver">config</small></div>
+  <p class="tagline">网盘媒体管理工具 · 配置台</p>
+
+  <div class="card">
+    <h2>服务状态</h2>
+    <div class="statusline"><span class="dot" id="dot"></span><span id="st-text">加载中…</span></div>
+    <div class="missing" id="st-missing"></div>
+  </div>
+
+  <div class="card">
+    <h2>推送配置</h2>
+    <div class="desc">Telegram Bot 与元数据;全部保存后需重启生效</div>
+    <div class="msg" id="cfg-msg"></div>
+    <div class="field"><label>Bot Token<code>tg_bot_token</code></label><input id="f-tg_bot_token" autocomplete="off"></div>
+    <div class="row">
+      <div class="field"><label>频道 Chat ID<code>tg_chat_id</code></label><input id="f-tg_chat_id"></div>
+      <div class="field"><label>管理员用户 ID<code>tg_admin_ids</code></label><input id="f-tg_admin_ids" placeholder="逗号分隔,如 123,456"></div>
+    </div>
+    <div class="field"><label>TMDB API Key<code>tmdb_api_key</code></label><input id="f-tmdb_api_key" autocomplete="off"></div>
+    <div class="field"><label>代理地址(可选)<code>proxy_url</code></label><input id="f-proxy_url" placeholder="http://IP:7897,仅 TG/TMDB 走;115 恒直连"></div>
+    <div class="actions">
+      <button class="btn primary" onclick="saveConfig()">保存配置</button>
+      <button class="btn ghost" onclick="restart()">保存并重启</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>账号</h2>
+    <div class="desc">修改 Web 登录凭据</div>
+    <div class="msg" id="acc-msg"></div>
+    <div class="pwd-note hidden" id="acc-warn">⚠ 当前仍在使用默认密码 admin/admin,请尽快修改</div>
+    <div class="field"><label>当前密码</label><input id="acc-cur" type="password" autocomplete="current-password"></div>
+    <div class="row">
+      <div class="field"><label>新用户名(可选)</label><input id="acc-user" autocomplete="username"></div>
+      <div class="field"><label>新密码(可选,≥6位)</label><input id="acc-pass" type="password" autocomplete="new-password"></div>
+    </div>
+    <button class="btn ghost" onclick="saveAccount()">修改账号</button>
+  </div>
+
+  <div class="actions" style="justify-content:space-between">
+    <span style="color:var(--faint);font-size:12px" id="who"></span>
+    <button class="btn danger" onclick="logout()">退出登录</button>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let TOKEN=localStorage.getItem('stow_token')||'';
+
+async function api(path,body,method){
+  const r=await fetch('/api/'+path,{method:method||(body?'POST':'GET'),
+    headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
+    body:body?JSON.stringify(body):undefined});
+  if(r.status===401){localStorage.removeItem('stow_token');showLogin();throw new Error('登录已过期');}
+  const d=await r.json().catch(()=>({detail:'响应异常'}));
+  if(!r.ok)throw new Error(d.detail||r.statusText);
+  return d;
+}
+function showLogin(){$('login').classList.remove('hidden');$('main').classList.add('hidden');}
+function showMain(){$('login').classList.add('hidden');$('main').classList.remove('hidden');}
+
+async function doLogin(){
+  const m=$('login-msg');m.className='msg';
+  try{
+    const d=await api('login',{username:$('login-user').value.trim(),password:$('login-pass').value});
+    TOKEN=d.token;localStorage.setItem('stow_token',TOKEN);
+    await enter();
+  }catch(e){m.className='msg err';m.textContent=e.message;}
+}
+$('login-pass').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+
+async function enter(){
+  showMain();
+  const [cfg,st,acc]=await Promise.all([api('config'),api('status'),api('account')]);
+  const FIELDS=['tg_bot_token','tg_chat_id','tg_admin_ids','tmdb_api_key','proxy_url'];
+  for(const k of FIELDS){const v=cfg[k];$('f-'+k).value=Array.isArray(v)?v.join(','):v;}
+  $('who').textContent='当前账号:'+acc.username;
+  $('acc-warn').classList.toggle('hidden',!acc.default_password);
+  renderStatus(st);
+}
+function renderStatus(st){
+  const dot=$('dot'),txt=$('st-text'),miss=$('st-missing');
+  if(st.bot_running){dot.className='dot ok';txt.textContent='Bot 运行中';}
+  else if(!st.bot_ready){dot.className='dot bad';txt.textContent='Bot 未启动(配置不全)';}
+  else{dot.className='dot bad';txt.textContent='Bot 未运行'+(st.bot_error?':'+st.bot_error:'');}
+  miss.textContent=st.missing.length?('待补齐:\n'+st.missing.join('\n')):'';
+}
+async function refreshStatus(){try{renderStatus(await api('status'))}catch(e){}}
+
+async function saveConfig(){
+  const m=$('cfg-msg');m.className='msg';
+  const values={
+    tg_bot_token:$('f-tg_bot_token').value, tg_chat_id:$('f-tg_chat_id').value,
+    tg_admin_ids:$('f-tg_admin_ids').value, tmdb_api_key:$('f-tmdb_api_key').value,
+    proxy_url:$('f-proxy_url').value};
+  try{
+    const d=await api('config',{values},'PUT');
+    m.className=d.bot_ready?'msg ok':'msg warn';
+    m.textContent=d.bot_ready?'已保存,配置齐全。重启后 Bot 即启动。':'已保存,但仍有缺项:'+d.missing.join(';');
+    refreshStatus();
+  }catch(e){m.className='msg err';m.textContent=e.message;}
+}
+
+async function restart(){
+  try{
+    await api('config',{values:{
+      tg_bot_token:$('f-tg_bot_token').value, tg_chat_id:$('f-tg_chat_id').value,
+      tg_admin_ids:$('f-tg_admin_ids').value, tmdb_api_key:$('f-tmdb_api_key').value,
+      proxy_url:$('f-proxy_url').value}},'PUT');
+    await api('restart',{});
+    const m=$('cfg-msg');m.className='msg ok';m.textContent='已保存,服务重启中…约 5 秒后本页自动恢复。';
+    setTimeout(()=>location.reload(),6000);
+  }catch(e){const m=$('cfg-msg');m.className='msg err';m.textContent=e.message;}
+}
+
+async function saveAccount(){
+  const m=$('acc-msg');m.className='msg';
+  try{
+    const d=await api('account',{current_password:$('acc-cur').value,
+      new_username:$('acc-user').value,new_password:$('acc-pass').value},'PUT');
+    m.className='msg ok';m.textContent='已修改,当前账号:'+d.username;
+    $('acc-cur').value=$('acc-user').value=$('acc-pass').value='';
+    $('who').textContent='当前账号:'+d.username;
+    $('acc-warn').classList.add('hidden');
+  }catch(e){m.className='msg err';m.textContent=e.message;}
+}
+
+function logout(){localStorage.removeItem('stow_token');TOKEN='';showLogin();}
+
+// 自动登录
+(async()=>{ if(!TOKEN)return showLogin();
+  try{await enter()}catch(e){showLogin()} })();
+</script>
+</body>
+</html>
