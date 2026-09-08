@@ -85,7 +85,11 @@ class StowBot:
         await self._handle(update, link)
 
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        uid = update.effective_user.id if update.effective_user else None
+        text = update.effective_message.text or ""
+        logger.info("收到消息 from=%s: %s", uid, text[:50].replace("\n", " "))
         if not self._is_admin(update):
+            logger.warning("非管理员(uid=%s,配置=%s),忽略", uid, self.cfg.tg_admin_ids)
             return
         text = update.effective_message.text or ""
         links = parse_links(text)
@@ -93,6 +97,7 @@ class StowBot:
             link = parse_single(text)
             links = [link] if link else []
         if not links:
+            logger.info("消息中未识别到 115 链接,忽略")
             return
         if len(links) == 1:
             await self._handle(update, links[0])
