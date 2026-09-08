@@ -29,6 +29,14 @@ class Config:
         return Path(self.data_dir) / "logs"
 
 
+def _clean(value: object) -> str:
+    """清洗配置值:去空白;含非 ASCII(如中文占位符)视为未填写。"""
+    s = str(value or "").strip()
+    if not s or not s.isascii():
+        return ""
+    return s
+
+
 def load_config(path: str | Path | None = None) -> Config:
     path = Path(path or DEFAULT_CONFIG_PATH)
     if not path.exists():
@@ -42,11 +50,11 @@ def load_config(path: str | Path | None = None) -> Config:
         sys.exit(f"[stow] 配置文件不是合法 JSON:{exc}")
 
     cfg = Config(
-        tg_bot_token=str(raw.get("tg_bot_token", "")).strip(),
-        tg_chat_id=str(raw.get("tg_chat_id", "")).strip(),
+        tg_bot_token=_clean(raw.get("tg_bot_token")),
+        tg_chat_id=_clean(raw.get("tg_chat_id")),
         tg_admin_ids=[int(x) for x in raw.get("tg_admin_ids", []) if str(x).strip().lstrip("-").isdigit()],
-        tmdb_api_key=str(raw.get("tmdb_api_key", "")).strip(),
-        proxy_url=str(raw.get("proxy_url", "")).strip(),
+        tmdb_api_key=_clean(raw.get("tmdb_api_key")),
+        proxy_url=_clean(raw.get("proxy_url")),
         data_dir=str(raw.get("data_dir", "./data")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
     )

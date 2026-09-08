@@ -156,3 +156,22 @@ def test_fmt_size():
     assert fmt_size(500) == "500B"
     assert fmt_size(2048) == "2.00KB"
     assert fmt_size(5 * 1024**3).startswith("5.00GB")
+
+
+# ── 配置清洗 ────────────────────────────────────────────────
+def test_config_placeholder_rejected(tmp_path, capsys):
+    import json as _json
+
+    import pytest as _pytest
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({
+        "tg_bot_token": "123456:ABC-你的BotToken",  # 中文占位符
+        "tg_chat_id": "-100123",
+        "tg_admin_ids": [1],
+        "tmdb_api_key": "你的TMDB v3 key",
+    }), encoding="utf-8")
+    with _pytest.raises(SystemExit):
+        from app.config import load_config
+        load_config(p)
+    out = capsys.readouterr().out
+    assert "tg_bot_token" in out
