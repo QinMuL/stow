@@ -118,26 +118,32 @@ class StowBot:
         status = await msg.reply_text(f"{prefix}⏳ 正在读取分享…")
         try:
             files = await self.reader.read_share(link)
+            logger.info("分享读取完成:%s → %d 个文件", link.code, len(files))
         except ShareNeedCode as exc:
             tip = (
                 "访问码被分享者修改"
                 if exc.code_changed
                 else "该分享需要访问码,请在链接中带上 ?password= 或正文注明"
             )
+            logger.warning("分享 %s 需要访问码(code_changed=%s)", link.code, exc.code_changed)
             await status.edit_text(f"{prefix}🔐 {tip}")
             return
         except ShareDead:
+            logger.warning("分享 %s 已失效", link.code)
             await status.edit_text(f"{prefix}💀 分享已失效或被取消")
             return
         except (ShareRateLimited, ShareSnapshotting) as exc:
+            logger.warning("分享 %s 限速/快照中:%s", link.code, exc)
             await status.edit_text(f"{prefix}⏳ {exc},稍后重试")
             return
         except ShareError as exc:
+            logger.error("分享 %s 读取失败:%s", link.code, exc, exc_info=True)
             await status.edit_text(f"{prefix}❌ {exc}")
             return
 
         media = aggregate([(f.name, f.size, f.is_dir) for f in files])
         match = await self.tmdb.match(media) if self.tmdb else None
+        logger.info("TMDB 匹配:%s → %s", media.title[:40], match.title if match else "未命中")
         caption = card.render(media, match, link)
 
         try:

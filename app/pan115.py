@@ -189,16 +189,29 @@ class Pan115Reader:
         from p115client.tool import share_iterdir_walk
 
         client = self._get_client()
-        files: list[ShareFile] = []
-        try:
-            for item in await asyncio.to_thread(
-                list, share_iterdir_walk(client, link.code, link.password or "")
-            ):
-                name = str(item.get("n") or item.get("name") or "")
-                if not name:
+
+        def _walk_files() -> list[ShareFile]:
+            """share_iterdir_walk 为 os.walk 风格:yield (目录路径, 子目录列表, 文件字典列表)。"""
+            out: list[ShareFile] = []
+            for entry in share_iterdir_walk(client, link.code, link.password or ""):
+                if isinstance(entry, tuple):
+                    file_dicts = entry[2] if len(entry) >= 3 else []
+                elif isinstance(entry, dict):
+                    file_dicts = [entry]
+                else:
                     continue
-                size = int(item.get("s") or item.get("size") or 0)
-                files.append(ShareFile(name, size, "fid" not in item and not size))
+                for item in file_dicts or []:
+                    name = str(item.get("n") or item.get("name") or "")
+                    if not name:
+                        continue
+                    size = int(item.get("s") or item.get("size") or 0)
+                    out.append(ShareFile(name, size, False))
+            return out
+
+        try:
+            files = await asyncio.wait_for(asyncio.to_thread(_walk_files), timeout=60)
+        except TimeoutError as exc:
+            raise ShareError("读取分享超时(60s),稍后重试") from exc
         except Exception as exc:  # noqa: BLE001 - p115client 各种异常归一
             msg = str(exc)
             if "4100008" in msg or "4100012" in msg or "访问码" in msg:
