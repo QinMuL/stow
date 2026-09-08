@@ -33,15 +33,19 @@ class TmdbMatch:
 class TmdbClient:
     def __init__(self, api_key: str, proxy: str = "") -> None:
         self._key = api_key
+        # v4 token(ey 开头的 JWT)用 Bearer;v3 key(32位)走 api_key 参数
+        self._bearer = api_key if api_key.startswith("eyJ") else ""
+        headers = {"Authorization": f"Bearer {api_key}"} if self._bearer else {}
         self._client = httpx.AsyncClient(
-            timeout=15, proxy=proxy or None,
-            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15, proxy=proxy or None, headers=headers,
         )
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
     async def _get(self, path: str, params: dict) -> dict | None:
+        if not self._bearer:
+            params = {**params, "api_key": self._key}
         try:
             r = await self._client.get(f"{_API}{path}", params=params)
             r.raise_for_status()

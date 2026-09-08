@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-_YEAR_RE = re.compile(r"(?:^|[\s.\[])((?:19|20)\d{2})(?=[\s.\]\)]|$)")
+_YEAR_RE = re.compile(r"(?:^|[\s.\[(])((?:19|20)\d{2})(?=[\s.\]\)]|$)")
 _SE_RE = re.compile(r"S(\d{1,2})\s*E(\d{1,4})", re.IGNORECASE)
 _SE_RANGE_RE = re.compile(r"S(\d{1,2})\s*E(\d{1,4})\s*[-~]\s*E?(\d{1,4})", re.IGNORECASE)
 _SEASON_ONLY_RE = re.compile(r"(?:^|[\s.\[])S(\d{1,2})(?![\dEe])", re.IGNORECASE)
