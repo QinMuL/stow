@@ -1,0 +1,16 @@
+[project]
+name = "stow"
+version = "0.1.0"
+description = "Stow — 网盘媒体管理工具(阶段一:推卡链)"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"

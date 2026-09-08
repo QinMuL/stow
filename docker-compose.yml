@@ -1,0 +1,8 @@
+services:
+  stow:
+    image: ghcr.io/qinmul/stow:latest   # GitHub Actions 构建发布
+    container_name: stow
+    restart: unless-stopped
+    network_mode: host        # 直达宿主代理;Bot 无端口监听
+    volumes:
+      - ./data:/app/data      # config.json 与 stow.db、日志都持久化在此

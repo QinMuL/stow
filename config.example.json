@@ -1,0 +1,9 @@
+{
+  "tg_bot_token": "123456:ABC-你的BotToken",
+  "tg_chat_id": "-1001234567890",
+  "tg_admin_ids": [123456789],
+  "tmdb_api_key": "你的TMDB v3 key",
+  "proxy_url": "",
+  "data_dir": "./data",
+  "log_level": "INFO"
+}
