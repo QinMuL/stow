@@ -52,8 +52,8 @@ def test_parse_single_ignores_short_words():
 
 
 @pytest.mark.asyncio
-async def test_snap_wraps_transport_error(monkeypatch):
-    """HTTP 层错误(405 风控封禁等)须包成 ShareError,否则 bot 状态消息会卡死。"""
+async def test_snap_transport_error_downgrades(monkeypatch):
+    """share_snap HTTP 层失败(405 风控等)须降级返回 None,由枚举兜底,不让链路卡死。"""
     monkeypatch.setattr(pan, "_HTTP_RETRY_WAIT", 0.0)
     r = pan.Pan115Reader()
 
@@ -61,9 +61,7 @@ async def test_snap_wraps_transport_error(monkeypatch):
         raise RuntimeError("HTTP Error 405: Method Not Allowed")
 
     monkeypatch.setattr(r, "_call", boom)
-    with pytest.raises(pan.ShareError) as ei:
-        await r._snap("abc12345xyz", "")
-    assert "405" in str(ei.value)
+    assert await r._snap("abc12345xyz", "") is None
 
 
 # ── 文件名解析(guessit 引擎) ──────────────────────────────

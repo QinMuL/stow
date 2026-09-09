@@ -149,7 +149,12 @@ class Pan115Reader:
         return await asyncio.to_thread(fn, *args, **kwargs)
 
     # -- 原始快照(带 margin/快照/HTTP 层重试) --------------------------
-    async def _snap(self, code: str, password: str) -> dict:
+    async def _snap(self, code: str, password: str) -> dict | None:
+        """取分享快照做校验(死链/访问码/状态)。
+
+        返回 None = share_snap 端点不可用(HTTP 层失败,如 405 风控),
+        调用方降级为直接枚举,校验交给枚举结果兜底。
+        """
         from p115client.util import share_extract_payload
 
         payload = dict(share_extract_payload(code))
@@ -158,10 +163,10 @@ class Pan115Reader:
         for attempt in range(1, _MAX_RETRY + 1):
             try:
                 resp = await self._call(client.share_snap, payload, async_=False)
-            except Exception as exc:  # noqa: BLE001 - HTTP 层错误(如 405 风控封禁)归一重试
-                # 不包成 ShareError 会让 bot 的状态消息卡死在"正在读取分享…"
+            except Exception as exc:  # noqa: BLE001 - HTTP 层错误归一重试
                 if attempt == _MAX_RETRY:
-                    raise ShareError(f"115 接口异常:{str(exc)[:120]}") from exc
+                    print(f"[stow] share_snap 不可用({str(exc)[:80]}),降级直接枚举")
+                    return None
                 print(f"[stow] 115 接口异常({exc}),重试 {attempt}/{_MAX_RETRY}")
                 await asyncio.sleep(_HTTP_RETRY_WAIT * attempt)
                 continue
@@ -180,20 +185,21 @@ class Pan115Reader:
     async def read_share(self, link: ShareLink) -> list[ShareFile]:
         """读取分享全部文件(递归扁平化)。失败抛分类异常。"""
         resp = await self._snap(link.code, link.password or "")
-        errno = resp.get("errno") or resp.get("errNo")
-        if resp.get("state") is False:
-            if errno in (4100008, 4100012):
-                raise ShareNeedCode(code_changed=(errno == 4100008))
-            msg = str(resp.get("error") or resp)
-            if "正在生成文件快照" in msg:
-                raise ShareSnapshotting("分享正在生成文件快照,稍后重试")
-            if errno in (4100009, 4100010) or "失效" in msg or "取消" in msg:
-                raise ShareDead("分享已失效或被取消")
-            raise ShareError(f"分享读取失败:{msg[:120]}")
+        if resp is not None:
+            errno = resp.get("errno") or resp.get("errNo")
+            if resp.get("state") is False:
+                if errno in (4100008, 4100012):
+                    raise ShareNeedCode(code_changed=(errno == 4100008))
+                msg = str(resp.get("error") or resp)
+                if "正在生成文件快照" in msg:
+                    raise ShareSnapshotting("分享正在生成文件快照,稍后重试")
+                if errno in (4100009, 4100010) or "失效" in msg or "取消" in msg:
+                    raise ShareDead("分享已失效或被取消")
+                raise ShareError(f"分享读取失败:{msg[:120]}")
 
-        data = resp.get("data") or {}
-        if data.get("share_state") == 7:
-            raise ShareDead("分享已失效")
+            data = resp.get("data") or {}
+            if data.get("share_state") == 7:
+                raise ShareDead("分享已失效")
 
         from p115client.tool import share_iterdir_walk
 
@@ -232,7 +238,7 @@ class Pan115Reader:
             # 大分享分页多(cooldown 0.5s/页),超时按分享规模放宽
             files = await asyncio.wait_for(asyncio.to_thread(_walk_files), timeout=180)
         except TimeoutError as exc:
-            raise ShareError("读取分享超时(60s),稍后重试") from exc
+            raise ShareError("读取分享超时(180s),稍后重试") from exc
         except Exception as exc:  # noqa: BLE001 - p115client 各种异常归一
             msg = str(exc)
             if "4100008" in msg or "4100012" in msg or "访问码" in msg:
@@ -241,5 +247,5 @@ class Pan115Reader:
                 raise ShareDead("分享已失效") from exc
             raise ShareError(f"读取分享列表失败:{msg[:120]}") from exc
         if not files:
-            raise ShareError("分享内容为空(可能仍在生成快照,稍后重试)")
+            raise ShareError("分享内容为空(可能仍在生成快照,或 115 风控限流,稍后重试)")
         return files
