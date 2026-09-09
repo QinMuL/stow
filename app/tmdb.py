@@ -144,16 +144,21 @@ class TmdbClient:
             return None
         return _normalize(data, media_type)
 
-    async def fetch_image(self, url: str) -> bytes | None:
-        """下载图片(走配置代理)。send_photo 用 URL 会让 Telegram 服务器拉图,
-        实测 TMDB 图源常超时;改为本地经代理取字节再发,链路可控。"""
-        try:
-            r = await self._client.get(url)
-            r.raise_for_status()
-            return r.content
-        except httpx.HTTPError as exc:
-            logger.warning("图片下载失败 %s: %s", url, exc)
-            return None
+    async def fetch_image(self, url: str, attempts: int = 2) -> bytes | None:
+        """下载图片(走配置代理,幂等 GET 失败重试一次)。
+
+        send_photo 用 URL 会让 Telegram 服务器拉图,实测 TMDB 图源常超时;
+        改为本地经代理取字节再发,链路可控。"""
+        for attempt in range(1, attempts + 1):
+            try:
+                r = await self._client.get(url)
+                r.raise_for_status()
+                return r.content
+            except httpx.HTTPError as exc:  # httpx 异常 str 常为空,带上类型名
+                logger.warning(
+                    "图片下载失败(%s: %s)第 %d/%d 次", type(exc).__name__, exc, attempt, attempts
+                )
+        return None
 
 
 def _filter_candidates(

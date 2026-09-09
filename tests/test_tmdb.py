@@ -82,6 +82,41 @@ def test_image_url_prefers_backdrop():
     assert image_url({}) is None
 
 
+@pytest.mark.asyncio
+async def test_fetch_image_retries_transient_error():
+    """海报下载遇瞬时错误应重试(GET 幂等),两次都失败才放弃。"""
+    import httpx
+
+    client = TmdbClient("k" * 32)
+    calls = {"n": 0}
+
+    class _Resp:
+        content = b"img-bytes"
+
+        def raise_for_status(self) -> None:
+            pass
+
+    class _Stub:
+        async def get(self, url):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ReadTimeout("")
+            return _Resp()
+
+    client._client = _Stub()
+    assert await client.fetch_image("https://x/y.jpg") == b"img-bytes"
+    assert calls["n"] == 2
+
+    class _Dead:
+        async def get(self, url):
+            calls["n"] += 1
+            raise httpx.ConnectError("")
+
+    client._client = _Dead()
+    assert await client.fetch_image("https://x/y.jpg") is None
+    assert calls["n"] == 4  # 又试了两次
+
+
 # ── 详情归一化 ──────────────────────────────────────────────
 def _raw_tv():
     return {

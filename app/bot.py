@@ -35,6 +35,10 @@ from app.tmdb import TmdbClient, image_url
 
 logger = logging.getLogger(__name__)
 
+
+class DeliveryUncertain(Exception):
+    """投递超时:消息可能已送达,重试/回退都会重复投递,只能让用户核实。"""
+
 _HELP = (
     "📦 Stow · 媒体推送\n\n"
     "直接发送 115 分享链接(可带访问码;一条消息多个链接会逐个处理)\n"
@@ -54,10 +58,20 @@ class StowBot:
 
     # ── 装配 ────────────────────────────────────────────────
     def build(self) -> Application:
-        builder = Application.builder().token(self.cfg.tg_bot_token)
-        if self.cfg.proxy_url:
-            builder = builder.proxy(self.cfg.proxy_url).get_updates_proxy(self.cfg.proxy_url)
-        builder = builder.concurrent_updates(True)
+        from telegram.request import HTTPXRequest
+
+        proxy = self.cfg.proxy_url or None
+        builder = (
+            Application.builder()
+            .token(self.cfg.tg_bot_token)
+            # PTB 默认发送读写超时仅 5s,经代理发媒体经常超时;放宽(超时根因)
+            .request(HTTPXRequest(
+                proxy=proxy, connect_timeout=10, read_timeout=30,
+                write_timeout=30, media_write_timeout=60,
+            ))
+            .get_updates_request(HTTPXRequest(proxy=proxy, connect_timeout=10, read_timeout=15))
+            .concurrent_updates(True)
+        )
         app = builder.build()
         app.add_handler(CommandHandler("start", self._cmd_help))
         app.add_handler(CommandHandler("help", self._cmd_help))
@@ -177,6 +191,11 @@ class StowBot:
 
         try:
             await self._deliver(media, details, link, files)
+        except DeliveryUncertain as exc:
+            # 不标记已推送:若实际没送达,用户重发链接即可重推
+            logger.warning("投递超时(结果不确定):%s", exc)
+            await status.edit_text(f"{prefix}⚠️ {exc}")
+            return
         except Exception as exc:  # noqa: BLE001 - 投递失败保留状态可重试
             logger.error("卡片投递失败:%s", exc, exc_info=exc)
             await status.edit_text(f"{prefix}❌ 投递失败:{str(exc)[:120]}")
@@ -188,20 +207,17 @@ class StowBot:
         label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
         await status.edit_text(f"{prefix}✅ 已推送 · {n} 文件 · {label}")
 
-    # ── 频道投递(串行 + flood/超时重试;有海报 send_photo 失败回退纯文本) ──
+    # ── 频道投递(串行;仅 RetryAfter 重试——超时重试会重复投递) ──
     async def _send_with_retry(self, sender) -> None:
         for attempt in range(3):
             try:
                 await sender()
                 return
-            except (RetryAfter, TimedOut) as exc:
+            except RetryAfter as exc:
                 if attempt == 2:
                     raise
-                wait = getattr(exc, "retry_after", 3) + 1
-                logger.warning(
-                    "投递受限/超时(%s),%ss 后重试(第 %d 次)", type(exc).__name__, wait, attempt + 1
-                )
-                await asyncio.sleep(wait)
+                logger.warning("Flood control,%ss 后重试(第 %d 次)", exc.retry_after, attempt + 1)
+                await asyncio.sleep(exc.retry_after + 1)
 
     async def _deliver(self, media, details: dict | None, link, files) -> None:
         async with self._push_lock:
@@ -225,6 +241,11 @@ class StowBot:
                     ))
                     await asyncio.sleep(2)  # 限速
                     return
+                except TimedOut as exc:
+                    # 超时≠失败:消息可能已送达,重试/回退都会造成重复投递
+                    raise DeliveryUncertain(
+                        "投递超时,消息可能已送达,请到频道核实"
+                    ) from exc
                 except Exception as exc:  # noqa: BLE001 - 海报发送失败回退纯文本
                     logger.warning("send_photo 失败,回退纯文本:%s", exc)
             text = card.render_text(media, details, link, files)
