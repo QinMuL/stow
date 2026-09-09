@@ -48,12 +48,12 @@ def test_config_get_masks_sensitive(tmp_path):
     token = _login(client)
     client.put(
         "/api/config",
-        json={"values": {"tg_bot_token": "T0KEN", "tg_chat_id": "-1001"}},
+        json={"values": {"tg_bot_token": "T0KEN", "proxy_url": "http://127.0.0.1:7897"}},
         headers=_h(token),
     )
     r = client.get("/api/config", headers=_h(token))
     assert r.json()["tg_bot_token"] == "••••••••"  # 已设置 → 掩码
-    assert r.json()["tg_chat_id"] == "-1001"       # 非敏感 → 明文
+    assert r.json()["proxy_url"] == "http://127.0.0.1:7897"  # 非敏感 → 明文
 
 
 def test_config_put_masked_keeps_old(tmp_path):
@@ -74,7 +74,7 @@ def test_config_put_reports_missing(tmp_path):
     r = client.put("/api/config", json={"values": {"tg_bot_token": "t"}}, headers=_h(token))
     body = r.json()
     assert body["success"] is True and body["bot_ready"] is False
-    assert any("tg_chat_id" in m for m in body["missing"])
+    assert any("tg_admin_ids" in m for m in body["missing"])
 
 
 def test_config_admin_ids_parsing(tmp_path):

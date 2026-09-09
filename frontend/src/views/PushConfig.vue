@@ -72,7 +72,6 @@ async function save(restart) {
     for (const g of GROUPS) {
       for (const f of g.fields) values[f.key] = model.value[f.key]
     }
-    // 不提交 tg_chat_id:默认频道 UI 已移除,后端保留原值作兜底
     const d = await api('config', { values }, 'PUT')
     if (restart) {
       await api('restart', {})

@@ -260,6 +260,16 @@ class StowBot:
         if self.store.is_pushed(link.key):
             await msg.reply_text(f"{prefix}🔁 已推送过:{link.dedup_display}")
             return
+        label = _PRESET_LABEL[link.provider]
+        target = self.cfg.channel_for(link.provider)
+        if target is None:
+            # 未登记该归属:不推送,给出明确原因与登记指引
+            logger.warning("未配置%s,链接 %s 不推送", label, link.dedup_display)
+            await msg.reply_text(
+                f"{prefix}📭 尚未登记{label},该链接未推送。\n"
+                "登记方式:发 /bind 后转发频道消息选归属,或在全局配置页手动添加。"
+            )
+            return
         verb = "ed2k 链接" if link.provider == "ed2k" else "分享"
         status = await msg.reply_text(f"{prefix}⏳ 正在读取{verb}…")
         files, media = await self._load_media(link, status, prefix)
@@ -268,7 +278,6 @@ class StowBot:
         details = await self.tmdb.match(media) if self.tmdb else None
         logger.info("TMDB 匹配:%s → %s", media.title[:40], details["title"] if details else "未命中")
 
-        target = self.cfg.channel_for(link.provider)
         try:
             await self._deliver(media, details, link, files, target)
         except DeliveryUncertain as exc:

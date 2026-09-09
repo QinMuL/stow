@@ -32,14 +32,14 @@ class ChannelConfig:
 @dataclass
 class Config:
     tg_bot_token: str = ""
-    tg_chat_id: str = ""  # 默认频道(未匹配到预设时的兜底,兼容旧配置)
     tg_admin_ids: list[int] = field(default_factory=list)
     tmdb_api_key: str = ""
     proxy_url: str = ""
     # 115 登录 cookie(可选):读分享走 android/proapi 通道,绕开 115 对匿名
     # webapi share_snap 的指纹封锁(405);留空则匿名 web 兜底
     pan115_cookie: str = ""
-    # 多频道:归属预设分流(115 链接 → preset=115 的频道;ed2k → preset=ed2k)
+    # 多频道:归属预设分流(115 链接 → preset=115 的频道;ed2k → preset=ed2k)。
+    # 未登记某归属时,该类链接不推送,日志与 Bot 明确提示原因
     channels: list[ChannelConfig] = field(default_factory=list)
     data_dir: str = "./data"
     log_level: str = "INFO"
@@ -61,8 +61,6 @@ class Config:
         out = []
         if not self.tg_bot_token:
             out.append("tg_bot_token 未填写(Bot 无法启动)")
-        if not self.tg_chat_id:
-            out.append("tg_chat_id 未填写(卡片无处投递)")
         if not self.tg_admin_ids:
             out.append("tg_admin_ids 未填写(无人能使用 Bot)")
         if not self.tmdb_api_key:
@@ -73,23 +71,21 @@ class Config:
         fatal = (p for p in self.problems() if "tmdb" not in p)
         return not next(fatal, None)
 
-    def channel_for(self, provider: str) -> str:
-        """按链接类型选频道:命中归属预设用之;否则回退默认 tg_chat_id。"""
+    def channel_for(self, provider: str) -> str | None:
+        """按链接类型选归属频道;未登记该归属返回 None(调用方提示,不推送)。"""
         for ch in self.channels:
             if ch.preset == provider:
                 return ch.chat_id
-        return self.tg_chat_id
+        return None
 
     def channels_summary(self) -> str:
-        """启动日志用:默认频道 + 归属分流一览。"""
-        parts = [f"默认频道={self.tg_chat_id or '未配置'}"]
-        if self.channels:
-            for ch in self.channels:
-                name = f"({ch.title})" if ch.title else ""
-                parts.append(f"{ch.preset}→{ch.chat_id}{name}")
-        else:
-            parts.append("归属频道:未登记(全部走默认)")
-        return ";".join(parts)
+        """启动日志用:归属分流一览。"""
+        if not self.channels:
+            return "归属频道:未登记(收到链接将提示先登记)"
+        return ";".join(
+            f"{ch.preset}→{ch.chat_id}" + (f"({ch.title})" if ch.title else "")
+            for ch in self.channels
+        )
 
 
 def _clean(value: object) -> str:
@@ -146,7 +142,6 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
 
     cfg = Config(
         tg_bot_token=_clean(raw.get("tg_bot_token")),
-        tg_chat_id=_clean(raw.get("tg_chat_id")),
         tg_admin_ids=[int(x) for x in raw.get("tg_admin_ids", []) if str(x).strip().lstrip("-").isdigit()],
         tmdb_api_key=_clean(raw.get("tmdb_api_key")),
         proxy_url=_clean(raw.get("proxy_url")),
@@ -178,12 +173,12 @@ def ensure_admin(cfg_path: str | Path | None = None) -> None:
     if raw.get("admin_username") and raw.get("admin_password_hash"):
         return
     raw.setdefault("tg_bot_token", "")
-    raw.setdefault("tg_chat_id", "")
     raw.setdefault("tg_admin_ids", [])
     raw.setdefault("tmdb_api_key", "")
     raw.setdefault("proxy_url", "")
     raw.setdefault("pan115_cookie", "")
     raw.setdefault("channels", [])
+    raw.pop("tg_chat_id", None)  # 默认频道概念已移除,旧配置顺手清理
     raw["admin_username"] = auth.DEFAULT_ADMIN_USER
     raw["admin_password_hash"] = auth.hash_password(auth.DEFAULT_ADMIN_PASSWORD)
     write_raw(raw, path)

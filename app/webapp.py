@@ -123,7 +123,7 @@ class ChannelsUpdate(BaseModel):
 
 # 可经 Web 修改的配置键白名单(类型: s=字符串, i=整数, ids=ID 列表)
 EDITABLE = {
-    "tg_bot_token": "s", "tg_chat_id": "s", "tg_admin_ids": "ids",
+    "tg_bot_token": "s", "tg_admin_ids": "ids",
     "tmdb_api_key": "s", "proxy_url": "s", "log_level": "s", "web_port": "i",
     "pan115_cookie": "s",
 }
@@ -304,7 +304,6 @@ def create_app(config_path: str | Path) -> FastAPI:
         _current_user(config_path, _auth_header(request))
         cfg = load_config(config_path)
         return {
-            "default_chat_id": cfg.tg_chat_id,
             "channels": [
                 {"chat_id": c.chat_id, "preset": c.preset, "title": c.title}
                 for c in cfg.channels

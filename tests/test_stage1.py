@@ -87,11 +87,11 @@ def test_card_ed2k_footer():
 def test_channel_routing_preset():
     from app.config import ChannelConfig, Config
 
-    cfg = Config(tg_chat_id="-100default")
-    assert cfg.channel_for("115") == "-100default"  # 无登记:回退默认
+    cfg = Config()
+    assert cfg.channel_for("115") is None  # 未登记归属:None(不推送,提示登记)
     cfg.channels = [ChannelConfig(chat_id="-100A", preset="ed2k")]
     assert cfg.channel_for("ed2k") == "-100A"
-    assert cfg.channel_for("115") == "-100default"  # 115 未登记仍走默认
+    assert cfg.channel_for("115") is None
 
 
 @pytest.mark.asyncio
@@ -441,7 +441,6 @@ def test_config_placeholder_rejected(tmp_path, capsys):
     p = tmp_path / "config.json"
     p.write_text(_json.dumps({
         "tg_bot_token": "123456:ABC-你的BotToken",  # 中文占位符
-        "tg_chat_id": "-100123",
         "tg_admin_ids": [1],
         "tmdb_api_key": "你的TMDB v3 key",
     }), encoding="utf-8")
