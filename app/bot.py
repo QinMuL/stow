@@ -7,7 +7,7 @@ import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import RetryAfter
+from telegram.error import RetryAfter, TimedOut
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -188,17 +188,20 @@ class StowBot:
         label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
         await status.edit_text(f"{prefix}✅ 已推送 · {n} 文件 · {label}")
 
-    # ── 频道投递(串行 + flood 退避;有海报 send_photo 失败回退纯文本) ──
+    # ── 频道投递(串行 + flood/超时重试;有海报 send_photo 失败回退纯文本) ──
     async def _send_with_retry(self, sender) -> None:
         for attempt in range(3):
             try:
                 await sender()
                 return
-            except RetryAfter as exc:
+            except (RetryAfter, TimedOut) as exc:
                 if attempt == 2:
                     raise
-                logger.warning("Flood control,%ss 后重试(第 %d 次)", exc.retry_after, attempt + 1)
-                await asyncio.sleep(exc.retry_after + 1)
+                wait = getattr(exc, "retry_after", 3) + 1
+                logger.warning(
+                    "投递受限/超时(%s),%ss 后重试(第 %d 次)", type(exc).__name__, wait, attempt + 1
+                )
+                await asyncio.sleep(wait)
 
     async def _deliver(self, media, details: dict | None, link, files) -> None:
         async with self._push_lock:
@@ -207,7 +210,11 @@ class StowBot:
                 markup = InlineKeyboardMarkup(
                     [[InlineKeyboardButton("📚 TMDB 详情", url=card.tmdb_url(details))]]
                 )
-            photo = image_url(details) if details else None
+            # 海报字节本地经代理下载(URL 直发依赖 Telegram 拉图,易超时)
+            photo = None
+            url = image_url(details) if details else None
+            if url and self.tmdb:
+                photo = await self.tmdb.fetch_image(url)
             if photo:
                 caption = card.render_caption(media, details, link, files)
                 try:

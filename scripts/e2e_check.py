@@ -58,7 +58,9 @@ async def main() -> None:
             markup = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("📚 TMDB 详情", url=card.tmdb_url(details))]]
             )
-        photo = image_url(details) if details else None
+        # 与生产一致:本地经代理取字节再发(URL 直发依赖 Telegram 拉图,易超时)
+        url = image_url(details) if details else None
+        photo = await tmdb.fetch_image(url) if url else None
         if photo:
             sent = await bot.send_photo(
                 cfg.tg_chat_id, photo=photo, caption=caption,
