@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter
 from telegram.ext import (
@@ -174,10 +174,9 @@ class StowBot:
         )
         details = await self.tmdb.match(media) if self.tmdb else None
         logger.info("TMDB 匹配:%s → %s", media.title[:40], details["title"] if details else "未命中")
-        caption = card.render(media, details, link, files)
 
         try:
-            await self._deliver(caption, details)
+            await self._deliver(media, details, link, files)
         except Exception as exc:  # noqa: BLE001 - 投递失败保留状态可重试
             logger.error("卡片投递失败:%s", exc, exc_info=exc)
             await status.edit_text(f"{prefix}❌ 投递失败:{str(exc)[:120]}")
@@ -189,26 +188,44 @@ class StowBot:
         label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
         await status.edit_text(f"{prefix}✅ 已推送 · {n} 文件 · {label}")
 
-    # ── 频道投递(串行 + flood 退避) ─────────────────────────
-    async def _deliver(self, caption: str, details: dict | None) -> None:
+    # ── 频道投递(串行 + flood 退避;有海报 send_photo 失败回退纯文本) ──
+    async def _send_with_retry(self, sender) -> None:
+        for attempt in range(3):
+            try:
+                await sender()
+                return
+            except RetryAfter as exc:
+                if attempt == 2:
+                    raise
+                logger.warning("Flood control,%ss 后重试(第 %d 次)", exc.retry_after, attempt + 1)
+                await asyncio.sleep(exc.retry_after + 1)
+
+    async def _deliver(self, media, details: dict | None, link, files) -> None:
         async with self._push_lock:
-            poster = image_url(details) if details else None
-            for _ in range(3):
+            markup = None
+            if details and details.get("tmdb_id"):
+                markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("📚 TMDB 详情", url=card.tmdb_url(details))]]
+                )
+            photo = image_url(details) if details else None
+            if photo:
+                caption = card.render_caption(media, details, link, files)
                 try:
-                    if poster:
-                        await self._bot_ref.send_photo(
-                            self.cfg.tg_chat_id, photo=poster,
-                            caption=caption, parse_mode=ParseMode.HTML,
-                        )
-                    else:
-                        await self._bot_ref.send_message(
-                            self.cfg.tg_chat_id, caption, parse_mode=ParseMode.HTML,
-                        )
+                    await self._send_with_retry(lambda: self._bot_ref.send_photo(
+                        self.cfg.tg_chat_id, photo=photo,
+                        caption=caption, parse_mode=ParseMode.HTML,
+                        reply_markup=markup,
+                    ))
                     await asyncio.sleep(2)  # 限速
                     return
-                except RetryAfter as exc:
-                    await asyncio.sleep(exc.retry_after + 1)
-            raise RuntimeError("连续触发限流,投递失败")
+                except Exception as exc:  # noqa: BLE001 - 海报发送失败回退纯文本
+                    logger.warning("send_photo 失败,回退纯文本:%s", exc)
+            text = card.render_text(media, details, link, files)
+            await self._send_with_retry(lambda: self._bot_ref.send_message(
+                self.cfg.tg_chat_id, text, parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            ))
+            await asyncio.sleep(2)  # 限速
 
     _bot_ref = None  # run() 时注入
 

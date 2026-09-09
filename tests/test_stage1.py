@@ -174,30 +174,112 @@ def _details(**kw):
 
 
 def test_card_with_match():
-    m = analyze_share(_files("测试剧.2024.S01E01.1080p.mkv"))
-    text = card.render(m, _details(), ShareLink("abc12345", "ef12"), _files("测试剧.2024.S01E01.1080p.mkv"))
-    assert "测试剧" in text and "(2024)" in text
-    assert "★ 8.7" in text
-    assert "1080P" in text
+    m = analyze_share(_files("测试剧.2024.S01E01.1080p.WEB-DL.mkv"))
+    fs = _files("测试剧.2024.S01E01.1080p.WEB-DL.mkv")
+    text = card.render_caption(m, _details(), ShareLink("abc12345", "ef12"), fs)
+    assert "测试剧" in text and "2024" in text
+    assert "✨ 评分：8.7" in text
+    assert "💿 画质：" in text and "1080P" in text and "WEB-DL" in text
+    assert "🗂️ 季集：" in text and "📋 集数：" in text
+    assert "⚙️ 状态：连载中" in text
     assert "https://115.com/s/abc12345?password=ef12" in text
-    assert "<code>ef12</code>" in text
     assert len(text) <= 1024
 
 
 def test_card_without_match():
     m = analyze_share(_files("神秘资源.2026.mkv"))
-    text = card.render(m, None, ShareLink("abc12345"), _files("神秘资源.2026.mkv"))
+    text = card.render_caption(m, None, ShareLink("abc12345"), _files("神秘资源.2026.mkv"))
     assert "神秘资源" in text
     assert "TMDB 未匹配" in text
-    assert "https://115.com/s/abc12345</code>" not in text  # 无码链接纯文本
+    assert "https://115.com/s/abc12345" in text
 
 
 def test_card_caption_fits_limit():
     names = [f"Show.2024.S01E{i:02d}.1080p.WEB-DL.Some.Release.Group.mkv" for i in range(1, 40)]
     m = analyze_share(_files(*names))
-    text = card.render(m, _details(), ShareLink("abc12345", "ef12"), _files(*names))
+    text = card.render_caption(m, _details(), ShareLink("abc12345", "ef12"), _files(*names))
     assert len(text) <= 1024
-    assert text.endswith("https://115.com/s/abc12345?password=ef12")
+    assert "https://115.com/s/abc12345?password=ef12" in text
+    assert "</blockquote>" in text  # 链接模块完整保留
+
+
+def test_card_caption_binary_search_huge_share():
+    # 300 文件的大分享:二分截文件项数,仍保住链接
+    names = [f"Show.S01E{i:04d}.2024.1080p.WEB-DL.x265-GROUP.mkv" for i in range(1, 301)]
+    files = [ShareFile(n, 1024**3, False) for n in names]
+    m = analyze_share(files)
+    text = card.render_caption(m, _details(), ShareLink("abc12345"), files)
+    assert len(text) <= 1024
+    assert "https://115.com/s/abc12345" in text
+    assert "已显示前" in text  # 文件清单被截断
+
+
+def test_card_text_fits_4096():
+    names = [f"Show.2024.S01E{i:02d}.1080p.WEB-DL.Some.Release.Group.mkv" for i in range(1, 200)]
+    d = _details(overview="超长简介。" * 800)
+    text = card.render_text(
+        analyze_share(_files(*names)), d, ShareLink("abc12345", "ef12"), _files(*names)
+    )
+    assert len(text) <= 4096
+    assert "https://115.com/s/abc12345?password=ef12" in text
+
+
+def test_card_escapes_html():
+    m = analyze_share(_files("Movie.2025.mkv"))
+    d = _details(media_type="movie", title="毒<药> & 谎言", overview="<script>x</script>")
+    text = card.render_caption(m, d, ShareLink("abc12345"))
+    assert "<script>" not in text and "&lt;script&gt;" in text
+
+
+def test_card_country_flag():
+    m = analyze_share(_files("Movie.2025.mkv"))
+    d = _details(media_type="movie", countries=["US", "JP"])
+    text = card.render_caption(m, d, ShareLink("abc12345"))
+    assert "🇺🇸 美国" in text and "🇯🇵 日本" in text
+
+
+# ── 季集范围合并 / TMDB 重分配 ─────────────────────────────
+def test_merge_ranges():
+    assert card._merge_ranges([1, 2, 3, 5, 6]) == [(1, 3), (5, 6)]
+    assert card._merge_ranges([7]) == [(7, 7)]
+    assert card._format_ranges([(1, 3), (5, 5)]) == "E01-E03、E05"
+
+
+def test_reallocate_by_tmdb():
+    # TMDB:S1=40集 S2=60集;全局集号 1..100 → 按季范围拆分
+    tmdb_seasons = [
+        {"season": 1, "episode_count": 40, "name": "S1"},
+        {"season": 2, "episode_count": 60, "name": "S2"},
+    ]
+    out = card._reallocate_by_tmdb(list(range(1, 101)), tmdb_seasons)
+    assert out == {1: list(range(1, 41)), 2: list(range(41, 101))}
+
+
+def test_season_block_reallocates_global_eps():
+    # 文件名只有 S01E001-S01E0100(全局集号),TMDB 两季 → 重分配展示
+    names = [f"航海王.S01E{i:04d}.1080p.mkv" for i in range(1, 101)]
+    m = analyze_share(_files(*names))
+    d = _details(
+        seasons=[
+            {"season": 1, "episode_count": 61, "name": "第1季"},
+            {"season": 2, "episode_count": 39, "name": "第2季"},
+        ],
+        number_of_episodes=100,
+    )
+    block = card._render_season_block(d, m)
+    assert "S01 E01-E61 | S02 E62-E100" in block
+
+
+def test_file_sort_key_season_dirs():
+    files = [
+        ShareFile("zeta.mkv", 1, False),
+        ShareFile("Season 2", 0, True),
+        ShareFile("Season 10", 0, True),
+        ShareFile("剧名 {tmdb-123}", 0, True),
+        ShareFile("普通目录", 0, True),
+    ]
+    names = [f.name for f in sorted(files, key=card._file_sort_key)]
+    assert names == ["剧名 {tmdb-123}", "普通目录", "Season 2", "Season 10", "zeta.mkv"]
 
 
 # ── 去重 ────────────────────────────────────────────────────
