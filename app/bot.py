@@ -208,11 +208,15 @@ class StowBot:
         await status.edit_text(f"{prefix}✅ 已推送 · {n} 文件 · {label}")
 
     # ── 频道投递(串行;仅 RetryAfter 重试——超时重试会重复投递) ──
-    async def _send_with_retry(self, sender) -> None:
+    async def _send_with_retry(self, sender):
+        """发送并返回 Message;记 message_id 便于事后撤卡。"""
         for attempt in range(3):
             try:
-                await sender()
-                return
+                sent = await sender()
+                mid = getattr(sent, "message_id", None)
+                if mid:
+                    logger.info("已投递到频道 message_id=%s", mid)
+                return sent
             except RetryAfter as exc:
                 if attempt == 2:
                     raise
