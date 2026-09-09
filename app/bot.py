@@ -384,5 +384,5 @@ def run(cfg: Config, store: Store, config_path: str | None = None) -> None:
     bot = StowBot(cfg, store, config_path)
     app = bot.build()
     bot._bot_ref = app.bot
-    logger.info("Stow Bot 启动(token 已配置,目标频道 %s)", cfg.tg_chat_id)
+    logger.info("Stow Bot 启动(token 已配置;%s)", cfg.channels_summary())
     app.run_polling(bootstrap_retries=-1)

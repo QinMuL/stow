@@ -80,6 +80,17 @@ class Config:
                 return ch.chat_id
         return self.tg_chat_id
 
+    def channels_summary(self) -> str:
+        """启动日志用:默认频道 + 归属分流一览。"""
+        parts = [f"默认频道={self.tg_chat_id or '未配置'}"]
+        if self.channels:
+            for ch in self.channels:
+                name = f"({ch.title})" if ch.title else ""
+                parts.append(f"{ch.preset}→{ch.chat_id}{name}")
+        else:
+            parts.append("归属频道:未登记(全部走默认)")
+        return ";".join(parts)
+
 
 def _clean(value: object) -> str:
     """清洗配置值:去空白;含非 ASCII(如中文占位符)视为未填写。"""

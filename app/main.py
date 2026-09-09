@@ -63,7 +63,7 @@ def main() -> None:
     _start_web(cfg.web_port, config_path)
 
     if cfg.bot_ready():
-        logger.info("配置齐全,启动 Bot(频道 %s)", cfg.tg_chat_id)
+        logger.info("配置齐全,启动 Bot(%s)", cfg.channels_summary())
         _run_bot(config_path)
         # Bot 退出(异常/令牌失效)不拖垮 Web:保活等待,网页可查原因、改配置
         logger.error("Bot 已退出——Web 配置台保持运行,可在总览页查看原因、修改配置后重启")
