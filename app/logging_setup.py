@@ -1,4 +1,4 @@
-"""日志:控制台(INFO)+ 文件(DEBUG,按大小轮转,保留 7 天)。"""
+"""日志:控制台(INFO)+ 文件(DEBUG,按大小轮转 5MB×10 份,硬上限约 55MB)。"""
 
 from __future__ import annotations
 
