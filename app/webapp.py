@@ -5,8 +5,11 @@ Web 永远在线(哪怕 Bot 配置不全),用户在网页补齐配置后一键�
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 import threading
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -30,6 +33,53 @@ STATE = {"bot_running": False, "bot_error": ""}
 
 _STATIC = Path(__file__).parent.parent / "static" / "index.html"
 _bearer_lock = threading.Lock()
+
+# ── 链路健康探测(带 TTL 缓存,避免页面刷新打爆外部服务) ────
+_PROXY_TTL = 60.0    # 代理探测:60s
+_PAN115_TTL = 300.0  # cookie 校验:5min(真实请求 115)
+_health_cache: dict = {"proxy": (0.0, None), "pan115": (0.0, None)}
+_UID_RE = re.compile(r"UID=(\d+)")
+
+
+async def _check_proxy(proxy_url: str) -> dict:
+    """经配置代理探测 api.telegram.org(Bot 的实际依赖);返回可达性与延迟。"""
+    import httpx
+
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(proxy=proxy_url or None, timeout=5) as c:
+            await c.get("https://api.telegram.org")
+        return {
+            "configured": bool(proxy_url), "url": proxy_url, "ok": True,
+            "latency_ms": round((time.monotonic() - t0) * 1000), "error": "",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "configured": bool(proxy_url), "url": proxy_url, "ok": False,
+            "latency_ms": None, "error": str(exc)[:80],
+        }
+
+
+def _check_pan115(cookie: str) -> dict:
+    """校验 115 cookie 是否仍有效(user_info 实测);未配置返回匿名模式。"""
+    if not cookie:
+        return {"cookie_set": False, "uid": None, "ok": None, "error": ""}
+    m = _UID_RE.search(cookie)
+    if m is None:
+        return {"cookie_set": True, "uid": None, "ok": False, "error": "cookie 中无 UID,格式可疑"}
+    uid = int(m.group(1))
+    try:
+        from p115client import P115Client
+
+        client = P115Client(cookie, app="android")
+        resp = client.user_info(uid, async_=False)
+        ok = bool(resp and resp.get("state") is not False and resp.get("data"))
+        return {
+            "cookie_set": True, "uid": uid, "ok": ok,
+            "error": "" if ok else str(resp.get("error") or "账号校验失败")[:80],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"cookie_set": True, "uid": uid, "ok": False, "error": str(exc)[:80]}
 
 
 def get_store_path(request: Request) -> Path:
@@ -177,14 +227,23 @@ def create_app(config_path: str | Path) -> FastAPI:
 
     # ── 状态 / 历史 / 重启 ──────────────────────────────────
     @app.get("/api/status")
-    def status(request: Request) -> dict:
+    async def status(request: Request) -> dict:
         _current_user(config_path, _auth_header(request))
         cfg = load_config(config_path)
+        now = time.monotonic()
+        if now - _health_cache["proxy"][0] > _PROXY_TTL:
+            _health_cache["proxy"] = (now, await _check_proxy(cfg.proxy_url))
+        if now - _health_cache["pan115"][0] > _PAN115_TTL:
+            _health_cache["pan115"] = (
+                now, await asyncio.to_thread(_check_pan115, cfg.pan115_cookie)
+            )
         return {
             "bot_running": STATE["bot_running"],
             "bot_error": STATE["bot_error"],
             "bot_ready": cfg.bot_ready(),
             "missing": cfg.problems(),
+            "proxy": _health_cache["proxy"][1],
+            "pan115": _health_cache["pan115"][1],
         }
 
     @app.get("/api/history")

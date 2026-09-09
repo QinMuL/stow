@@ -155,3 +155,13 @@ a { color: var(--amber); text-decoration: none; }
   .stat-row { grid-template-columns: 1fr; }
   .grid2 { grid-template-columns: 1fr; }
 }
+
+/* 链路健康行(总览页) */
+.dot.warn { background: var(--amber); box-shadow: 0 0 8px rgba(232,163,61,.6); }
+.health-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.health-row:last-child { border-bottom: none; padding-bottom: 0; }
+.health-row:first-of-type { padding-top: 4px; }
+.health-row .dot { margin-top: 5px; }
+.health-name { width: 76px; flex: none; color: var(--sub); font-size: 13px; padding-top: 1px; }
+.health-text { flex: 1; font-size: 13.5px; }
+.health-sub { color: var(--sub); font-size: 12px; margin-top: 3px; font-family: var(--mono); word-break: break-all; }

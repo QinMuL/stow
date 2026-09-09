@@ -32,9 +32,9 @@ class Store:
         self._conn.commit()
 
     def recent(self, limit: int = 20) -> list[dict]:
-        """最近推送(新→旧)。"""
+        """最近推送(新→旧)。同时间戳按写入顺序决胜(Windows 时钟精度粗,连推会同戳)。"""
         rows = self._conn.execute(
-            "SELECT code, title, pushed_at FROM pushed ORDER BY pushed_at DESC LIMIT ?",
+            "SELECT code, title, pushed_at FROM pushed ORDER BY pushed_at DESC, rowid DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [{"code": c, "title": t or c, "pushed_at": ts} for c, t, ts in rows]

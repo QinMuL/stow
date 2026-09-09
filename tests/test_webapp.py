@@ -118,13 +118,24 @@ def test_account_wrong_current(tmp_path):
 
 
 # ── 状态 ────────────────────────────────────────────────────
-def test_status_reports_missing(tmp_path):
+def test_status_reports_missing(tmp_path, monkeypatch):
+    import app.webapp as web
+
+    async def fake_proxy(url):
+        return {"configured": bool(url), "url": url, "ok": True, "latency_ms": 1, "error": ""}
+
+    monkeypatch.setattr(web, "_check_proxy", fake_proxy)
+    web._health_cache.update({"proxy": (0.0, None), "pan115": (0.0, None)})
+
     client = _client(tmp_path)
     token = _login(client)
     body = client.get("/api/status", headers=_h(token)).json()
     assert body["bot_running"] is False
     assert body["bot_ready"] is False
     assert len(body["missing"]) >= 3
+    # 链路健康:代理探测(桩) + 115 未配置 cookie → 匿名模式
+    assert body["proxy"]["ok"] is True
+    assert body["pan115"] == {"cookie_set": False, "uid": None, "ok": None, "error": ""}
 
 
 # ── 重启(不真退) ───────────────────────────────────────────
