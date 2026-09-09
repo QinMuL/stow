@@ -85,8 +85,33 @@ async def test_read_share_walk_onerror_and_dirs(monkeypatch):
     files = await r.read_share(pan.ShareLink("abc12345xyz"))
     assert kwargs.get("onerror") is True
     assert kwargs.get("cooldown") == 1.0
+    assert kwargs.get("app") == "web"  # 无 cookie 走匿名 web 通道
     assert pan.ShareFile("Season 1", 0, True) in files  # 目录被收集
     assert pan.ShareFile("a.S01E01.mkv", 1024, False) in files
+
+
+@pytest.mark.asyncio
+async def test_read_share_cookie_uses_app_channel(monkeypatch):
+    """有 cookie 走 android/proapi 通道(绕开 115 对匿名 webapi share_snap 的指纹封锁)。"""
+    import p115client.tool as ptool
+
+    kwargs: dict = {}
+
+    def fake_walk(client, code, pwd, **kw):
+        kwargs.update(kw)
+        yield (0, [], [{"n": "Movie.2025.mkv", "s": 1}])
+
+    monkeypatch.setattr(ptool, "share_iterdir_walk", fake_walk)
+    r = pan.Pan115Reader("UID=123456; CID=abc; SEID=def")
+    assert r.logged_in
+
+    async def snap_none(code, pwd):
+        return None
+
+    monkeypatch.setattr(r, "_snap", snap_none)
+    files = await r.read_share(pan.ShareLink("abc12345xyz"))
+    assert kwargs.get("app") == "android"
+    assert len(files) == 1
 
 
 # ── 文件名解析(guessit 引擎) ──────────────────────────────

@@ -48,7 +48,7 @@ class StowBot:
         self.cfg = cfg
         self.store = store
         self.config_path = config_path
-        self.reader = Pan115Reader()
+        self.reader = Pan115Reader(cfg.pan115_cookie)
         self.tmdb = TmdbClient(cfg.tmdb_api_key, cfg.proxy_url) if cfg.tmdb_api_key else None
         self._push_lock = asyncio.Lock()  # 投递串行,防 flood
 

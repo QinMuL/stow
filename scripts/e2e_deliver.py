@@ -25,7 +25,6 @@ async def main() -> None:
 
     cfg = load_config("/app/data/config.json", strict=False)
     bot = StowBot(cfg, Store(Path("/app/data/stow.db")))
-
     tg = Bot(token=cfg.tg_bot_token, request=HTTPXRequest(proxy=cfg.proxy_url) or None)
     await tg.initialize()
     bot._bot_ref = tg  # 与 run() 相同的注入方式

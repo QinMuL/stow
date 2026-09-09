@@ -65,6 +65,7 @@ class ConfigUpdate(BaseModel):
 EDITABLE = {
     "tg_bot_token": "s", "tg_chat_id": "s", "tg_admin_ids": "ids",
     "tmdb_api_key": "s", "proxy_url": "s", "log_level": "s", "web_port": "i",
+    "pan115_cookie": "s",
 }
 
 

@@ -16,7 +16,7 @@ DEFAULT_CONFIG_PATH = "./data/config.json"
 DEFAULT_WEB_PORT = 8686
 
 # 敏感键:Web 展示脱敏;PUT 收到掩码值表示"未修改"
-SENSITIVE_KEYS = ("tg_bot_token", "tmdb_api_key")
+SENSITIVE_KEYS = ("tg_bot_token", "tmdb_api_key", "pan115_cookie")
 MASK = "••••••••"
 
 
@@ -27,6 +27,9 @@ class Config:
     tg_admin_ids: list[int] = field(default_factory=list)
     tmdb_api_key: str = ""
     proxy_url: str = ""
+    # 115 登录 cookie(可选):读分享走 android/proapi 通道,绕开 115 对匿名
+    # webapi share_snap 的指纹封锁(405);留空则匿名 web 兜底
+    pan115_cookie: str = ""
     data_dir: str = "./data"
     log_level: str = "INFO"
     web_port: int = DEFAULT_WEB_PORT
@@ -108,6 +111,7 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         tg_admin_ids=[int(x) for x in raw.get("tg_admin_ids", []) if str(x).strip().lstrip("-").isdigit()],
         tmdb_api_key=_clean(raw.get("tmdb_api_key")),
         proxy_url=_clean(raw.get("proxy_url")),
+        pan115_cookie=_clean(raw.get("pan115_cookie")),
         data_dir=str(raw.get("data_dir", "./data")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         web_port=int(raw.get("web_port", DEFAULT_WEB_PORT) or DEFAULT_WEB_PORT),
@@ -138,6 +142,7 @@ def ensure_admin(cfg_path: str | Path | None = None) -> None:
     raw.setdefault("tg_admin_ids", [])
     raw.setdefault("tmdb_api_key", "")
     raw.setdefault("proxy_url", "")
+    raw.setdefault("pan115_cookie", "")
     raw["admin_username"] = auth.DEFAULT_ADMIN_USER
     raw["admin_password_hash"] = auth.hash_password(auth.DEFAULT_ADMIN_PASSWORD)
     write_raw(raw, path)

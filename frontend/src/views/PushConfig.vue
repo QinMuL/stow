@@ -14,6 +14,7 @@ const FIELDS = [
   { key: 'tg_admin_ids', label: '管理员用户 ID', hint: '逗号分隔,如 123,456', list: true },
   { key: 'tmdb_api_key', label: 'TMDB API Key', hint: 'themoviedb.org 免费申请;留空则卡片无元数据', sensitive: true },
   { key: 'proxy_url', label: '代理地址(可选)', hint: '仅 TG/TMDB 走;115 恒直连' },
+  { key: 'pan115_cookie', label: '115 Cookie(可选)', hint: '浏览器登录 115 后 F12 复制;填后走稳定通道读分享', sensitive: true },
 ]
 
 const model = ref({})

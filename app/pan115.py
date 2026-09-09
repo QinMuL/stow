@@ -13,6 +13,7 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass
+from functools import partial
 
 # ── 链接解析 ────────────────────────────────────────────────
 _115_URL_RE = re.compile(
@@ -127,17 +128,32 @@ def share_url(link: ShareLink) -> str:
 
 
 class Pan115Reader:
-    """匿名读取 115 分享(p115client 同步调用,to_thread 包裹)。"""
+    """读 115 分享(双通道;同步调用 to_thread 包裹)。
 
-    def __init__(self) -> None:
+    - 有 cookie:android/proapi 通道(share_snap_app)。115 已按请求指纹封锁匿名
+      webapi share_snap(同参数 urllib 200/库请求 405,2026-08 旧项目实测),
+      proapi 不受影响;代价:读他人分享每目录最多 1000 条(结构化分享不受影响)。
+    - 无 cookie:匿名 web 通道兜底(易触发 405/margin 风控)。
+    """
+
+    def __init__(self, cookie: str = "") -> None:
+        self._cookie = (cookie or "").strip()
         self._client = None
         self._last_request = 0.0
+
+    @property
+    def logged_in(self) -> bool:
+        return bool(self._cookie)
 
     def _get_client(self):
         if self._client is None:
             from p115client import P115Client
 
-            self._client = P115Client("", app="web")
+            self._client = (
+                P115Client(self._cookie, app="android")
+                if self._cookie
+                else P115Client("", app="web")
+            )
         return self._client
 
     async def _call(self, fn, *args, **kwargs):
@@ -160,9 +176,14 @@ class Pan115Reader:
         payload = dict(share_extract_payload(code))
         payload["receive_code"] = password or payload.get("receive_code") or ""
         client = self._get_client()
+        snap_fn = (
+            partial(client.share_snap_app, app="android")
+            if self._cookie
+            else client.share_snap
+        )
         for attempt in range(1, _MAX_RETRY + 1):
             try:
-                resp = await self._call(client.share_snap, payload, async_=False)
+                resp = await self._call(snap_fn, payload, async_=False)
             except Exception as exc:  # noqa: BLE001 - HTTP 层错误归一重试
                 if attempt == _MAX_RETRY:
                     print(f"[stow] share_snap 不可用({str(exc)[:80]}),降级直接枚举")
@@ -213,6 +234,7 @@ class Pan115Reader:
             out: list[ShareFile] = []
             for entry in share_iterdir_walk(
                 client, link.code, link.password or "",
+                app="android" if self._cookie else "web",
                 cooldown=1.0,
                 onerror=True,  # 默认 False 会静默跳过列表失败的目录 → 漏季/漏文件
             ):
@@ -240,6 +262,11 @@ class Pan115Reader:
             files = await asyncio.wait_for(asyncio.to_thread(_walk_files), timeout=180)
         except TimeoutError as exc:
             raise ShareError("读取分享超时(180s),稍后重试") from exc
+        except KeyError as exc:
+            # 读取途中被 margin 限速:响应无 data,check_response 放行后取值炸
+            if str(exc) == "'data'":
+                raise ShareRateLimited("115 限速,读取中断,请稍后重试") from exc
+            raise ShareError(f"读取分享列表失败:{exc!r}") from exc
         except Exception as exc:  # noqa: BLE001 - p115client 各种异常归一
             msg = str(exc)
             if "4100008" in msg or "4100012" in msg or "访问码" in msg:

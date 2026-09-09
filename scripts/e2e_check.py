@@ -22,7 +22,7 @@ async def main() -> None:
 
     cfg = load_config("/app/data/config.json", strict=False)
     link = ShareLink(code, password)
-    files = await Pan115Reader().read_share(link)
+    files = await Pan115Reader(cfg.pan115_cookie).read_share(link)
     print(f"[1] 读分享 OK:{len(files)} 项,前 6 项:")
     for f in files[:6]:
         print(f"    {'DIR ' if f.is_dir else 'FILE'} {f.name}  {f.size}")
