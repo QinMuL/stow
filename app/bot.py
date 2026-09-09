@@ -61,6 +61,7 @@ class StowBot:
         self.reader = Pan115Reader(cfg.pan115_cookie)
         self.tmdb = TmdbClient(cfg.tmdb_api_key, cfg.proxy_url) if cfg.tmdb_api_key else None
         self._push_lock = asyncio.Lock()  # 投递串行,防 flood
+        self._pending_channels: dict[str, str] = {}  # 转发登记:chat_id → 标题(回调取)
 
     # ── 装配 ────────────────────────────────────────────────
     def build(self) -> Application:
@@ -99,16 +100,23 @@ class StowBot:
         if not self._is_admin(update):
             logger.warning("非管理员转发,忽略(uid=%s)", update.effective_user and update.effective_user.id)
             return
-        fwd = msg.forward_from_chat
+        # PTB v22:转发来源在 forward_origin(MessageOriginChannel.chat 才带来源频道)
+        origin = getattr(msg, "forward_origin", None)
+        fwd = getattr(origin, "chat", None) if origin is not None else None
         if fwd is None or fwd.type not in ("channel", "supergroup"):
-            await msg.reply_text("请转发**频道**里的消息(不是个人聊天)。")
+            await msg.reply_text(
+                "没识别到频道来源——请转发**频道里**的消息(不是个人聊天或匿名频道消息)。\n"
+                "若频道开了「隐藏成员/匿名」,任意一条带来源的频道消息都可以。"
+            )
             return
         chat_id = str(fwd.id)
-        title = fwd.title or chat_id
+        title = getattr(fwd, "title", "") or chat_id
+        # callback_data 上限 64 字节,长标题放不下 → 标题暂存内存,回调按 chat_id 取
+        self._pending_channels[chat_id] = title
         buttons = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("💿 115 网盘", callback_data=f"chreg:115:{chat_id}:{title}"),
-                InlineKeyboardButton("🔗 ed2k", callback_data=f"chreg:ed2k:{chat_id}:{title}"),
+                InlineKeyboardButton("💿 115 网盘", callback_data=f"chreg:115:{chat_id}"),
+                InlineKeyboardButton("🔗 ed2k", callback_data=f"chreg:ed2k:{chat_id}"),
             ]
         ])
         await msg.reply_text(f"频道「{title}」({chat_id})登记到哪个归属?", reply_markup=buttons)
@@ -119,13 +127,14 @@ class StowBot:
         if query is None or not self._is_admin(update):
             return
         try:
-            _, preset, chat_id, title = query.data.split(":", 3)
+            _, preset, chat_id = query.data.split(":", 2)
         except ValueError:
             await query.answer("参数错误")
             return
         if preset not in _PRESET_LABEL:
             await query.answer("未知归属")
             return
+        title = self._pending_channels.get(chat_id, chat_id)
 
         from app.config import read_raw, write_raw
 
