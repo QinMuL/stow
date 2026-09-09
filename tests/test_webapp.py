@@ -8,7 +8,11 @@ from app.webapp import create_app
 
 
 def _client(tmp_path):
-    return TestClient(create_app(tmp_path / "config.json"))
+    import json as _json
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path)}), encoding="utf-8")
+    return TestClient(create_app(p))
 
 
 def _login(client, username="admin", password="admin") -> str:
