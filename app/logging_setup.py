@@ -28,3 +28,4 @@ def setup_logging(level: str, log_dir: Path) -> None:
     root.addHandler(file_handler)
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)  # httpx 底层传输,不压会刷 DEBUG 海量请求日志

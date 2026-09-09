@@ -4,7 +4,7 @@ import { api } from '../api'
 
 const files = ref([])
 const current = ref('stow.log')
-const level = ref('')
+const level = ref('INFO') // 默认 INFO+,DEBUG 噪音需手动放开
 const q = ref('')
 const items = ref([])
 const truncated = ref(false)
