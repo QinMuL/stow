@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -47,8 +48,10 @@ _HELP = (
     "📦 Stow · 媒体推送\n\n"
     "直接发送 115 分享链接或 ed2k 链接(一条消息多个会逐个处理)\n"
     "或使用:/push <链接>\n\n"
-    "📁 登记推送频道:把频道里的任意一条消息**转发**给本 Bot,"
-    "再按提示选归属(115 网盘 / ed2k)即可,无需重启\n"
+    "📁 登记推送频道(二选一):\n"
+    "① 先发 /bind,5 分钟内把频道里的任意一条消息转发给本 Bot\n"
+    "② 转发时在附言里写 /bind(随时有效)\n"
+    "弹出面板选归属(115 网盘 / ed2k),即时生效;✖ 可取消\n\n"
     "Bot 会读取分享 → 匹配 TMDB → 按链接类型推到对应频道。"
 )
 
@@ -61,7 +64,8 @@ class StowBot:
         self.reader = Pan115Reader(cfg.pan115_cookie)
         self.tmdb = TmdbClient(cfg.tmdb_api_key, cfg.proxy_url) if cfg.tmdb_api_key else None
         self._push_lock = asyncio.Lock()  # 投递串行,防 flood
-        self._pending_channels: dict[str, str] = {}  # 转发登记:chat_id → 标题(回调取)
+        self._pending_channels: dict[str, str] = {}  # 登记选择中:chat_id → 标题(回调取)
+        self._bind_wait: dict[int, float] = {}  # /bind 等待期:uid → 截止时间戳
 
     # ── 装配 ────────────────────────────────────────────────
     def build(self) -> Application:
@@ -83,6 +87,8 @@ class StowBot:
         app.add_handler(CommandHandler("start", self._cmd_help))
         app.add_handler(CommandHandler("help", self._cmd_help))
         app.add_handler(CommandHandler("push", self._cmd_push))
+        app.add_handler(CommandHandler("bind", self._cmd_bind))
+        app.add_handler(CommandHandler("bindcancel", self._cmd_bindcancel))
         app.add_handler(CallbackQueryHandler(self._on_channel_preset))
         # 频道消息:提示管理员用"转发给 Bot"登记(不再自动回填,多频道归属需人工选择)
         app.add_handler(
@@ -93,20 +99,45 @@ class StowBot:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
         return app
 
-    # ── 频道登记(转发给 Bot) ────────────────────────────────
-    async def _on_forward(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """管理员把频道消息转发给 Bot → 弹归属选择按钮,选定即登记(热生效)。"""
-        msg = update.effective_message
+    # ── 频道登记(/bind 引导 + 转发触发) ──────────────────────
+    async def _cmd_bind(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """进入登记等待期:5 分钟内转发频道消息即可触发归属选择。"""
         if not self._is_admin(update):
-            logger.warning("非管理员转发,忽略(uid=%s)", update.effective_user and update.effective_user.id)
+            await update.effective_message.reply_text("⛔ 仅管理员可用")
+            return
+        uid = update.effective_user.id
+        self._bind_wait[uid] = time.monotonic() + 300
+        await update.effective_message.reply_text(
+            "📁 频道登记模式已开启(5 分钟内有效)\n\n"
+            "现在把目标频道里的任意一条消息转发给我;\n"
+            "转发时也可以直接在附言里写 /bind,随时都能触发。\n\n"
+            "取消:点稍后弹出面板上的「✖ 取消」,或发 /bindcancel。"
+        )
+
+    async def _cmd_bindcancel(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        uid = update.effective_user.id
+        self._bind_wait.pop(uid, None)
+        await update.effective_message.reply_text("已退出登记模式。")
+
+    async def _on_forward(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """普通转发一律忽略;仅两种方式触发登记:附言含 /bind,或 /bind 等待期内。"""
+        msg = update.effective_message
+        uid = update.effective_user.id if update.effective_user else None
+        if uid is None or not self._is_admin(update):
+            return
+        caption = (msg.caption or msg.text or "").strip()
+        bind_via_caption = caption.startswith("/bind")
+        bind_via_wait = time.monotonic() < self._bind_wait.get(uid, 0.0)
+        if not (bind_via_caption or bind_via_wait):
+            logger.info("普通转发(无 /bind),忽略 uid=%s", uid)
             return
         # PTB v22:转发来源在 forward_origin(MessageOriginChannel.chat 才带来源频道)
         origin = getattr(msg, "forward_origin", None)
         fwd = getattr(origin, "chat", None) if origin is not None else None
         if fwd is None or fwd.type not in ("channel", "supergroup"):
             await msg.reply_text(
-                "没识别到频道来源——请转发**频道里**的消息(不是个人聊天或匿名频道消息)。\n"
-                "若频道开了「隐藏成员/匿名」,任意一条带来源的频道消息都可以。"
+                "没识别到频道来源——请转发**频道里**的消息(不是个人聊天)。\n"
+                "仍处于登记模式,可继续转发。"
             )
             return
         chat_id = str(fwd.id)
@@ -117,12 +148,13 @@ class StowBot:
             [
                 InlineKeyboardButton("💿 115 网盘", callback_data=f"chreg:115:{chat_id}"),
                 InlineKeyboardButton("🔗 ed2k", callback_data=f"chreg:ed2k:{chat_id}"),
-            ]
+            ],
+            [InlineKeyboardButton("✖ 取消", callback_data=f"chreg:cancel:{chat_id}")],
         ])
         await msg.reply_text(f"频道「{title}」({chat_id})登记到哪个归属?", reply_markup=buttons)
 
     async def _on_channel_preset(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """归属选择回调:写 config + 运行中热生效。"""
+        """归属选择回调:写 config + 运行中热生效;cancel 取消登记。"""
         query = update.callback_query
         if query is None or not self._is_admin(update):
             return
@@ -131,10 +163,16 @@ class StowBot:
         except ValueError:
             await query.answer("参数错误")
             return
+        title = self._pending_channels.pop(chat_id, chat_id)
+        if preset == "cancel":
+            uid = update.effective_user.id if update.effective_user else None
+            if uid is not None:
+                self._bind_wait.pop(uid, None)  # 同时退出登记模式
+            await query.edit_message_text(f"已取消「{title}」的登记。")
+            return
         if preset not in _PRESET_LABEL:
             await query.answer("未知归属")
             return
-        title = self._pending_channels.get(chat_id, chat_id)
 
         from app.config import read_raw, write_raw
 
@@ -165,7 +203,7 @@ class StowBot:
                     await ctx.bot.send_message(
                         self.cfg.tg_admin_ids[0],
                         f"Bot 已加入频道「{chat.title}」({chat.id})。\n"
-                        "把该频道里的任意一条消息转发给我,即可完成登记。",
+                        "发送 /bind 后,把该频道里的任意一条消息转发给我,即可完成登记。",
                     )
                 except (IndexError, Exception):  # noqa: BLE001 - 管理员不可达不阻塞
                     logger.info("无法私聊通知管理员,跳过")
@@ -191,8 +229,8 @@ class StowBot:
         await self._handle(update, link)
 
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        # 转发登记走 _on_forward;这里只响应私聊/群里的直接文本
-        if update.effective_user is None or update.effective_message.forward_from_chat:
+        # 转发登记走 _on_forward(FORWARDED 过滤器先匹配);这里只响应直接文本
+        if update.effective_user is None:
             return
         uid = update.effective_user.id
         text = update.effective_message.text or ""
