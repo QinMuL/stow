@@ -111,6 +111,13 @@ def test_release_group_noise_cleaned():
     assert p.release_group == "HDVWEB"
 
 
+def test_parse_quick_skips_guessit():
+    p = parse_filename("Show.2024.S02E05.1080p.WEB-DL.mkv", quick=True)
+    assert p.title == "" and p.year is None and p.release_group == ""
+    assert p.season == 2 and p.episode == 5  # 正则提取的字段不受影响
+    assert p.quality == "1080P"
+
+
 # ── 分享聚合 ────────────────────────────────────────────────
 def _files(*names, size=1024, is_dir=False):
     return [ShareFile(n, size, is_dir) for n in names]
@@ -148,6 +155,17 @@ def test_analyze_share_tmdb_id_from_dir():
 
 def test_analyze_share_none_when_empty():
     assert analyze_share([]) is None
+
+
+def test_analyze_share_sampling_large():
+    # 大分享只对前 8 个文件跑 guessit(标题/年份),季集/画质来自全体正则解析
+    names = [f"航海王.1999.S01E{i:04d}.1080p.WEB-DL.mkv" for i in range(1, 301)]
+    m = analyze_share(_files(*names))
+    assert m.title == "航海王" and m.year == 1999
+    assert m.episode_start == 1 and m.episode_end == 300
+    assert m.total_episodes == 300
+    assert m.quality == "1080P"
+    assert m.media_type == "tv"
 
 
 # ── 标题匹配 ────────────────────────────────────────────────

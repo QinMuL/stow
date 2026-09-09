@@ -331,24 +331,29 @@ def get_quality_info(text: str) -> list[str]:
 
 
 # ── 单文件解析 ─────────────────────────────────────────────
-def parse_filename(name: str) -> MediaData:
-    cleaned = clean_name(name)
-    try:
-        from guessit import guessit  # 惰性导入:首次解析才加载(~1s)
+def parse_filename(name: str, *, quick: bool = False) -> MediaData:
+    """解析单个文件名。
 
-        g = guessit(cleaned, {"expected_title": [], "type": "auto"})
-    except Exception:  # noqa: BLE001 - guessit 失败时退化为清洗名
-        g = {}
+    quick=True 跳过 guessit(标题/年份/发布组置空),只跑正则提季集/画质——
+    guessit 单次 ~90ms,千集分享全员解析要分钟级;大分享聚合只对抽样文件跑全量。
+    """
+    cleaned = clean_name(name)
+    g: dict = {}
+    if not quick:
+        try:
+            from guessit import guessit  # 惰性导入:首次解析才加载(~1s)
+
+            g = guessit(cleaned, {"expected_title": [], "type": "auto"})
+        except Exception:  # noqa: BLE001 - guessit 失败时退化为清洗名
+            g = {}
 
     def _first(v):
         if isinstance(v, list):
             return v[0] if v else None
         return v
 
-    title = _first(g.get("title")) or cleaned
-    title = str(title).strip()
-
-    year = _first(g.get("year"))
+    title = "" if quick else str(_first(g.get("title")) or cleaned).strip()
+    year = None if quick else _first(g.get("year"))
     year = int(year) if year else None
 
     # 季集检测在原始文件名上做(cleaned 已把 '-' 归一为空格,会破坏 E01-E12 范围)
@@ -363,7 +368,7 @@ def parse_filename(name: str) -> MediaData:
 
     media_type = "tv" if (season is not None or ep is not None) else "movie"
 
-    group = clean_release_group(str(_first(g.get("release_group")) or ""))
+    group = "" if quick else clean_release_group(str(_first(g.get("release_group")) or ""))
     return MediaData(
         title=title,
         year=year,
@@ -382,6 +387,9 @@ def parse_filename(name: str) -> MediaData:
 
 # ── 分享聚合 ───────────────────────────────────────────────
 _QUALITY_RANK = {"4K / 2160P": 4, "1080P": 3, "720P": 2, "480P": 1, "": 0}
+# 超过抽样的分享只对前 N 个文件跑 guessit(同一分享文件名结构一致,标题/年份由抽样定),
+# 其余文件 quick 正则解析(季集/画质),千集分享聚合从分钟级降到秒级
+_GUESSIT_SAMPLE = 8
 
 
 def analyze_share(files: list[ShareFile]) -> AggregatedMedia | None:
@@ -392,10 +400,14 @@ def analyze_share(files: list[ShareFile]) -> AggregatedMedia | None:
     if not candidates:
         return None
 
-    parsed = [parse_filename(f.name) for f in candidates]
+    sample = len(candidates) > _GUESSIT_SAMPLE
+    parsed = [
+        parse_filename(f.name, quick=sample and i >= _GUESSIT_SAMPLE)
+        for i, f in enumerate(candidates)
+    ]
 
     title = Counter(p.title for p in parsed if p.title).most_common(1)
-    title = title[0][0] if title else parsed[0].title
+    title = title[0][0] if title else clean_name(candidates[0].name)
 
     years = [p.year for p in parsed if p.year]
     year = years[0] if years else None
@@ -403,10 +415,10 @@ def analyze_share(files: list[ShareFile]) -> AggregatedMedia | None:
     has_tv = any(p.media_type == "tv" for p in parsed)
     media_type = "tv" if (has_tv or len(videos) > 1) else "movie"
 
-    # 季号聚合:视频文件名 + 目录名(如 "Season 4")
+    # 季号聚合:视频文件名 + 目录名(如 "Season 4");有视频时目录只需季号,quick 即可
     all_seasons: list[int] = [p.season for p in parsed if p.season is not None]
     for d in dirs:
-        ds = parse_filename(d.name).season
+        ds = parse_filename(d.name, quick=bool(videos)).season
         if ds is not None:
             all_seasons.append(ds)
     seasons = sorted(set(all_seasons))
