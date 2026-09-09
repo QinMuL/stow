@@ -96,6 +96,7 @@ class ShareSnapshotting(ShareError):
 _MARGIN_CAP = 30.0
 _MAX_RETRY = 3
 _MIN_INTERVAL = 1.0  # 两次 115 请求最小间隔(防风控)
+_HTTP_RETRY_WAIT = 5.0  # HTTP 层错误(405 风控等)重试基础间隔
 
 
 @dataclass
@@ -147,7 +148,7 @@ class Pan115Reader:
         self._last_request = time.monotonic()
         return await asyncio.to_thread(fn, *args, **kwargs)
 
-    # -- 原始快照(带 margin/快照重试) --------------------------------
+    # -- 原始快照(带 margin/快照/HTTP 层重试) --------------------------
     async def _snap(self, code: str, password: str) -> dict:
         from p115client.util import share_extract_payload
 
@@ -155,7 +156,15 @@ class Pan115Reader:
         payload["receive_code"] = password or payload.get("receive_code") or ""
         client = self._get_client()
         for attempt in range(1, _MAX_RETRY + 1):
-            resp = await self._call(client.share_snap, payload, async_=False)
+            try:
+                resp = await self._call(client.share_snap, payload, async_=False)
+            except Exception as exc:  # noqa: BLE001 - HTTP 层错误(如 405 风控封禁)归一重试
+                # 不包成 ShareError 会让 bot 的状态消息卡死在"正在读取分享…"
+                if attempt == _MAX_RETRY:
+                    raise ShareError(f"115 接口异常:{str(exc)[:120]}") from exc
+                print(f"[stow] 115 接口异常({exc}),重试 {attempt}/{_MAX_RETRY}")
+                await asyncio.sleep(_HTTP_RETRY_WAIT * attempt)
+                continue
             # margin 限流:{"margin": N} 且无 state
             if "state" not in resp and "margin" in resp:
                 wait = min(float(resp.get("margin") or 5), _MARGIN_CAP)
@@ -191,15 +200,26 @@ class Pan115Reader:
         client = self._get_client()
 
         def _walk_files() -> list[ShareFile]:
-            """share_iterdir_walk 为 os.walk 风格:yield (目录路径, 子目录列表, 文件字典列表)。"""
+            """share_iterdir_walk 为 os.walk 风格:yield (目录路径, 子目录列表, 文件字典列表)。
+
+            cooldown 限速分页请求(默认无限速,千集分享海量请求易触发 115 IP 风控);
+            子目录也收集(Season N 目录是季号聚合的来源)。
+            """
             out: list[ShareFile] = []
-            for entry in share_iterdir_walk(client, link.code, link.password or ""):
+            for entry in share_iterdir_walk(
+                client, link.code, link.password or "", cooldown=0.5
+            ):
                 if isinstance(entry, tuple):
+                    dirnames = list(entry[1]) if len(entry) >= 2 else []
                     file_dicts = entry[2] if len(entry) >= 3 else []
                 elif isinstance(entry, dict):
-                    file_dicts = [entry]
+                    dirnames, file_dicts = [], [entry]
                 else:
                     continue
+                for d in dirnames:
+                    name = d if isinstance(d, str) else str(getattr(d, "name", "") or "")
+                    if name:
+                        out.append(ShareFile(name, 0, True))
                 for item in file_dicts or []:
                     name = str(item.get("n") or item.get("name") or "")
                     if not name:
@@ -209,7 +229,8 @@ class Pan115Reader:
             return out
 
         try:
-            files = await asyncio.wait_for(asyncio.to_thread(_walk_files), timeout=60)
+            # 大分享分页多(cooldown 0.5s/页),超时按分享规模放宽
+            files = await asyncio.wait_for(asyncio.to_thread(_walk_files), timeout=180)
         except TimeoutError as exc:
             raise ShareError("读取分享超时(60s),稍后重试") from exc
         except Exception as exc:  # noqa: BLE001 - p115client 各种异常归一
