@@ -153,8 +153,6 @@ def test_history_endpoint(tmp_path):
     client = _client(tmp_path)
     token = _login(client)
     # 直接写库造两条记录
-    cfg_db = tmp_path / "stow.db"
-
     cfg_raw = tmp_path / "config.json"
     import json as _json
 

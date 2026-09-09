@@ -1,11 +1,11 @@
-"""卡片渲染:HTML caption(≤1024,超长按优先级截断)。"""
+"""卡片渲染:HTML caption(≤1024,超长按优先级截断)。阶段二将替换为 8 维渲染引擎。"""
 
 from __future__ import annotations
 
 import html
 
-from app.media import MediaInfo
-from app.pan115 import ShareLink, fmt_size, share_url
+from app.media import AggregatedMedia
+from app.pan115 import ShareFile, ShareLink, fmt_size, share_url
 from app.tmdb import TmdbMatch
 
 _MAX_CAPTION = 1024
@@ -17,7 +17,12 @@ def _stars(rating: float | None) -> str:
     return f"★ {rating}"
 
 
-def render(media: MediaInfo, match: TmdbMatch | None, link: ShareLink) -> str:
+def render(
+    media: AggregatedMedia,
+    match: TmdbMatch | None,
+    link: ShareLink,
+    files: list[ShareFile] | None = None,
+) -> str:
     """渲染卡片 caption(HTML)。"""
     parts: list[str] = []
 
@@ -50,15 +55,18 @@ def render(media: MediaInfo, match: TmdbMatch | None, link: ShareLink) -> str:
 
     # 规格:画质 + 体积 + 文件数
     spec: list[str] = []
-    if media.resolution:
-        spec.append(media.resolution.upper())
+    if media.quality:
+        spec.append(media.quality)
     if media.total_size:
         spec.append(fmt_size(media.total_size))
-    spec.append(f"{len(media.video_files)} 个视频" if media.video_files else f"{media.file_count} 个文件")
-    if media.is_tv and media.episodes:
-        eps = sorted(media.episodes)
-        rng = f"E{eps[0]:02d}-E{eps[-1]:02d}" if len(eps) > 1 else f"E{eps[0]:02d}"
-        spec.append(f"S{min(media.seasons or [1]):02d}{rng}")
+    file_names = [f.name for f in (files or []) if not f.is_dir]
+    spec.append(f"{media.file_count} 个视频" if media.file_count else f"{len(files or [])} 个文件")
+    if media.media_type == "tv" and media.episode_start is not None:
+        if media.episode_end and media.episode_end > media.episode_start:
+            rng = f"E{media.episode_start:02d}-E{media.episode_end:02d}"
+        else:
+            rng = f"E{media.episode_start:02d}"
+        spec.append(f"S{media.season or 1:02d}{rng}")
     parts.append("  ".join(spec))
 
     # 概览
@@ -69,10 +77,10 @@ def render(media: MediaInfo, match: TmdbMatch | None, link: ShareLink) -> str:
         parts.append(f"<i>{html.escape(ov)}</i>")
 
     # 文件清单(可折叠)
-    if media.video_files:
-        lines = [html.escape(n) for n in media.video_files[:15]]
-        if len(media.video_files) > 15:
-            lines.append(f"… 共 {len(media.video_files)} 个")
+    if file_names:
+        lines = [html.escape(n) for n in file_names[:15]]
+        if len(file_names) > 15:
+            lines.append(f"… 共 {len(file_names)} 个")
         parts.append(
             '<tg-spoiler>' + "\n".join(lines) + "</tg-spoiler>"
         )

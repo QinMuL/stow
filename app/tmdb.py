@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from app.media import MediaInfo, title_match
+from app.media import AggregatedMedia, title_match
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +54,13 @@ class TmdbClient:
             logger.warning("TMDB 请求失败 %s %s: %s", path, params, exc)
             return None
 
-    async def match(self, media: MediaInfo) -> TmdbMatch | None:
+    async def match(self, media: AggregatedMedia) -> TmdbMatch | None:
         """搜索并硬校验(标题 match + 年份接近);不中返回 None。"""
         if not media.title:
             return None
         year = media.year
         # 先按媒体类型搜索:剧集优先 tv,电影优先 movie,各自带年份
-        order = ("tv", "movie") if media.is_tv else ("movie", "tv")
+        order = ("tv", "movie") if media.media_type == "tv" else ("movie", "tv")
         for mtype in order:
             params = {"query": media.title, "include_adult": "false", "language": "zh-CN"}
             if year:

@@ -18,7 +18,7 @@ from telegram.ext import (
 
 from app import card
 from app.config import Config
-from app.media import aggregate
+from app.media import AggregatedMedia, analyze_share
 from app.pan115 import (
     Pan115Reader,
     ShareDead,
@@ -168,10 +168,13 @@ class StowBot:
             await status.edit_text(f"{prefix}❌ {exc}")
             return
 
-        media = aggregate([(f.name, f.size, f.is_dir) for f in files])
+        media = analyze_share(files) or AggregatedMedia(
+            title=link.code, file_count=len(files),
+            total_size=sum(f.size for f in files if not f.is_dir),
+        )
         match = await self.tmdb.match(media) if self.tmdb else None
         logger.info("TMDB 匹配:%s → %s", media.title[:40], match.title if match else "未命中")
-        caption = card.render(media, match, link)
+        caption = card.render(media, match, link, files)
 
         try:
             await self._deliver(caption, match)
@@ -182,7 +185,7 @@ class StowBot:
 
         title = (match.title if match else media.title) or link.code
         self.store.mark_pushed(link.code, title)
-        n = len(media.video_files) or media.file_count
+        n = media.file_count or len(files)
         label = f"🎬 {title}" + (f" ({match.year})" if match and match.year else "")
         await status.edit_text(f"{prefix}✅ 已推送 · {n} 文件 · {label}")
 
