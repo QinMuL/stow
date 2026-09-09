@@ -10,10 +10,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from dataclasses import dataclass
 from functools import partial
+
+logger = logging.getLogger(__name__)
 
 # ── 链接解析 ────────────────────────────────────────────────
 _115_URL_RE = re.compile(
@@ -186,15 +189,15 @@ class Pan115Reader:
                 resp = await self._call(snap_fn, payload, async_=False)
             except Exception as exc:  # noqa: BLE001 - HTTP 层错误归一重试
                 if attempt == _MAX_RETRY:
-                    print(f"[stow] share_snap 不可用({str(exc)[:80]}),降级直接枚举")
+                    logger.warning("share_snap 不可用(%s),降级直接枚举", str(exc)[:80])
                     return None
-                print(f"[stow] 115 接口异常({exc}),重试 {attempt}/{_MAX_RETRY}")
+                logger.warning("115 接口异常(%s),重试 %d/%d", exc, attempt, _MAX_RETRY)
                 await asyncio.sleep(_HTTP_RETRY_WAIT * attempt)
                 continue
             # margin 限流:{"margin": N} 且无 state
             if "state" not in resp and "margin" in resp:
                 wait = min(float(resp.get("margin") or 5), _MARGIN_CAP)
-                print(f"[stow] 115 限速,等待 {wait:.0f}s 重试({attempt}/{_MAX_RETRY})")
+                logger.warning("115 限速,等待 %.0fs 重试(%d/%d)", wait, attempt, _MAX_RETRY)
                 await asyncio.sleep(wait)
                 continue
             if "正在生成文件快照" in str(resp):
