@@ -92,6 +92,12 @@ async function save(restart) {
 }
 
 // ── TG 频道配置:归属频道管理 ──
+const PRESET_NAMES = { '115': '115链接推送频道', ed2k: 'ed2k链接推送频道' }
+
+function presetLabel(p) {
+  return PRESET_NAMES[p] || p
+}
+
 function addChannel() {
   channels.value.push({ chat_id: '', preset: '115', title: '' })
 }
@@ -155,10 +161,10 @@ async function saveChannels() {
         <div v-for="(c, i) in channels" :key="i" class="chan-row">
           <input v-model="c.title" class="chan-title" placeholder="频道名称(选填)">
           <input v-model="c.chat_id" class="chan-id" placeholder="-100xxxxxxxxxx">
-          <div class="chan-presets">
-            <button class="chip" :class="{ on: c.preset === '115' }" @click="c.preset = '115'">115链接推送频道</button>
-            <button class="chip" :class="{ on: c.preset === 'ed2k' }" @click="c.preset = 'ed2k'">ed2k链接推送频道</button>
-          </div>
+          <button class="chip on" :title="'点击切换归属(当前:' + presetLabel(c.preset) + ')'"
+            @click="c.preset = c.preset === '115' ? 'ed2k' : '115'">
+            {{ presetLabel(c.preset) }}
+          </button>
           <button class="btn danger chan-del" @click="removeChannel(i)">删除</button>
         </div>
       </div>
