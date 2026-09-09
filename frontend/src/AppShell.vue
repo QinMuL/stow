@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, clearToken } from './api'
 
@@ -13,6 +13,26 @@ const nav = [
   { to: '/push', ic: '✦', label: '全局配置' },
   { to: '/system', ic: '⚙', label: '系统设置' },
 ]
+
+// 整体系统状态:聚合 Bot 进程 / 代理连通 / 115 通道三段健康,一眼看出有无异常
+const sysState = computed(() => {
+  const s = status.value
+  if (!s) return { cls: 'bad', text: '检测中…', detail: '' }
+  const issues = []
+  let warn = false
+  if (!s.bot_running) issues.push('Bot 未运行')
+  const p = s.proxy || {}
+  if (!p.ok) issues.push(p.configured ? '代理不可达' : '代理未配置')
+  const c = s.pan115 || {}
+  if (c.cookie_set && !c.ok) issues.push('115 Cookie 失效')
+  else if (!c.cookie_set) warn = true
+  if (issues.length) {
+    return { cls: 'bad', text: '系统异常', detail: issues.join(' · ') }
+  }
+  return warn
+    ? { cls: 'warn', text: '系统运行中(降级)', detail: '115 未配置 Cookie,匿名通道易限流' }
+    : { cls: 'ok', text: '系统运行中', detail: 'Bot / 代理 / 115 全部正常' }
+})
 
 async function refresh() {
   try {
@@ -53,9 +73,9 @@ onMounted(refresh)
 
     <div class="main">
       <div class="topbar">
-        <div class="top-status">
-          <span class="dot" :class="status?.bot_running ? 'ok' : 'bad'"></span>
-          {{ status?.bot_running ? '系统运行中' : '系统未运行' }}
+        <div class="top-status" :title="sysState.detail">
+          <span class="dot" :class="sysState.cls"></span>
+          {{ sysState.text }}
         </div>
         <div class="top-right">
           <span class="who">👤 <b>admin</b></span>

@@ -43,7 +43,6 @@ const GROUPS = [
 
 const model = ref({})
 const channels = ref([])
-const defaultChatId = ref('')
 const chanMsg = ref({ text: '', kind: '' })
 const chanBusy = ref(false)
 
@@ -58,7 +57,6 @@ onMounted(async () => {
   }
   model.value = m
   const d = await api('channels')
-  defaultChatId.value = d.default_chat_id ?? ''
   channels.value = d.channels.map(c => ({ ...c }))
 })
 
@@ -74,7 +72,7 @@ async function save(restart) {
     for (const g of GROUPS) {
       for (const f of g.fields) values[f.key] = model.value[f.key]
     }
-    values.tg_chat_id = defaultChatId.value
+    // 不提交 tg_chat_id:默认频道 UI 已移除,后端保留原值作兜底
     const d = await api('config', { values }, 'PUT')
     if (restart) {
       await api('restart', {})
@@ -125,8 +123,8 @@ async function saveChannels() {
 
     <div v-if="msg.text" class="msg" :class="msg.kind" style="margin-bottom:14px">{{ msg.text }}</div>
 
-    <div v-for="(g, gi) in GROUPS" :key="g.title" class="card">
-      <h3>0{{ gi + 1 }} · {{ g.title }}</h3>
+    <div v-for="g in GROUPS" :key="g.title" class="card">
+      <h3>{{ g.title }}</h3>
       <div class="desc">{{ g.desc }}</div>
 
       <div v-for="f in g.fields" :key="f.key" class="field">
@@ -144,18 +142,13 @@ async function saveChannels() {
     </div>
 
     <div class="card">
-      <h3>05 · TG 频道配置</h3>
-      <div class="desc">默认频道 + 归属分流 · 115 链接与 ed2k 链接可各推到不同频道</div>
-
-      <div class="field">
-        <label>默认频道 Chat ID <code>tg_chat_id</code></label>
-        <input v-model="defaultChatId" placeholder="-100xxxxxxxxxx(未匹配归属时的兜底)" autocomplete="off">
-        <div class="hint">未匹配到归属预设时,链接推到这里;登记了对应归属频道则优先走归属</div>
-      </div>
+      <h3>TG 频道配置</h3>
+      <div class="desc">归属分流 · 115 链接与 ed2k 链接各推送到对应归属频道,登记后即时生效</div>
 
       <div class="chan-tip">
-        💡 最方便的登记方式:先发 <code>/bind</code> 给 Bot,再把频道里的任意一条消息
-        <strong>转发给 Bot</strong>,按提示选归属,即时生效无需重启。下方用于手动管理。
+        💡 登记方式:先发 <code>/bind</code> 给 Bot,再把频道里的任意一条消息
+        <strong>转发给 Bot</strong>,按提示选择归属(115链接推送频道 / ed2k链接推送频道);
+        或在下方手动添加。后续将在此扩展频道监控能力。
       </div>
 
       <div class="chan-list">
@@ -163,8 +156,8 @@ async function saveChannels() {
           <input v-model="c.title" class="chan-title" placeholder="频道名称(选填)">
           <input v-model="c.chat_id" class="chan-id" placeholder="-100xxxxxxxxxx">
           <div class="chan-presets">
-            <button class="chip" :class="{ on: c.preset === '115' }" @click="c.preset = '115'">💿 115</button>
-            <button class="chip" :class="{ on: c.preset === 'ed2k' }" @click="c.preset = 'ed2k'">🔗 ed2k</button>
+            <button class="chip" :class="{ on: c.preset === '115' }" @click="c.preset = '115'">115链接推送频道</button>
+            <button class="chip" :class="{ on: c.preset === 'ed2k' }" @click="c.preset = 'ed2k'">ed2k链接推送频道</button>
           </div>
           <button class="btn danger chan-del" @click="removeChannel(i)">删除</button>
         </div>

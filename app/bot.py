@@ -42,7 +42,7 @@ class DeliveryUncertain(Exception):
     """投递超时:消息可能已送达,重试/回退都会重复投递,只能让用户核实。"""
 
 
-_PRESET_LABEL = {"115": "115 网盘", "ed2k": "ed2k"}
+_PRESET_LABEL = {"115": "115链接推送频道", "ed2k": "ed2k链接推送频道"}
 
 _HELP = (
     "📦 Stow · 媒体推送\n\n"
