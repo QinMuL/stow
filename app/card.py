@@ -10,8 +10,9 @@ from __future__ import annotations
 import html
 import re
 
+from app.links import ParsedLink
 from app.media import AggregatedMedia
-from app.pan115 import ShareFile, ShareLink, fmt_size, share_url
+from app.pan115 import ShareFile, fmt_size
 
 _CAPTION_LIMIT = 1024
 _TEXT_LIMIT = 4096
@@ -302,9 +303,10 @@ def _render_season_block(details: dict, media: AggregatedMedia) -> str:
     return "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
 
-def _render_footer(link: ShareLink) -> str:
-    """链接区:115 网盘模块(明文完整链接,含访问码参数)。"""
-    return f"<blockquote>🔗 115 网盘\n<code>{_esc(share_url(link))}</code></blockquote>"
+def _render_footer(link: ParsedLink) -> str:
+    """链接区:115 网盘 / ed2k 资源(明文完整链接)。"""
+    label = "ed2k 资源" if link.provider == "ed2k" else "115 网盘"
+    return f"<blockquote>🔗 {label}\n<code>{_esc(link.url)}</code></blockquote>"
 
 
 # ── 文件清单自然排序 ───────────────────────────────────────
@@ -436,7 +438,7 @@ def _fit_caption(
 def render_caption(
     media: AggregatedMedia,
     details: dict | None,
-    link: ShareLink,
+    link: ParsedLink,
     files: list[ShareFile] | None = None,
 ) -> str:
     """海报下方 caption(≤1024)。details 为 TMDB 归一化详情,未匹配传 None。"""
@@ -455,7 +457,7 @@ def render_caption(
 def render_text(
     media: AggregatedMedia,
     details: dict | None,
-    link: ShareLink,
+    link: ParsedLink,
     files: list[ShareFile] | None = None,
 ) -> str:
     """无海报时的完整消息(≤4096)。与 caption 同一截断阶梯,限额更高。"""

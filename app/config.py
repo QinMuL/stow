@@ -21,15 +21,26 @@ MASK = "••••••••"
 
 
 @dataclass
+class ChannelConfig:
+    """推送频道:归属预设决定哪类链接推到这里。"""
+
+    chat_id: str
+    preset: str = "115"  # "115" | "ed2k"
+    title: str = ""      # 频道名(Bot 登记时自动带出,展示用)
+
+
+@dataclass
 class Config:
     tg_bot_token: str = ""
-    tg_chat_id: str = ""
+    tg_chat_id: str = ""  # 默认频道(未匹配到预设时的兜底,兼容旧配置)
     tg_admin_ids: list[int] = field(default_factory=list)
     tmdb_api_key: str = ""
     proxy_url: str = ""
     # 115 登录 cookie(可选):读分享走 android/proapi 通道,绕开 115 对匿名
     # webapi share_snap 的指纹封锁(405);留空则匿名 web 兜底
     pan115_cookie: str = ""
+    # 多频道:归属预设分流(115 链接 → preset=115 的频道;ed2k → preset=ed2k)
+    channels: list[ChannelConfig] = field(default_factory=list)
     data_dir: str = "./data"
     log_level: str = "INFO"
     web_port: int = DEFAULT_WEB_PORT
@@ -61,6 +72,13 @@ class Config:
     def bot_ready(self) -> bool:
         fatal = (p for p in self.problems() if "tmdb" not in p)
         return not next(fatal, None)
+
+    def channel_for(self, provider: str) -> str:
+        """按链接类型选频道:命中归属预设用之;否则回退默认 tg_chat_id。"""
+        for ch in self.channels:
+            if ch.preset == provider:
+                return ch.chat_id
+        return self.tg_chat_id
 
 
 def _clean(value: object) -> str:
@@ -105,6 +123,16 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
             sys.exit(f"[stow] 配置文件不是合法 JSON:{path}")
         return Config()
 
+    channels = []
+    for c in raw.get("channels", []):
+        if isinstance(c, dict) and str(c.get("chat_id", "")).strip():
+            preset = str(c.get("preset", "115")).strip().lower()
+            channels.append(ChannelConfig(
+                chat_id=str(c["chat_id"]).strip(),
+                preset=preset if preset in ("115", "ed2k") else "115",
+                title=str(c.get("title", "")).strip(),
+            ))
+
     cfg = Config(
         tg_bot_token=_clean(raw.get("tg_bot_token")),
         tg_chat_id=_clean(raw.get("tg_chat_id")),
@@ -112,6 +140,7 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         tmdb_api_key=_clean(raw.get("tmdb_api_key")),
         proxy_url=_clean(raw.get("proxy_url")),
         pan115_cookie=_clean(raw.get("pan115_cookie")),
+        channels=channels,
         data_dir=str(raw.get("data_dir", "./data")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         web_port=int(raw.get("web_port", DEFAULT_WEB_PORT) or DEFAULT_WEB_PORT),
@@ -143,6 +172,7 @@ def ensure_admin(cfg_path: str | Path | None = None) -> None:
     raw.setdefault("tmdb_api_key", "")
     raw.setdefault("proxy_url", "")
     raw.setdefault("pan115_cookie", "")
+    raw.setdefault("channels", [])
     raw["admin_username"] = auth.DEFAULT_ADMIN_USER
     raw["admin_password_hash"] = auth.hash_password(auth.DEFAULT_ADMIN_PASSWORD)
     write_raw(raw, path)

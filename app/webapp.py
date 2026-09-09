@@ -111,6 +111,16 @@ class ConfigUpdate(BaseModel):
     values: dict[str, object]
 
 
+class ChannelItem(BaseModel):
+    chat_id: str
+    preset: str = "115"  # "115" | "ed2k"
+    title: str = ""
+
+
+class ChannelsUpdate(BaseModel):
+    channels: list[ChannelItem]
+
+
 # 可经 Web 修改的配置键白名单(类型: s=字符串, i=整数, ids=ID 列表)
 EDITABLE = {
     "tg_bot_token": "s", "tg_chat_id": "s", "tg_admin_ids": "ids",
@@ -287,6 +297,38 @@ def create_app(config_path: str | Path) -> FastAPI:
             "items": entries[-limit:],
             "truncated": len(entries) > limit,
         }
+
+    # ── 推送频道管理 ────────────────────────────────────────
+    @app.get("/api/channels")
+    def get_channels(request: Request) -> dict:
+        _current_user(config_path, _auth_header(request))
+        cfg = load_config(config_path)
+        return {
+            "default_chat_id": cfg.tg_chat_id,
+            "channels": [
+                {"chat_id": c.chat_id, "preset": c.preset, "title": c.title}
+                for c in cfg.channels
+            ],
+        }
+
+    @app.put("/api/channels")
+    def put_channels(body: ChannelsUpdate, request: Request) -> dict:
+        _current_user(config_path, _auth_header(request))
+        seen: set[str] = set()
+        items = []
+        for c in body.channels:
+            cid = c.chat_id.strip()
+            if not cid or not cid.lstrip("-").isdigit():
+                raise HTTPException(status_code=400, detail=f"频道 ID 非法:{c.chat_id}")
+            if cid in seen:
+                raise HTTPException(status_code=400, detail=f"频道 ID 重复:{cid}")
+            seen.add(cid)
+            preset = c.preset if c.preset in ("115", "ed2k") else "115"
+            items.append({"chat_id": cid, "preset": preset, "title": c.title.strip()})
+        raw = read_raw(config_path)
+        raw["channels"] = items
+        write_raw(raw, config_path)
+        return {"success": True, "message": "已保存,重启后生效(或在 Bot 中转发频道消息登记)"}
 
     # ── 状态 / 历史 / 重启 ──────────────────────────────────
     @app.get("/api/status")

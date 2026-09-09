@@ -187,3 +187,12 @@ a { color: var(--amber); text-decoration: none; }
 .lv-debug { color: var(--faint); }
 .log-logger { color: var(--sub); flex: none; }
 .log-msg { white-space: pre-wrap; word-break: break-all; }
+
+/* 推送频道管理 */
+.chan-tip { background: rgba(232,163,61,.08); border: 1px solid rgba(232,163,61,.25); border-radius: 8px; padding: 10px 14px; font-size: 12.5px; color: var(--sub); margin-bottom: 14px; line-height: 1.6; }
+.chan-row { display: flex; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.chan-row:last-child { border-bottom: none; }
+.chan-title { width: 130px; background: var(--bg-soft); border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 10px; color: var(--fg); font-size: 12.5px; }
+.chan-id { flex: 1; min-width: 150px; background: var(--bg-soft); border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 10px; color: var(--fg); font-size: 12.5px; font-family: var(--mono); }
+.chan-presets { display: flex; gap: 6px; }
+.chan-del { padding: 5px 12px; font-size: 12px; }

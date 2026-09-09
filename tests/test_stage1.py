@@ -6,6 +6,7 @@ import pytest
 
 import app.pan115 as pan
 from app import card
+from app.links import ParsedLink, parse_all, parse_one
 from app.media import (
     analyze_share,
     clean_name,
@@ -16,39 +17,81 @@ from app.media import (
     parse_filename,
     title_match,
 )
-from app.pan115 import ShareFile, ShareLink, fmt_size, parse_links, parse_single
+from app.pan115 import ShareFile, fmt_size
 from app.store import Store
 
 
-# ── 链接解析 ────────────────────────────────────────────────
+# ── 链接解析(115 + ed2k) ───────────────────────────────────
 def test_parse_url_with_password():
-    links = parse_links("看这个 https://115.com/s/abc123xyz?password=ef12")
-    assert links == [ShareLink("abc123xyz", "ef12")]
+    links = parse_all("看这个 https://115.com/s/abc123xyz?password=ef12")
+    assert len(links) == 1 and links[0].provider == "115"
+    assert links[0].code == "abc123xyz" and links[0].password == "ef12"
 
 
 def test_parse_url_tail_token():
-    links = parse_links("https://115.com/s/abc123xyz?ef12ef12")
+    links = parse_all("https://115.com/s/abc123xyz?ef12ef12")
     assert links[0].password == "ef12ef12"
 
 
 def test_parse_body_access_code():
-    links = parse_links("https://115.com/s/abc123xyz 访问码：ef12")
+    links = parse_all("https://115.com/s/abc123xyz 访问码：ef12")
     assert links[0].password == "ef12"
 
 
 def test_parse_multiple_dedup():
     text = "https://115.com/s/aaa11122?a=1 https://115.com/s/bbb22233 https://115.com/s/aaa11122"
-    links = parse_links(text)
-    assert [lk.code for lk in links] == ["aaa11122", "bbb22233"]
+    assert [lk.code for lk in parse_all(text)] == ["aaa11122", "bbb22233"]
 
 
 def test_parse_single_bare_code():
-    link = parse_single("abc12345xyz")
-    assert link is not None and link.code == "abc12345xyz"
+    link = parse_one("abc12345xyz")
+    assert link is not None and link.provider == "115" and link.code == "abc12345xyz"
 
 
 def test_parse_single_ignores_short_words():
-    assert parse_single("hello") is None
+    assert parse_one("hello") is None
+
+
+_ED2K = "ed2k://|file|The.Movie.2023.1080p.mkv|2345678901|0123456789ABCDEF0123456789ABCDEF|h=XYZ|/"
+
+
+def test_parse_ed2k_link():
+    links = parse_all(f"推这个 {_ED2K}")
+    assert len(links) == 1 and links[0].provider == "ed2k"
+    assert links[0].key == "0123456789ABCDEF0123456789ABCDEF"  # 去重 key 用文件 hash
+    from app.links import ed2k_file
+    name, size, fh = ed2k_file(links[0].code)
+    assert name == "The.Movie.2023.1080p.mkv" and size == 2345678901
+
+
+def test_parse_mixed_115_and_ed2k():
+    text = f"{_ED2K} 和 https://115.com/s/aaa11122"
+    links = parse_all(text)
+    assert [p.provider for p in links] == ["ed2k", "115"]  # 按出现顺序
+
+
+def test_parse_ed2k_dedup_by_hash():
+    # 同文件 hash 不同尾参 → 去重
+    links = parse_all(f"{_ED2K} {_ED2K[:-2]}p=/")
+    assert len(links) == 1
+
+
+def test_card_ed2k_footer():
+    from app.media import analyze_share
+
+    m = analyze_share(_files("The.Movie.2023.1080p.mkv"))
+    text = card.render_caption(m, None, ParsedLink("ed2k", _ED2K, _ED2K, file_hash="0" * 32))
+    assert "ed2k 资源" in text and "<code>" in text
+
+
+def test_channel_routing_preset():
+    from app.config import ChannelConfig, Config
+
+    cfg = Config(tg_chat_id="-100default")
+    assert cfg.channel_for("115") == "-100default"  # 无登记:回退默认
+    cfg.channels = [ChannelConfig(chat_id="-100A", preset="ed2k")]
+    assert cfg.channel_for("ed2k") == "-100A"
+    assert cfg.channel_for("115") == "-100default"  # 115 未登记仍走默认
 
 
 @pytest.mark.asyncio
@@ -257,10 +300,15 @@ def _details(**kw):
     return base
 
 
+def _plink(code="abc12345", pwd="ef12"):
+    url = f"https://115.com/s/{code}" + (f"?password={pwd}" if pwd else "")
+    return ParsedLink("115", code, url, pwd)
+
+
 def test_card_with_match():
     m = analyze_share(_files("测试剧.2024.S01E01.1080p.WEB-DL.mkv"))
     fs = _files("测试剧.2024.S01E01.1080p.WEB-DL.mkv")
-    text = card.render_caption(m, _details(), ShareLink("abc12345", "ef12"), fs)
+    text = card.render_caption(m, _details(), _plink(), fs)
     assert "测试剧" in text and "2024" in text
     assert "✨ 评分：8.7" in text
     assert "💿 画质：" in text and "1080P" in text and "WEB-DL" in text
@@ -272,7 +320,7 @@ def test_card_with_match():
 
 def test_card_without_match():
     m = analyze_share(_files("神秘资源.2026.mkv"))
-    text = card.render_caption(m, None, ShareLink("abc12345"), _files("神秘资源.2026.mkv"))
+    text = card.render_caption(m, None, _plink(pwd=""), _files("神秘资源.2026.mkv"))
     assert "神秘资源" in text
     assert "TMDB 未匹配" in text
     assert "https://115.com/s/abc12345" in text
@@ -281,7 +329,7 @@ def test_card_without_match():
 def test_card_caption_fits_limit():
     names = [f"Show.2024.S01E{i:02d}.1080p.WEB-DL.Some.Release.Group.mkv" for i in range(1, 40)]
     m = analyze_share(_files(*names))
-    text = card.render_caption(m, _details(), ShareLink("abc12345", "ef12"), _files(*names))
+    text = card.render_caption(m, _details(), _plink(), _files(*names))
     assert len(text) <= 1024
     assert "https://115.com/s/abc12345?password=ef12" in text
     assert "</blockquote>" in text  # 链接模块完整保留
@@ -292,7 +340,7 @@ def test_card_caption_binary_search_huge_share():
     names = [f"Show.S01E{i:04d}.2024.1080p.WEB-DL.x265-GROUP.mkv" for i in range(1, 301)]
     files = [ShareFile(n, 1024**3, False) for n in names]
     m = analyze_share(files)
-    text = card.render_caption(m, _details(), ShareLink("abc12345"), files)
+    text = card.render_caption(m, _details(), _plink(pwd=""), files)
     assert len(text) <= 1024
     assert "https://115.com/s/abc12345" in text
     assert "已显示前" in text  # 文件清单被截断
@@ -302,7 +350,8 @@ def test_card_text_fits_4096():
     names = [f"Show.2024.S01E{i:02d}.1080p.WEB-DL.Some.Release.Group.mkv" for i in range(1, 200)]
     d = _details(overview="超长简介。" * 800)
     text = card.render_text(
-        analyze_share(_files(*names)), d, ShareLink("abc12345", "ef12"), _files(*names)
+        analyze_share(_files(*names)), d, _plink(), _files(*names
+    )
     )
     assert len(text) <= 4096
     assert "https://115.com/s/abc12345?password=ef12" in text
@@ -311,14 +360,14 @@ def test_card_text_fits_4096():
 def test_card_escapes_html():
     m = analyze_share(_files("Movie.2025.mkv"))
     d = _details(media_type="movie", title="毒<药> & 谎言", overview="<script>x</script>")
-    text = card.render_caption(m, d, ShareLink("abc12345"))
+    text = card.render_caption(m, d, _plink(pwd=""))
     assert "<script>" not in text and "&lt;script&gt;" in text
 
 
 def test_card_country_flag():
     m = analyze_share(_files("Movie.2025.mkv"))
     d = _details(media_type="movie", countries=["US", "JP"])
-    text = card.render_caption(m, d, ShareLink("abc12345"))
+    text = card.render_caption(m, d, _plink(pwd=""))
     assert "🇺🇸 美国" in text and "🇯🇵 日本" in text
 
 
