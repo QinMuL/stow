@@ -1,9 +1,11 @@
-"""TMDB 匹配:标题+年份硬校验;返回海报/评分/概览等卡片素材。"""
+"""TMDB 匹配:{tmdb-ID} 标注直连 + 两轮搜索(中→英)+ 别名兜底 + 年份硬门槛。
+
+匹配不到返回 None(卡片降级纯文件名信息);详情归一化为统一 dict 供卡片渲染。
+"""
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 import httpx
 
@@ -13,21 +15,35 @@ logger = logging.getLogger(__name__)
 
 _API = "https://api.themoviedb.org/3"
 _POSTER = "https://image.tmdb.org/t/p/w500"
+_BACKDROP = "https://image.tmdb.org/t/p/w780"
+
+# 别名兜底最多查几条详情(防候选多打爆 TMDB 限流)
+_NEAR_MISS_LIMIT = 5
 
 
-@dataclass
-class TmdbMatch:
-    tmdb_id: int
-    media_type: str            # "movie" | "tv"
-    title: str
-    year: int | None
-    poster_path: str | None    # 拼 _POSTER
-    rating: float | None
-    overview: str
-    genres: list[str]
-    runtime_min: int | None    # 电影时长
-    seasons: int | None        # 剧集季数
-    episodes: int | None       # 剧集总集数
+def poster_url(path: str | None) -> str | None:
+    return f"{_POSTER}{path}" if path else None
+
+
+def backdrop_url(path: str | None) -> str | None:
+    return f"{_BACKDROP}{path}" if path else None
+
+
+def image_url(details: dict) -> str | None:
+    """卡片配图:优先横屏 backdrop,回退竖屏 poster。"""
+    return backdrop_url(details.get("backdrop_path")) or poster_url(details.get("poster_path"))
+
+
+def _title_pool(details: dict) -> list[str]:
+    """详情级标题池:本地名 + 原名 + 别名。"""
+    pool = [details.get("title") or "", details.get("original_title") or ""]
+    pool.extend(details.get("alt_titles") or [])
+    return [t for t in pool if t]
+
+
+def _cand_year(c: dict) -> int | None:
+    d = c.get("release_date") or c.get("first_air_date") or ""
+    return int(d[:4]) if d[:4].isdigit() else None
 
 
 class TmdbClient:
@@ -43,7 +59,9 @@ class TmdbClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def _get(self, path: str, params: dict) -> dict | None:
+    async def _get(self, path: str, params: dict, language: str | None = None) -> dict | None:
+        if language:
+            params = {**params, "language": language}
         if not self._bearer:
             params = {**params, "api_key": self._key}
         try:
@@ -54,76 +72,189 @@ class TmdbClient:
             logger.warning("TMDB 请求失败 %s %s: %s", path, params, exc)
             return None
 
-    async def match(self, media: AggregatedMedia) -> TmdbMatch | None:
-        """搜索并硬校验(标题 match + 年份接近);不中返回 None。"""
+    # ── 搜索 ───────────────────────────────────────────────
+    async def _search_one(self, query: str, year: int | None, mtype: str, language: str) -> list[dict]:
+        """单类型搜索;带年无果回退无年。"""
+        params: dict = {"query": query, "include_adult": "false"}
+        if year:
+            params["year" if mtype == "movie" else "first_air_date_year"] = year
+        data = await self._get(f"/search/{mtype}", params, language)
+        results = (data or {}).get("results") or []
+        if not results and year:
+            data = await self._get(f"/search/{mtype}", {"query": query, "include_adult": "false"}, language)
+            results = (data or {}).get("results") or []
+        return results
+
+    # ── 匹配主流程 ─────────────────────────────────────────
+    async def match(self, media: AggregatedMedia) -> dict | None:
+        """返回归一化详情 dict;无把握匹配返回 None。"""
+        # 1. {tmdb-XXX} 标注:分享者/媒体工具标注,最可靠;标题对不上则忽略走常规搜索
+        if media.tmdb_id:
+            details = await self.get_details(media.tmdb_id, media.media_type)
+            if details and (not media.title or title_match(media.title, _title_pool(details))):
+                return details
+            logger.info("TMDB 标注 %s 与标题不符,回退常规搜索", media.tmdb_id)
         if not media.title:
             return None
-        year = media.year
-        # 先按媒体类型搜索:剧集优先 tv,电影优先 movie,各自带年份
-        order = ("tv", "movie") if media.media_type == "tv" else ("movie", "tv")
-        for mtype in order:
-            params = {"query": media.title, "include_adult": "false", "language": "zh-CN"}
-            if year:
-                params["first_air_date_year" if mtype == "tv" else "year"] = year
-            data = await self._get(f"/search/{mtype}", params)
-            results = (data or {}).get("results") or []
-            for item in results[:5]:
-                cand_title = item.get("title") or item.get("name") or ""
-                cand_year_raw = item.get("release_date") or item.get("first_air_date") or ""
-                cand_year = int(cand_year_raw[:4]) if cand_year_raw[:4].isdigit() else None
-                if not title_match(media.title, cand_title):
-                    continue
-                if year and cand_year:
-                    # 电影严格相等;剧集允许 ±1(跨年播)
-                    tol = 1 if mtype == "tv" else 0
-                    if abs(year - cand_year) > tol:
-                        continue
-                return await self._details(mtype, int(item["id"]))
-        # 兜底:不带年份再试一轮(年份缺失时)
-        if not year:
-            for mtype in order:
-                data = await self._get(
-                    f"/search/{mtype}", {"query": media.title, "language": "zh-CN"}
-                )
-                for item in ((data or {}).get("results") or [])[:3]:
-                    cand_title = item.get("title") or item.get("name") or ""
-                    if title_match(media.title, cand_title):
-                        return await self._details(mtype, int(item["id"]))
+
+        # 2. 两轮搜索:zh-CN → 英文查询词走 en-US;主类型无果再试另一类型
+        queries = [media.title, *media.alt_queries]
+        for mtype in (media.media_type, "tv" if media.media_type == "movie" else "movie"):
+            best = await self._search_round(queries, media, mtype, "zh-CN")
+            if best is None:
+                ascii_queries = [q for q in queries if q.isascii() and q.strip()]
+                if ascii_queries:
+                    best = await self._search_round(ascii_queries, media, mtype, "en-US")
+            if best is not None:
+                return await self.get_details(int(best["id"]), mtype)
         return None
 
-    async def _details(self, mtype: str, tmdb_id: int) -> TmdbMatch | None:
-        data = await self._get(f"/{mtype}/{tmdb_id}", {"language": "zh-CN"})
+    async def _search_round(
+        self, queries: list[str], media: AggregatedMedia, mtype: str, language: str
+    ) -> dict | None:
+        """一轮搜索:聚合候选 → 硬门槛过滤 → 别名兜底 → 唯一选择。"""
+        candidates: list[dict] = []
+        seen: set[int] = set()
+        for q in queries:
+            for c in await self._search_one(q, media.year, mtype, language):
+                cid = int(c.get("id") or 0)
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    candidates.append(c)
+        if not candidates:
+            return None
+
+        matched, near = _filter_candidates(candidates, media, queries, mtype)
+        if not matched and near:
+            # 类型+年份全对但标题不中(zh-CN 条目只有中文标题的典型场景):
+            # 拉详情的 translations/AKA 别名再判一次
+            for c in near[:_NEAR_MISS_LIMIT]:
+                d = await self.get_details(int(c["id"]), mtype)
+                if d and any(title_match(q, _title_pool(d)) for q in queries):
+                    matched.append(c)
+        if not matched:
+            return None
+        return _pick_best(matched, media, mtype)
+
+    # ── 详情(归一化) ─────────────────────────────────────
+    async def get_details(self, tmdb_id: int, media_type: str) -> dict | None:
+        params = {"append_to_response": "credits,translations,alternative_titles"}
+        data = await self._get(f"/{media_type}/{tmdb_id}", params, "zh-CN")
         if not data:
             return None
-        date = data.get("release_date") or data.get("first_air_date") or ""
-        runtime = None
-        seasons_n = episodes_n = None
-        if mtype == "movie":
-            runtime = data.get("runtime")
-        else:
-            seasons_n = len(data.get("seasons") or [])
-            episodes_n = sum(s.get("episode_count") or 0 for s in data.get("seasons") or [])
-        return TmdbMatch(
-            tmdb_id=tmdb_id,
-            media_type=mtype,
-            title=data.get("title") or data.get("name") or "",
-            year=int(date[:4]) if date[:4].isdigit() else None,
-            poster_path=data.get("poster_path"),
-            rating=(data.get("vote_average") or None) and round(float(data["vote_average"]), 1),
-            overview=(data.get("overview") or "").strip(),
-            genres=[g["name"] for g in data.get("genres") or []],
-            runtime_min=runtime,
-            seasons=seasons_n,
-            episodes=episodes_n,
-        )
+        return _normalize(data, media_type)
 
-    async def fetch_poster(self, match: TmdbMatch) -> bytes | None:
-        if not match.poster_path:
-            return None
-        try:
-            r = await self._client.get(f"{_POSTER}{match.poster_path}")
-            r.raise_for_status()
-            return r.content
-        except httpx.HTTPError as exc:
-            logger.warning("海报下载失败:%s", exc)
-            return None
+
+def _filter_candidates(
+    candidates: list[dict], media: AggregatedMedia, queries: list[str], mtype: str
+) -> tuple[list[dict], list[dict]]:
+    """硬门槛过滤:年份 + 标题。
+
+    年份门槛:电影严格相等;剧集首播年不得晚于资源年(在播剧跨年)。
+    返回 (matched, near):标题命中的 / 年份类型对但标题没中的(别名兜底候选)。
+    """
+    matched: list[dict] = []
+    near: list[dict] = []
+    for c in candidates:
+        cy = _cand_year(c)
+        if media.year and cy:
+            if mtype == "movie" and cy != media.year:
+                continue
+            if mtype == "tv" and cy > media.year:
+                continue
+        titles = [
+            c.get("title") or c.get("name") or "",
+            c.get("original_title") or c.get("original_name") or "",
+        ]
+        if any(title_match(q, titles) for q in queries):
+            matched.append(c)
+        else:
+            near.append(c)
+    return matched, near
+
+
+def _pick_best(matched: list[dict], media: AggregatedMedia, mtype: str) -> dict | None:
+    """唯一选择:单条直取;无年份多候选无法消歧放弃;剧集取首播最晚。"""
+    if len(matched) == 1:
+        return matched[0]
+    if media.year is None:
+        return None
+    if mtype == "tv":
+        return max(matched, key=lambda c: _cand_year(c) or 0)
+    return matched[0]
+
+
+def _collect_alt_titles(data: dict) -> list[str]:
+    """从 translations + alternative_titles 收集别名(en/zh/ko + 无地区 AKA,去重保序)。"""
+    titles: list[str] = []
+    for t in data.get("translations", {}).get("translations", []) or []:
+        lang = t.get("iso_639_1", "")
+        name = (t.get("data") or {}).get("name") or (t.get("data") or {}).get("title") or ""
+        if lang in ("en", "zh", "ko") and name:
+            titles.append(name.strip())
+    at = data.get("alternative_titles") or {}
+    for item in at.get("results", []) or at.get("titles", []) or []:
+        name = item.get("title") if isinstance(item, dict) else str(item or "")
+        if name:
+            titles.append(name.strip())
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for n in titles:
+        if n and n not in seen:
+            seen.add(n)
+            uniq.append(n)
+    return uniq
+
+
+def _year_of(date_str: str | None) -> int | None:
+    return int(date_str[:4]) if date_str and date_str[:4].isdigit() else None
+
+
+def _normalize(data: dict, media_type: str) -> dict:
+    """TMDB 原始详情 → 卡片/匹配用的统一字段。"""
+    alt_titles = _collect_alt_titles(data)
+    countries = data.get("origin_country") or [
+        c.get("iso_3166_1") for c in data.get("production_countries", [])
+    ]
+    credits = data.get("credits", {})
+    common = {
+        "tmdb_id": data.get("id"),
+        "media_type": media_type,
+        "title": data.get("title") or data.get("name") or "",
+        "original_title": data.get("original_title") or data.get("original_name") or "",
+        "alt_titles": alt_titles,
+        "year": _year_of(data.get("release_date") or data.get("first_air_date")),
+        "release_date": data.get("release_date") or data.get("first_air_date") or "",
+        "overview": (data.get("overview") or "").strip(),
+        "poster_path": data.get("poster_path"),
+        "backdrop_path": data.get("backdrop_path"),
+        "vote_average": data.get("vote_average") or 0,
+        "vote_count": data.get("vote_count") or 0,
+        "genres": [g["name"] for g in data.get("genres", [])],
+        "status": data.get("status") or "",
+        "cast": [c["name"] for c in credits.get("cast", [])][:5],
+        "countries": countries,
+    }
+    if media_type == "movie":
+        return {
+            **common,
+            "runtime": data.get("runtime"),
+            "directors": [
+                c["name"] for c in credits.get("crew", []) if c.get("job") == "Director"
+            ][:3],
+        }
+    seasons = [
+        {
+            "season": s.get("season_number"),
+            "episode_count": s.get("episode_count") or 0,
+            "name": s.get("name") or "",
+        }
+        for s in data.get("seasons", [])  # 保留 season 0(特别篇),S00 文件能正确匹配
+    ]
+    return {
+        **common,
+        "number_of_seasons": data.get("number_of_seasons") or 0,
+        "number_of_episodes": data.get("number_of_episodes") or 0,
+        "creators": [c["name"] for c in data.get("created_by", [])][:3],
+        "seasons": seasons,
+    }

@@ -15,7 +15,6 @@ from app.media import (
 )
 from app.pan115 import ShareFile, ShareLink, fmt_size, parse_links, parse_single
 from app.store import Store
-from app.tmdb import TmdbMatch
 
 
 # ── 链接解析 ────────────────────────────────────────────────
@@ -161,19 +160,22 @@ def test_title_match_variants():
 
 
 # ── 卡片渲染 ────────────────────────────────────────────────
-def _match(**kw):
+def _details(**kw):
     base = dict(
-        tmdb_id=42, media_type="tv", title="测试剧", year=2024,
-        poster_path="/x.jpg", rating=8.7, overview="这是概览。" * 50,
-        genres=["剧情", "悬疑"], runtime_min=None, seasons=2, episodes=24,
+        tmdb_id=42, media_type="tv", title="测试剧", original_title="Test Show",
+        alt_titles=[], year=2024, release_date="2024-01-01",
+        overview="这是概览。" * 50, poster_path="/x.jpg", backdrop_path=None,
+        vote_average=8.7, vote_count=100, genres=["剧情", "悬疑"], status="Returning Series",
+        cast=["甲", "乙"], countries=["CN"],
+        number_of_seasons=2, number_of_episodes=24, creators=[], seasons=[],
     )
     base.update(kw)
-    return TmdbMatch(**base)
+    return base
 
 
 def test_card_with_match():
     m = analyze_share(_files("测试剧.2024.S01E01.1080p.mkv"))
-    text = card.render(m, _match(), ShareLink("abc12345", "ef12"), _files("测试剧.2024.S01E01.1080p.mkv"))
+    text = card.render(m, _details(), ShareLink("abc12345", "ef12"), _files("测试剧.2024.S01E01.1080p.mkv"))
     assert "测试剧" in text and "(2024)" in text
     assert "★ 8.7" in text
     assert "1080P" in text
@@ -193,7 +195,7 @@ def test_card_without_match():
 def test_card_caption_fits_limit():
     names = [f"Show.2024.S01E{i:02d}.1080p.WEB-DL.Some.Release.Group.mkv" for i in range(1, 40)]
     m = analyze_share(_files(*names))
-    text = card.render(m, _match(), ShareLink("abc12345", "ef12"), _files(*names))
+    text = card.render(m, _details(), ShareLink("abc12345", "ef12"), _files(*names))
     assert len(text) <= 1024
     assert text.endswith("https://115.com/s/abc12345?password=ef12")
 

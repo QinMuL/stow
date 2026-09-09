@@ -31,7 +31,7 @@ from app.pan115 import (
     parse_single,
 )
 from app.store import Store
-from app.tmdb import TmdbClient
+from app.tmdb import TmdbClient, image_url
 
 logger = logging.getLogger(__name__)
 
@@ -172,27 +172,27 @@ class StowBot:
             title=link.code, file_count=len(files),
             total_size=sum(f.size for f in files if not f.is_dir),
         )
-        match = await self.tmdb.match(media) if self.tmdb else None
-        logger.info("TMDB 匹配:%s → %s", media.title[:40], match.title if match else "未命中")
-        caption = card.render(media, match, link, files)
+        details = await self.tmdb.match(media) if self.tmdb else None
+        logger.info("TMDB 匹配:%s → %s", media.title[:40], details["title"] if details else "未命中")
+        caption = card.render(media, details, link, files)
 
         try:
-            await self._deliver(caption, match)
+            await self._deliver(caption, details)
         except Exception as exc:  # noqa: BLE001 - 投递失败保留状态可重试
             logger.error("卡片投递失败:%s", exc, exc_info=exc)
             await status.edit_text(f"{prefix}❌ 投递失败:{str(exc)[:120]}")
             return
 
-        title = (match.title if match else media.title) or link.code
+        title = (details["title"] if details else media.title) or link.code
         self.store.mark_pushed(link.code, title)
         n = media.file_count or len(files)
-        label = f"🎬 {title}" + (f" ({match.year})" if match and match.year else "")
+        label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
         await status.edit_text(f"{prefix}✅ 已推送 · {n} 文件 · {label}")
 
     # ── 频道投递(串行 + flood 退避) ─────────────────────────
-    async def _deliver(self, caption: str, match) -> None:
+    async def _deliver(self, caption: str, details: dict | None) -> None:
         async with self._push_lock:
-            poster = await self.tmdb.fetch_poster(match) if (match and self.tmdb) else None
+            poster = image_url(details) if details else None
             for _ in range(3):
                 try:
                     if poster:

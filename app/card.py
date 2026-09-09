@@ -6,12 +6,11 @@ import html
 
 from app.media import AggregatedMedia
 from app.pan115 import ShareFile, ShareLink, fmt_size, share_url
-from app.tmdb import TmdbMatch
 
 _MAX_CAPTION = 1024
 
 
-def _stars(rating: float | None) -> str:
+def _stars(rating) -> str:
     if not rating:
         return "暂无评分"
     return f"★ {rating}"
@@ -19,32 +18,32 @@ def _stars(rating: float | None) -> str:
 
 def render(
     media: AggregatedMedia,
-    match: TmdbMatch | None,
+    details: dict | None,
     link: ShareLink,
     files: list[ShareFile] | None = None,
 ) -> str:
-    """渲染卡片 caption(HTML)。"""
+    """渲染卡片 caption(HTML)。details 为 TMDB 归一化详情,未匹配时 None。"""
     parts: list[str] = []
 
     # 标题行:标题 (年份) [TMDB 匹配时]
-    if match:
-        head = f"<b>{html.escape(match.title)}</b>"
-        if match.year:
-            head += f" ({match.year})"
+    if details:
+        head = f"<b>{html.escape(details['title'])}</b>"
+        if details["year"]:
+            head += f" ({details['year']})"
         parts.append(head)
-        meta: list[str] = [_stars(match.rating)]
-        if match.genres:
-            meta.append(" / ".join(match.genres[:4]))
-        if match.media_type == "tv":
+        meta: list[str] = [_stars(details["vote_average"])]
+        if details["genres"]:
+            meta.append(" / ".join(details["genres"][:4]))
+        if details["media_type"] == "tv":
             seg = []
-            if match.seasons:
-                seg.append(f"{match.seasons} 季")
-            if match.episodes:
-                seg.append(f"{match.episodes} 集")
+            if details["number_of_seasons"]:
+                seg.append(f"{details['number_of_seasons']} 季")
+            if details["number_of_episodes"]:
+                seg.append(f"{details['number_of_episodes']} 集")
             if seg:
                 meta.append("·".join(seg))
-        elif match.runtime_min:
-            meta.append(f"{match.runtime_min} 分钟")
+        elif details["runtime"]:
+            meta.append(f"{details['runtime']} 分钟")
         parts.append("  ".join(meta))
     else:
         head = f"<b>{html.escape(media.title or '未识别资源')}</b>"
@@ -70,8 +69,8 @@ def render(
     parts.append("  ".join(spec))
 
     # 概览
-    if match and match.overview:
-        ov = match.overview
+    if details and details["overview"]:
+        ov = details["overview"]
         if len(ov) > 180:
             ov = ov[:180].rstrip() + "…"
         parts.append(f"<i>{html.escape(ov)}</i>")

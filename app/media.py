@@ -47,6 +47,7 @@ class AggregatedMedia:
     total_size: int = 0
     total_episodes: int | None = None
     tmdb_id: int | None = None  # 文件名/目录名标注的 {tmdb-XXX}
+    alt_queries: list[str] = field(default_factory=list)  # 原名方括号中文标注等额外查询词
 
 
 # TMDB ID 标注:{tmdb-1311031}(分享者/媒体管理工具标注,最可靠的匹配来源)
@@ -60,6 +61,20 @@ def extract_tmdb_id(names: list[str]) -> int | None:
         if m:
             return int(m.group(1))
     return None
+
+
+# 原名方括号内的中文标注:"[藏锋].Sharp.Turns.S01E01" → "藏锋"(TMDB 中文搜索词)
+_BRACKET_CJK_RE = re.compile(r"[\[【]([\u4e00-\u9fff][\u4e00-\u9fff·0-9]{1,30})[\]】]")
+
+
+def extract_cjk_annotations(names: list[str]) -> list[str]:
+    """收集方括号中文标注(去重保序)。"""
+    out: list[str] = []
+    for n in names:
+        for m in _BRACKET_CJK_RE.finditer(n):
+            if m.group(1) not in out:
+                out.append(m.group(1))
+    return out
 
 
 # ── 噪音清洗 ────────────────────────────────────────────────
@@ -430,6 +445,9 @@ def analyze_share(files: list[ShareFile]) -> AggregatedMedia | None:
         total_size=sum(f.size for f in files if not f.is_dir and f.size),
         total_episodes=len({p.episode for p in parsed if p.episode is not None}) or None,
         tmdb_id=tmdb_id,
+        alt_queries=extract_cjk_annotations(
+            [f.name for f in candidates] + [d.name for d in dirs]
+        ),
     )
 
 
