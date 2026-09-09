@@ -209,11 +209,12 @@ class Pan115Reader:
             """share_iterdir_walk 为 os.walk 风格:yield (目录路径, 子目录列表, 文件字典列表)。
 
             cooldown 限速分页请求(默认无限速,千集分享海量请求易触发 115 IP 风控);
-            子目录也收集(Season N 目录是季号聚合的来源)。
-            """
+            子目录也收集(Season N 目录是季号聚合的来源)。            """
             out: list[ShareFile] = []
             for entry in share_iterdir_walk(
-                client, link.code, link.password or "", cooldown=0.5
+                client, link.code, link.password or "",
+                cooldown=1.0,
+                onerror=True,  # 默认 False 会静默跳过列表失败的目录 → 漏季/漏文件
             ):
                 if isinstance(entry, tuple):
                     dirnames = list(entry[1]) if len(entry) >= 2 else []

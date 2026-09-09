@@ -64,6 +64,31 @@ async def test_snap_transport_error_downgrades(monkeypatch):
     assert await r._snap("abc12345xyz", "") is None
 
 
+@pytest.mark.asyncio
+async def test_read_share_walk_onerror_and_dirs(monkeypatch):
+    """walk 必须 onerror=True(默认 False 会静默跳过列表失败的目录 → 漏季);子目录须收集。"""
+    import p115client.tool as ptool
+
+    kwargs: dict = {}
+
+    def fake_walk(client, code, pwd, **kw):
+        kwargs.update(kw)
+        yield (0, ["Season 1"], [{"n": "a.S01E01.mkv", "s": 1024}])
+
+    monkeypatch.setattr(ptool, "share_iterdir_walk", fake_walk)
+    r = pan.Pan115Reader()
+
+    async def snap_none(code, pwd):
+        return None  # 模拟 share_snap 不可用,降级直接枚举
+
+    monkeypatch.setattr(r, "_snap", snap_none)
+    files = await r.read_share(pan.ShareLink("abc12345xyz"))
+    assert kwargs.get("onerror") is True
+    assert kwargs.get("cooldown") == 1.0
+    assert pan.ShareFile("Season 1", 0, True) in files  # 目录被收集
+    assert pan.ShareFile("a.S01E01.mkv", 1024, False) in files
+
+
 # ── 文件名解析(guessit 引擎) ──────────────────────────────
 def test_parse_movie():
     p = parse_filename("The.Dark.Knight.2008.1080p.BluRay.x264-GRP.mkv")
