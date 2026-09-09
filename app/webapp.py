@@ -225,6 +225,69 @@ def create_app(config_path: str | Path) -> FastAPI:
         cfg = load_config(config_path)
         return {"success": True, "bot_ready": cfg.bot_ready(), "missing": cfg.problems()}
 
+    # ── 日志 ────────────────────────────────────────────────
+    _log_line_re = re.compile(
+        r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) (DEBUG|INFO|WARNING|ERROR|CRITICAL)"
+        r"\s+\[([^\]]+)\] (.*)$"
+    )
+    _log_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+    _log_tail_bytes = 2 * 1024 * 1024  # 只解析尾部窗口,防大文件全量解析
+
+    @app.get("/api/logs")
+    def logs(
+        request: Request, file: str = "stow.log", limit: int = 300, level: str = "", q: str = ""
+    ) -> dict:
+        """日志查看:结构化解析 + 级别/关键字过滤,返回尾部 limit 条(旧→新)。"""
+        _current_user(config_path, _auth_header(request))
+        cfg = load_config(config_path)
+        log_dir = cfg.log_dir
+        avail = sorted(
+            (p.name for p in log_dir.glob("stow.log*") if p.is_file()),
+            key=lambda n: (n != "stow.log", n),
+        )
+        files = [
+            {"name": p.name, "size": p.stat().st_size} for p in (log_dir / n for n in avail)
+        ]
+        if not re.fullmatch(r"stow\.log(\.\d{1,2})?", file or ""):
+            raise HTTPException(status_code=400, detail="非法日志文件名")
+        path = log_dir / file
+        if not path.is_file():
+            return {"files": files, "current": file, "items": [], "truncated": False}
+
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            if size > _log_tail_bytes:
+                f.seek(size - _log_tail_bytes)
+                f.readline()  # 丢弃窗口起始的半行
+            text = f.read().decode("utf-8", errors="replace")
+
+        entries: list[dict] = []
+        for line in text.splitlines():
+            m = _log_line_re.match(line)
+            if m:
+                entries.append(
+                    {"ts": m.group(1), "level": m.group(2), "logger": m.group(3), "msg": m.group(4)}
+                )
+            elif entries and line.strip():
+                entries[-1]["msg"] += "\n" + line  # traceback 等续行归入上一条
+
+        if level.upper() in _log_levels:  # 最低级别过滤(WARNING=含 ERROR/CRITICAL)
+            floor = _log_levels.index(level.upper())
+            entries = [e for e in entries if _log_levels.index(e["level"]) >= floor]
+        if q:
+            needle = q.lower()
+            entries = [
+                e for e in entries
+                if needle in e["msg"].lower() or needle in e["logger"].lower()
+            ]
+        limit = max(1, min(limit, 1000))
+        return {
+            "files": files,
+            "current": file,
+            "items": entries[-limit:],
+            "truncated": len(entries) > limit,
+        }
+
     # ── 状态 / 历史 / 重启 ──────────────────────────────────
     @app.get("/api/status")
     async def status(request: Request) -> dict:

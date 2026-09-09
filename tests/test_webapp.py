@@ -117,6 +117,46 @@ def test_account_wrong_current(tmp_path):
     assert r.status_code == 403
 
 
+# ── 日志 ────────────────────────────────────────────────────
+def test_logs_parse_filter_and_guard(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "stow.log").write_text(
+        "2026-09-09 10:00:00,111 INFO  [app.bot] 普通消息\n"
+        "2026-09-09 10:00:01,222 WARNING [app.bot] 限速警告\n"
+        "2026-09-09 10:00:02,333 ERROR [app.pan115] 读取失败\n"
+        "Traceback (most recent call last):\n"
+        '  File "x.py", line 1, in <module>\n'
+        "ValueError: boom\n"
+        "2026-09-09 10:00:03,444 INFO  [app.bot] 尾部消息\n",
+        encoding="utf-8",
+    )
+    client = _client(tmp_path)
+    token = _login(client)
+
+    body = client.get("/api/logs", headers=_h(token)).json()
+    assert [e["level"] for e in body["items"]] == ["INFO", "WARNING", "ERROR", "INFO"]
+    err = body["items"][2]
+    assert "ValueError: boom" in err["msg"]  # traceback 续行归入上一条
+    assert [f["name"] for f in body["files"]] == ["stow.log"]
+
+    # 级别过滤:WARN+ 只剩 2 条
+    body = client.get("/api/logs?level=WARNING", headers=_h(token)).json()
+    assert [e["level"] for e in body["items"]] == ["WARNING", "ERROR"]
+
+    # 关键字过滤
+    body = client.get("/api/logs?q=boom", headers=_h(token)).json()
+    assert len(body["items"]) == 1 and body["items"][0]["level"] == "ERROR"
+
+    # 尾部条数限制(新→旧窗口)
+    body = client.get("/api/logs?limit=2", headers=_h(token)).json()
+    assert [e["level"] for e in body["items"]] == ["ERROR", "INFO"]
+    assert body["truncated"] is True
+
+    # 越权文件名拒绝
+    assert client.get("/api/logs?file=../../etc/passwd", headers=_h(token)).status_code == 400
+
+
 # ── 状态 ────────────────────────────────────────────────────
 def test_status_reports_missing(tmp_path, monkeypatch):
     import app.webapp as web

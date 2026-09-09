@@ -165,3 +165,25 @@ a { color: var(--amber); text-decoration: none; }
 .health-name { width: 76px; flex: none; color: var(--sub); font-size: 13px; padding-top: 1px; }
 .health-text { flex: 1; font-size: 13.5px; }
 .health-sub { color: var(--sub); font-size: 12px; margin-top: 3px; font-family: var(--mono); word-break: break-all; }
+
+/* 日志页 */
+.log-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.log-file { background: var(--bg-soft); color: var(--fg); border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 10px; font-size: 12.5px; font-family: var(--mono); }
+.chips { display: flex; gap: 6px; }
+.chip { background: transparent; border: 1px solid var(--line-strong); color: var(--sub); border-radius: 999px; padding: 4px 12px; font-size: 12px; cursor: pointer; transition: all .15s; }
+.chip.on { border-color: var(--amber); color: var(--amber-strong); background: rgba(232,163,61,.1); }
+.log-search { flex: 1; min-width: 160px; background: var(--bg-soft); border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 10px; color: var(--fg); font-size: 12.5px; }
+.auto-toggle { display: flex; gap: 5px; align-items: center; color: var(--sub); font-size: 12.5px; cursor: pointer; }
+.log-meta { display: flex; align-items: center; gap: 10px; color: var(--sub); font-size: 12px; margin-bottom: 8px; }
+.log-list { font-family: var(--mono); font-size: 12px; line-height: 1.75; max-height: 62vh; overflow: auto; }
+.log-row { display: flex; gap: 10px; padding: 3px 8px; border-radius: 4px; align-items: baseline; }
+.log-row:hover { background: rgba(255,255,255,.03); }
+.log-row:nth-child(odd) { background: rgba(255,255,255,.015); }
+.log-ts { color: var(--sub); flex: none; }
+.log-lv { flex: none; width: 46px; font-weight: 700; }
+.lv-info { color: var(--ok); }
+.lv-warn { color: var(--amber-strong); }
+.lv-error { color: var(--bad); }
+.lv-debug { color: var(--faint); }
+.log-logger { color: var(--sub); flex: none; }
+.log-msg { white-space: pre-wrap; word-break: break-all; }

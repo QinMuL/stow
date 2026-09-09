@@ -10,6 +10,7 @@ const routes = [
       { path: '', redirect: '/overview' },
       { path: 'overview', name: 'overview', component: () => import('./views/Overview.vue') },
       { path: 'push', name: 'push', component: () => import('./views/PushConfig.vue') },
+      { path: 'logs', name: 'logs', component: () => import('./views/Logs.vue') },
       { path: 'system', name: 'system', component: () => import('./views/System.vue') },
     ],
   },

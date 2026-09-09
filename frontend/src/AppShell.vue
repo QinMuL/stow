@@ -45,8 +45,8 @@ onMounted(refresh)
         </router-link>
         <!-- 预留位:功能到,页面到
         <router-link class="nav-item" to="/transfer"><span class="ic">⇅</span><span class="txt">自动转存</span><span class="soon">soon</span></router-link>
-        <router-link class="nav-item" to="/logs"><span class="ic">≡</span><span class="txt">日志</span><span class="soon">soon</span></router-link>
         -->
+        <router-link class="nav-item" to="/logs"><span class="ic">≡</span><span class="txt">日志</span></router-link>
       </nav>
       <div class="side-foot">{{ version }} · amber</div>
     </aside>
