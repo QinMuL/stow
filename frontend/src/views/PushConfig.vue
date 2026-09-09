@@ -8,29 +8,57 @@ const cfg = ref(null)
 const msg = ref({ text: '', kind: '' })
 const busy = ref(false)
 
-const FIELDS = [
-  { key: 'tg_bot_token', label: 'Bot Token', hint: 'BotFather 发放的令牌', sensitive: true },
-  { key: 'tg_chat_id', label: '默认频道 Chat ID', hint: '未匹配归属时的兜底频道(Bot 需为频道管理员)' },
-  { key: 'tg_admin_ids', label: '管理员用户 ID', hint: '逗号分隔,如 123,456', list: true },
-  { key: 'tmdb_api_key', label: 'TMDB API Key', hint: 'themoviedb.org 免费申请;留空则卡片无元数据', sensitive: true },
-  { key: 'proxy_url', label: '代理地址(可选)', hint: '仅 TG/TMDB 走;115 恒直连' },
-  { key: 'pan115_cookie', label: '115 Cookie(可选)', hint: '浏览器登录 115 后 F12 复制;填后走稳定通道读分享', sensitive: true },
+// 五组卡片:每组独立保存(实际提交全部字段,后端全量校验)
+const GROUPS = [
+  {
+    title: 'Telegram Bot 机器人配置',
+    desc: 'Bot 凭据与管理员;缺一 Bot 无法启动',
+    fields: [
+      { key: 'tg_bot_token', label: 'Bot Token', hint: 'BotFather 发放的令牌', sensitive: true },
+      { key: 'tg_admin_ids', label: '管理员用户 ID', hint: '逗号分隔,如 123,456', list: true },
+    ],
+  },
+  {
+    title: '项目代理配置',
+    desc: '仅 TG / TMDB 走代理;115 恒直连',
+    fields: [
+      { key: 'proxy_url', label: '代理地址(可选)', hint: '如 http://127.0.0.1:7897;留空则直连' },
+    ],
+  },
+  {
+    title: 'TMDB API Key 配置',
+    desc: '卡片元数据来源;留空则卡片无 TMDB 信息仍可推送',
+    fields: [
+      { key: 'tmdb_api_key', label: 'TMDB API Key', hint: 'themoviedb.org 免费申请', sensitive: true },
+    ],
+  },
+  {
+    title: '115 Cookie 配置',
+    desc: '读分享通道;填后走稳定通道,空则匿名易限流',
+    fields: [
+      { key: 'pan115_cookie', label: '115 Cookie(可选)', hint: '浏览器登录 115 后 F12 复制整行 Cookie', sensitive: true },
+    ],
+  },
 ]
 
 const model = ref({})
 const channels = ref([])
+const defaultChatId = ref('')
 const chanMsg = ref({ text: '', kind: '' })
 const chanBusy = ref(false)
 
 onMounted(async () => {
   cfg.value = await api('config')
   const m = {}
-  for (const f of FIELDS) {
-    const v = cfg.value[f.key]
-    m[f.key] = Array.isArray(v) ? v.join(',') : (v ?? '')
+  for (const g of GROUPS) {
+    for (const f of g.fields) {
+      const v = cfg.value[f.key]
+      m[f.key] = Array.isArray(v) ? v.join(',') : (v ?? '')
+    }
   }
   model.value = m
   const d = await api('channels')
+  defaultChatId.value = d.default_chat_id ?? ''
   channels.value = d.channels.map(c => ({ ...c }))
 })
 
@@ -43,7 +71,10 @@ async function save(restart) {
   msg.value = { text: '', kind: '' }
   try {
     const values = {}
-    for (const f of FIELDS) values[f.key] = model.value[f.key]
+    for (const g of GROUPS) {
+      for (const f of g.fields) values[f.key] = model.value[f.key]
+    }
+    values.tg_chat_id = defaultChatId.value
     const d = await api('config', { values }, 'PUT')
     if (restart) {
       await api('restart', {})
@@ -62,17 +93,13 @@ async function save(restart) {
   }
 }
 
-// ── 频道管理 ──
+// ── TG 频道配置:归属频道管理 ──
 function addChannel() {
   channels.value.push({ chat_id: '', preset: '115', title: '' })
 }
 
 function removeChannel(i) {
   channels.value.splice(i, 1)
-}
-
-function presetLabel(p) {
-  return p === 'ed2k' ? '🔗 ed2k' : '💿 115 网盘'
 }
 
 async function saveChannels() {
@@ -92,16 +119,17 @@ async function saveChannels() {
 <template>
   <div>
     <div class="page-head">
-      <div class="page-title">推送配置</div>
-      <div class="page-sub">链接识别 → TMDB 匹配 → 海报卡片 → 按归属推送到对应频道</div>
+      <div class="page-title">全局配置</div>
+      <div class="page-sub">凭据 · 代理 · 频道归属;各卡片独立保存</div>
     </div>
 
-    <div class="card">
-      <h3>PUSH CHAIN</h3>
-      <div class="desc">基础凭据与默认投递目标;保存后需重启生效</div>
-      <div v-if="msg.text" class="msg" :class="msg.kind">{{ msg.text }}</div>
+    <div v-if="msg.text" class="msg" :class="msg.kind" style="margin-bottom:14px">{{ msg.text }}</div>
 
-      <div v-for="f in FIELDS" :key="f.key" class="field">
+    <div v-for="(g, gi) in GROUPS" :key="g.title" class="card">
+      <h3>0{{ gi + 1 }} · {{ g.title }}</h3>
+      <div class="desc">{{ g.desc }}</div>
+
+      <div v-for="f in g.fields" :key="f.key" class="field">
         <label>
           {{ f.label }} <code>{{ f.key }}</code>
           <span v-if="isSaved(f)" class="saved-tag">✓ 已保存</span>
@@ -111,18 +139,23 @@ async function saveChannels() {
       </div>
 
       <div class="actions">
-        <button class="btn primary" :disabled="busy" @click="save(false)">保存配置</button>
-        <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
+        <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
       </div>
     </div>
 
     <div class="card">
-      <h3>CHANNELS</h3>
-      <div class="desc">推送频道归属 · 115 链接与 ed2k 链接可各推到不同频道</div>
+      <h3>05 · TG 频道配置</h3>
+      <div class="desc">默认频道 + 归属分流 · 115 链接与 ed2k 链接可各推到不同频道</div>
+
+      <div class="field">
+        <label>默认频道 Chat ID <code>tg_chat_id</code></label>
+        <input v-model="defaultChatId" placeholder="-100xxxxxxxxxx(未匹配归属时的兜底)" autocomplete="off">
+        <div class="hint">未匹配到归属预设时,链接推到这里;登记了对应归属频道则优先走归属</div>
+      </div>
 
       <div class="chan-tip">
-        💡 最方便的登记方式:把频道里的任意一条消息<strong>转发给 Bot</strong>,
-        按提示选归属即登记,即时生效无需重启。此处用于手动管理。
+        💡 最方便的登记方式:先发 <code>/bind</code> 给 Bot,再把频道里的任意一条消息
+        <strong>转发给 Bot</strong>,按提示选归属,即时生效无需重启。下方用于手动管理。
       </div>
 
       <div class="chan-list">
@@ -137,7 +170,7 @@ async function saveChannels() {
         </div>
       </div>
       <div v-if="!channels.length" class="empty" style="margin-bottom:12px">
-        还没有登记频道 —— 转发频道消息给 Bot,或点下方添加
+        还没有登记归属频道 —— 转发频道消息给 Bot,或点下方添加
       </div>
 
       <div v-if="chanMsg.text" class="msg" :class="chanMsg.kind">{{ chanMsg.text }}</div>
@@ -145,6 +178,7 @@ async function saveChannels() {
       <div class="actions">
         <button class="btn ghost" @click="addChannel">+ 添加频道</button>
         <button class="btn primary" :disabled="chanBusy" @click="saveChannels">保存频道</button>
+        <button class="btn ghost" :disabled="busy" @click="save(true)" style="margin-left:auto">保存并重启</button>
       </div>
     </div>
   </div>

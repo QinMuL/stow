@@ -10,7 +10,7 @@ const version = ref('v0.1')
 
 const nav = [
   { to: '/overview', ic: '◉', label: '总览' },
-  { to: '/push', ic: '✦', label: '推送配置' },
+  { to: '/push', ic: '✦', label: '全局配置' },
   { to: '/system', ic: '⚙', label: '系统设置' },
 ]
 
@@ -55,7 +55,7 @@ onMounted(refresh)
       <div class="topbar">
         <div class="top-status">
           <span class="dot" :class="status?.bot_running ? 'ok' : 'bad'"></span>
-          {{ status?.bot_running ? 'Bot 运行中' : 'Bot 未运行' }}
+          {{ status?.bot_running ? '系统运行中' : '系统未运行' }}
         </div>
         <div class="top-right">
           <span class="who">👤 <b>admin</b></span>
