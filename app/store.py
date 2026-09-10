@@ -1,7 +1,8 @@
 """去重存储:sqlite 单表 pushed(code PK, pushed_at, title)。
 
-外加频道监控游标表 monitor_state(源频道 → 已处理到的消息 ID):
-首次接入只记起点、不回补历史,此后重启按游标补扫停机漏档。
+外加两张表:
+- monitor_state(源频道 → 已处理到的消息 ID):首次接入只记起点、不回补历史,此后重启按游标补扫
+- pipeline_tasks(流水线任务):审核中的任务落库,重启后继续轮询,不再重复建分享
 """
 
 from __future__ import annotations
@@ -9,6 +10,10 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
+
+_TASK_FIELDS = (
+    "share_code", "receive_code", "fid", "name", "uid", "status", "created_at", "attempts",
+)
 
 
 class Store:
@@ -23,6 +28,11 @@ class Store:
             "CREATE TABLE IF NOT EXISTS monitor_state ("
             " ref TEXT PRIMARY KEY, chat_id TEXT, title TEXT,"
             " last_msg_id INTEGER, updated_at REAL)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS pipeline_tasks ("
+            " share_code TEXT PRIMARY KEY, receive_code TEXT, fid INTEGER, name TEXT,"
+            " uid INTEGER, status TEXT, created_at REAL, attempts INTEGER)"
         )
         self._conn.commit()
 
@@ -103,6 +113,42 @@ class Store:
              "last_msg_id": int(r[3] or 0), "updated_at": float(r[4] or 0.0)}
             for r in rows
         ]
+
+    # ── 流水线任务(审核轮询状态,重启不丢) ──────────────────
+    def save_pipeline_task(self, task: dict) -> None:
+        """写/更新一条流水线任务(share_code 为主键,幂等)。"""
+        self._conn.execute(
+            "INSERT INTO pipeline_tasks"
+            " (share_code, receive_code, fid, name, uid, status, created_at, attempts)"
+            " VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(share_code) DO UPDATE SET"
+            " receive_code=excluded.receive_code, fid=excluded.fid, name=excluded.name,"
+            " uid=excluded.uid, status=excluded.status, created_at=excluded.created_at,"
+            " attempts=excluded.attempts",
+            (
+                str(task["share_code"]), str(task.get("receive_code", "") or ""),
+                int(task.get("fid", 0) or 0), str(task.get("name", "") or ""),
+                int(task.get("uid", 0) or 0), str(task.get("status", "auditing")),
+                float(task.get("created_at", time.time())), int(task.get("attempts", 0) or 0),
+            ),
+        )
+        self._conn.commit()
+
+    def load_pipeline_tasks(self, statuses: tuple[str, ...] = ("auditing",)) -> list[dict]:
+        """按状态取任务(默认审核中),按创建时间正序。"""
+        marks = ",".join("?" * len(statuses))
+        rows = self._conn.execute(
+            f"SELECT {', '.join(_TASK_FIELDS)} FROM pipeline_tasks"
+            f" WHERE status IN ({marks}) ORDER BY created_at",
+            tuple(statuses),
+        ).fetchall()
+        return [dict(zip(_TASK_FIELDS, r, strict=False)) for r in rows]
+
+    def pipeline_task_stats(self) -> dict:
+        """任务计数(按状态)——状态展示用。"""
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) FROM pipeline_tasks GROUP BY status"
+        ).fetchall()
+        return {s: n for s, n in rows}
 
     def close(self) -> None:
         self._conn.close()

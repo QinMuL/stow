@@ -34,7 +34,10 @@ _AUDIT_TIMEOUT = 24 * 3600  # 放弃前最长等待
 
 @dataclass
 class PipelineTask:
-    """一条 /save 流水线任务(审核轮询阶段的状态)。"""
+    """一条 /save 流水线任务(审核轮询阶段的状态)。
+
+    created_at 用**墙钟时间**:时间戳要落库、跨重启比较(_AUDIT_TIMEOUT 按 24h 判)。
+    """
 
     share_code: str
     receive_code: str
@@ -43,7 +46,26 @@ class PipelineTask:
     uid: int               # 发起者(TG 通知用)
     status: str = "auditing"  # auditing | done | violated | timeout
     attempts: int = 0
-    created_at: float = field(default_factory=time.monotonic)
+    created_at: float = field(default_factory=time.time)
+
+    def to_row(self) -> dict:
+        """落库字段(与 Store.pipeline_tasks 列一致)。"""
+        return {
+            "share_code": self.share_code, "receive_code": self.receive_code,
+            "fid": self.fid, "name": self.name, "uid": self.uid,
+            "status": self.status, "attempts": self.attempts,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_row(cls, row: dict) -> PipelineTask:
+        return cls(
+            share_code=str(row["share_code"]), receive_code=str(row.get("receive_code") or ""),
+            fid=int(row.get("fid") or 0), name=str(row.get("name") or ""),
+            uid=int(row.get("uid") or 0), status=str(row.get("status") or "auditing"),
+            attempts=int(row.get("attempts") or 0),
+            created_at=float(row.get("created_at") or time.time()),
+        )
 
 
 class SavePipeline:
@@ -55,6 +77,30 @@ class SavePipeline:
         self.normalizer = ShareNormalizer(bot.reader, bot.tmdb)
         self._loop_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
+        self._restore_tasks()
+
+    def _restore_tasks(self) -> None:
+        """重启恢复:载入审核中的任务继续轮询(否则目录监控重扫会重复建分享)。
+
+        已结束的任务(done/violated/timeout)不载入——它们的目录已移走,重扫不会再遇到。
+        """
+        try:
+            rows = self.bot.store.load_pipeline_tasks(("auditing",))
+        except Exception as exc:  # noqa: BLE001 - 存储异常不阻塞 Bot 启动
+            logger.error("载入流水线任务失败:%s", exc, exc_info=exc)
+            return
+        for row in rows:
+            task = PipelineTask.from_row(row)
+            self.tasks[task.share_code] = task
+        if rows:
+            logger.info("载入 %d 个审核中流水线任务,继续轮询(重启不丢)", len(rows))
+
+    def _persist(self, task: PipelineTask) -> None:
+        """任务状态落库(失败仅告警:内存态照常跑,不因存储问题中断流水线)。"""
+        try:
+            self.bot.store.save_pipeline_task(task.to_row())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("流水线任务落库失败(%s):%s", task.share_code, exc)
 
     def start_loop(self) -> None:
         if self._loop_task is None or self._loop_task.done():
@@ -135,6 +181,7 @@ class SavePipeline:
             fid=nr.fid, name=nr.name, uid=uid,
         )
         self.tasks[share_code] = task
+        self._persist(task)  # 落库:重启后继续轮询,不重复建分享
         self.start_loop()
         if nr.actions:
             detail = ";".join(nr.actions[:3]) + ("…" if len(nr.actions) > 3 else "")
@@ -209,10 +256,12 @@ class SavePipeline:
                 suffix = "…" if len(nr.actions) > 3 else ""
                 logger.info("监控目录标准化:%s → %s(%s%s)", name, nr.name, joined, suffix)
             share_code, receive_code = await bot.reader.create_share(nr.fid)
-            self.tasks[share_code] = PipelineTask(
+            task = PipelineTask(
                 share_code=share_code, receive_code=receive_code,
                 fid=nr.fid, name=nr.name, uid=bot.cfg.tg_admin_ids[0],
             )
+            self.tasks[share_code] = task
+            self._persist(task)  # 落库:重启后跳过该 fid,不再重复建分享
             stat["shared"] += 1
             logger.info("监控目录新资源已建分享:%s(%s),进入审核轮询", nr.name, share_code)
             await asyncio.sleep(3)
@@ -252,9 +301,16 @@ class SavePipeline:
         return head + tail
 
     async def _check_task(self, task: PipelineTask) -> None:
+        """一轮检查;无论结果如何都把状态/尝试次数落库(重启后接着跑)。"""
+        try:
+            await self._check_once(task)
+        finally:
+            self._persist(task)
+
+    async def _check_once(self, task: PipelineTask) -> None:
         bot = self.bot
         cfg = bot.cfg
-        if time.monotonic() - task.created_at > _AUDIT_TIMEOUT:
+        if time.time() - task.created_at > _AUDIT_TIMEOUT:
             task.status = "timeout"
             logger.warning("分享审核超 24h,放弃推送:%s(%s)", task.name, task.share_code)
             await bot._notify_uid(
