@@ -126,6 +126,7 @@ class ChannelsUpdate(BaseModel):
 
 class MonitorPhone(BaseModel):
     phone: str = ""
+    resend: bool = False  # 显式要求重发验证码(默认复用进行中的会话,不重复发码)
 
 
 class MonitorCode(BaseModel):
@@ -385,7 +386,8 @@ def create_app(config_path: str | Path) -> FastAPI:
             store.close()
         data = mon.runtime_status() if mon is not None else {
             "state": "stopped", "state_text": "Bot 未运行", "account": "",
-            "connected": False, "login_stage": "", "last_error": "", "unreachable": {},
+            "connected": False, "login_stage": "", "login_phone": "",
+            "last_error": "", "unreachable": {},
         }
         data["channels"] = channel_rows(cfg, states, data.pop("unreachable"))
         data["api_set"] = bool(cfg.tg_api_id and cfg.tg_api_hash)
@@ -398,9 +400,9 @@ def create_app(config_path: str | Path) -> FastAPI:
 
     @app.post("/api/monitor/login/start")
     def monitor_login_start(body: MonitorPhone, request: Request) -> dict:
-        """发验证码(手机号含国家码)。"""
+        """发验证码(手机号含国家码);resend=false 时复用进行中的会话,不重复发码。"""
         _current_user(config_path, _auth_header(request))
-        ok, message = _monitor_call("login_start", body.phone)
+        ok, message = _monitor_call("login_start", body.phone, body.resend)
         return {"success": ok, "message": message, **_monitor_payload(load_config(config_path))}
 
     @app.post("/api/monitor/login/code")

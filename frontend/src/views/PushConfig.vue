@@ -94,8 +94,16 @@ function startLogin() {
 
 function onLoginDone(d) {
   showLogin.value = false
-  mon.value = d
-  monMsg.value = { text: d.message, kind: 'ok' }
+  if (d) {
+    mon.value = d
+    monMsg.value = { text: d.message, kind: 'ok' }
+  }
+  refreshMonitor()  // 同步"登录进行中/已完成"状态到卡片
+}
+
+function onLoginClose() {
+  showLogin.value = false
+  refreshMonitor()  // 关面板不清会话:回来时按钮应显示"继续登录"
 }
 
 async function logoutMonitor() {
@@ -349,6 +357,9 @@ async function saveChannels() {
         <span class="dot" :class="monDot"></span>
         <span>{{ mon ? mon.state_text : '状态加载中…' }}</span>
         <span v-if="mon?.account" class="mon-sub">· {{ mon.account }}</span>
+        <span v-if="mon?.login_stage" class="mon-sub">
+          · 登录进行中({{ mon.login_stage === 'password' ? '待两步密码' : '待验证码' }})
+        </span>
         <span v-if="mon?.channels?.length" class="mon-sub">
           · {{ okChannels }}/{{ mon.channels.length }} 频道可达
         </span>
@@ -373,12 +384,14 @@ async function saveChannels() {
         <button v-if="mon?.account" class="btn ghost" style="margin-left:auto" @click="logoutMonitor">
           退出登录
         </button>
-        <button v-else class="btn ghost" style="margin-left:auto" @click="startLogin">登录账号</button>
+        <button v-else class="btn ghost" style="margin-left:auto" @click="startLogin">
+          {{ mon?.login_stage ? '继续登录' : '登录账号' }}
+        </button>
         <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
       </div>
     </div>
 
     <DirPickerModal v-if="showPicker" @pick="onPickDir" @close="showPicker = false" />
-    <MonitorLoginModal v-if="showLogin" @done="onLoginDone" @close="showLogin = false" />
+    <MonitorLoginModal v-if="showLogin" :mon="mon" @done="onLoginDone" @close="onLoginClose" />
   </div>
 </template>

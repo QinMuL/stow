@@ -228,21 +228,47 @@ class ChannelMonitor:
     def login_active(self) -> bool:
         return bool(self._login) and time.monotonic() - self._login.get("at", 0) < _LOGIN_TTL
 
-    async def login_start(self, phone: str) -> tuple[bool, str]:
-        """发验证码:手机号含国家码,如 +8613800138000。"""
+    async def login_start(self, phone: str, resend: bool = False) -> tuple[bool, str]:
+        """发验证码(手机号含国家码,如 +8613800138000)。
+
+        resend=False 时,若同一号码已有进行中的登录会话则**直接复用**(不重复发码):
+        Telegram 对同一号码反复发码会回 SendCodeUnavailableError(可用方式已用完),
+        第一次收到的验证码在有效期内依然可用——所以关掉面板再打开应当接着填,而不是重发。
+        """
         cfg = self.bot.cfg
         if not cfg.tg_api_id or not cfg.tg_api_hash:
             return False, "tg_api_id / tg_api_hash 尚未生效:填好后点「保存并重启」,再回来登录"
         phone = (phone or "").strip().replace(" ", "")
         if not phone.startswith("+") or not phone[1:].isdigit():
             return False, "手机号需含国家码且以 + 开头,如 +8613800138000"
+        # 进行中的会话:同号码且未要求重发 → 复用,避免触发 Telegram 发码限流
+        if not resend and self.login_active and self._login.get("phone") == phone:
+            self._login["at"] = time.monotonic()  # 续期,便于继续填写
+            stage = self._login.get("stage")
+            if stage == "password":
+                return True, "延续上次登录:请填写两步验证密码"
+            return True, "验证码此前已发送,请填写已收到的那条(未点「重新发送验证码」时不会重复发送)"
+        if resend and not self.login_active:
+            return False, "登录会话已过期,请先填写手机号重新获取验证码"
+
+        from telethon.errors import FloodWaitError, SendCodeUnavailableError
+
         try:
             client = self._client or await self._make_client()
             if await client.is_user_authorized():
                 await self._setup(client)
                 return True, "该账号已登录,监控已启动"
             sent = await client.send_code_request(phone)
-        except Exception as exc:  # noqa: BLE001 - 网络/风控等一律回执原文
+        except SendCodeUnavailableError:
+            logger.warning("发码被 Telegram 拒绝(该号码可用方式已用完):%s", phone)
+            tip = "该号段已没有可用的发码方式(Telegram 限制),请等待一段时间再试"
+            if self.login_active:
+                tip += ";当前会话仍在,可先填之前收到的验证码"
+            return False, f"无法再发送验证码:{tip}"
+        except FloodWaitError as exc:
+            logger.warning("发码触发风控,需等待 %ss:%s", exc.seconds, phone)
+            return False, f"操作太频繁,请等待 {exc.seconds} 秒后重试"
+        except Exception as exc:  # noqa: BLE001 - 网络等其余情况回执原文
             logger.error("获取验证码失败:%s", exc, exc_info=exc)
             return False, f"获取验证码失败:{str(exc)[:120]}"
         self._login = {
@@ -251,13 +277,13 @@ class ChannelMonitor:
         }
         self.login_stage = "code"
         logger.info("频道监控:已向 %s 发送登录验证码", phone)
-        return True, "验证码已发送(Telegram 内查收),请填写"
+        return True, "验证码已发送(Telegram 内查收),请填写;面板关掉也能接着填,验证码不会因此失效"
 
     async def login_code(self, code: str) -> tuple[bool, str]:
         code = (code or "").strip()
         if not self.login_active or self._login.get("stage") != "code":
             return False, "登录会话已过期,请重新获取验证码"
-        from telethon.errors import SessionPasswordNeededError
+        from telethon.errors import PhoneCodeExpiredError, PhoneCodeInvalidError, SessionPasswordNeededError
 
         try:
             await self._client.sign_in(
@@ -266,8 +292,15 @@ class ChannelMonitor:
             )
         except SessionPasswordNeededError:
             self._login["stage"] = "password"
+            self._login["at"] = time.monotonic()
             self.login_stage = "password"
             return True, "该账号开启了两步验证,请填写两步密码"
+        except PhoneCodeExpiredError:
+            logger.warning("验证码已过期:%s", self._login.get("phone"))
+            return False, "验证码已过期,请点「重新发送验证码」获取新的"
+        except PhoneCodeInvalidError:
+            self._login["at"] = time.monotonic()  # 输错不踢掉会话,可重填
+            return False, "验证码不正确,请核对后重填(可重试若干次)"
         except Exception as exc:  # noqa: BLE001
             logger.warning("验证码登录失败:%s", exc)
             return False, f"验证失败:{str(exc)[:120]}"
@@ -511,6 +544,7 @@ class ChannelMonitor:
             "account": self.account,
             "connected": bool(self._client is not None and self._client.is_connected()),
             "login_stage": self.login_stage if self.login_active else "",
+            "login_phone": (self._login.get("phone", "") if self.login_active else ""),
             "last_error": self.last_error,
             "unreachable": dict(self._unreachable),
         }

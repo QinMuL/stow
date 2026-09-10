@@ -1,7 +1,11 @@
 <script setup>
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { api } from '../api'
 
+const props = defineProps({
+  // 监控状态:带 login_stage / login_phone 时说明还有进行中的登录会话
+  mon: { type: Object, default: null },
+})
 const emit = defineEmits(['done', 'close'])
 
 const phone = ref('')
@@ -10,6 +14,16 @@ const password = ref('')
 const stage = ref('phone')   // phone → code → password(两步验证)
 const msg = ref({ text: '', kind: '' })
 const busy = ref(false)
+
+onMounted(() => {
+  // 接续进行中的会话:关过面板不该让已收到的验证码白费
+  phone.value = props.mon?.login_phone || ''
+  if (props.mon?.login_stage === 'password') stage.value = 'password'
+  else if (props.mon?.login_stage === 'code') {
+    stage.value = 'code'
+    msg.value = { text: '上次的验证码仍有效,直接填即可(不会重复发送)', kind: 'warn' }
+  }
+})
 
 async function call(path, body) {
   busy.value = true
@@ -30,25 +44,34 @@ async function call(path, body) {
 }
 
 const sendCode = () => call('start', { phone: phone.value })
-const sendCodeAgain = () => call('start', { phone: phone.value })
+const resendCode = () => call('start', { phone: phone.value, resend: true })
 const submitCode = () => call('code', { code: code.value })
 const submitPassword = () => call('password', { password: password.value })
 
-async function cancel() {
-  try { await api('monitor/login/cancel', {}) } catch { /* 关闭即可 */ }
+// 关闭面板:不清理进行中的登录会话(验证码仍然有效,重开接着填)
+function close() {
   emit('close')
+}
+
+// 显式放弃:清掉会话,下次要重新发码
+async function giveUp() {
+  busy.value = true
+  try { await api('monitor/login/cancel', {}) } catch { /* 关闭即可 */ }
+  busy.value = false
+  emit('done', null)
 }
 </script>
 
 <template>
-  <div class="modal-mask" @click.self="cancel">
+  <!-- 点空白不关闭:填验证码时误触会让收到的码白费(用户反馈) -->
+  <div class="modal-mask">
     <div class="modal-card" style="width:min(440px,100%)">
       <div class="modal-head">
         <div>
           <div class="page-title" style="font-size:17px">登录监控账号</div>
           <div class="page-sub">用于监听源频道,登录一次即长期有效(会话存在容器数据目录)</div>
         </div>
-        <button class="modal-close" @click="cancel">✕</button>
+        <button class="modal-close" title="关闭(不影响已发送的验证码)" @click="close">✕</button>
       </div>
 
       <div v-if="stage === 'phone'" class="field">
@@ -59,8 +82,11 @@ async function cancel() {
 
       <div v-else-if="stage === 'code'" class="field">
         <label>登录验证码</label>
-        <input v-model="code" placeholder="Telegram 里收到的 5 位验证码" autocomplete="off" @keyup.enter="submitCode">
-        <div class="hint">收不到?点下方「重新发送验证码」</div>
+        <input v-model="code" placeholder="Telegram 里收到的验证码" autocomplete="off" @keyup.enter="submitCode">
+        <div class="hint">
+          手机号 {{ phone || '—' }};关闭面板不会让验证码失效,重开可继续填。
+          只有点「重新发送验证码」才会再发一条(短时间内反复发会被 Telegram 限流)。
+        </div>
       </div>
 
       <div v-else class="field">
@@ -77,12 +103,13 @@ async function cancel() {
         </button>
         <template v-else-if="stage === 'code'">
           <button class="btn primary" style="flex:1" :disabled="busy" @click="submitCode">登录</button>
-          <button class="btn ghost" :disabled="busy" @click="sendCodeAgain">重新发送验证码</button>
+          <button class="btn ghost" :disabled="busy" @click="resendCode">重新发送验证码</button>
         </template>
         <button v-else class="btn primary" style="flex:1" :disabled="busy" @click="submitPassword">
           提交并登录
         </button>
-        <button class="btn ghost" :disabled="busy" @click="cancel">取消</button>
+        <button v-if="stage === 'phone'" class="btn ghost" :disabled="busy" @click="close">关闭</button>
+        <button v-else class="btn ghost" :disabled="busy" @click="giveUp">放弃登录</button>
       </div>
     </div>
   </div>

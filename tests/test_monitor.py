@@ -426,3 +426,112 @@ def test_runtime_status_and_rows(tmp_path):
     rows = mon.channel_rows(mon.bot.store.monitor_states())
     assert rows[0]["last_msg_id"] == 33 and rows[0]["ok"] is True
     assert rows[1]["ok"] is False
+
+
+# ── 登录会话复用(防重复发码撞限流) ──────────────────────────
+def test_login_start_reuses_active_session(tmp_path):
+    """同号码再次点「登录账号」:复用会话、不再发码(否则 Telegram 会限流)。"""
+    mon, _, client = _monitor(tmp_path, authorized=False)
+    asyncio.run(mon.login_start("+8613800138000"))
+    assert client.code_sent == ["+8613800138000"]
+
+    ok, msg = asyncio.run(mon.login_start("+8613800138000"))   # 未要求重发
+    assert ok and "已发送" in msg
+    assert client.code_sent == ["+8613800138000"]              # 没有第二次发码
+    assert mon.login_stage == "code"
+
+
+def test_login_start_resend_is_explicit(tmp_path):
+    """只有 resend=True 才真的重发。"""
+    mon, _, client = _monitor(tmp_path, authorized=False)
+    asyncio.run(mon.login_start("+8613800138000"))
+    asyncio.run(mon.login_start("+8613800138000", True))
+    assert client.code_sent == ["+8613800138000", "+8613800138000"]
+
+
+def test_login_start_reuse_after_password_stage(tmp_path):
+    mon, _, _ = _monitor(tmp_path, authorized=False)
+    asyncio.run(mon.login_start("+8613800138000"))
+    asyncio.run(mon.login_code("needs2fa"))                     # 转两步验证
+    ok, msg = asyncio.run(mon.login_start("+8613800138000"))
+    assert ok and "两步" in msg and mon.login_stage == "password"
+
+
+def test_login_start_other_phone_sends_again(tmp_path):
+    """换号码:属于新会话,正常发码。"""
+    mon, _, client = _monitor(tmp_path, authorized=False)
+    asyncio.run(mon.login_start("+8613800138000"))
+    asyncio.run(mon.login_start("+8613900139000"))
+    assert client.code_sent == ["+8613800138000", "+8613900139000"]
+
+
+def test_login_start_send_unavailable_message(tmp_path):
+    """Telegram 拒发(SendCodeUnavailableError)→ 给可操作的人话提示。"""
+    from telethon.errors import SendCodeUnavailableError
+
+    mon, _, client = _monitor(tmp_path, authorized=False)
+
+    async def boom(phone):
+        raise SendCodeUnavailableError(request=None)
+
+    client.send_code_request = boom
+    ok, msg = asyncio.run(mon.login_start("+8613800138000"))
+    assert ok is False
+    assert "无法再发送验证码" in msg and "等待" in msg
+
+
+def test_login_start_flood_wait_message(tmp_path):
+    from telethon.errors import FloodWaitError
+
+    mon, _, client = _monitor(tmp_path, authorized=False)
+
+    async def boom(phone):
+        e = FloodWaitError(request=None)
+        e.seconds = 42
+        raise e
+
+    client.send_code_request = boom
+    ok, msg = asyncio.run(mon.login_start("+8613800138000"))
+    assert ok is False and "42" in msg
+
+
+def test_login_code_invalid_keeps_session(tmp_path):
+    """验证码输错不踢掉会话,可继续重填(不回退到重新发码)。"""
+    from telethon.errors import PhoneCodeInvalidError
+
+    mon, _, client = _monitor(tmp_path, authorized=False)
+    asyncio.run(mon.login_start("+8613800138000"))
+
+    async def bad(**kwargs):
+        raise PhoneCodeInvalidError(request=None)
+
+    client.sign_in = bad
+    ok, msg = asyncio.run(mon.login_code("00000"))
+    assert ok is False and "不正确" in msg
+    assert mon.login_stage == "code" and mon.login_active is True
+
+
+def test_login_code_expired_tells_resend(tmp_path):
+    from telethon.errors import PhoneCodeExpiredError
+
+    mon, _, client = _monitor(tmp_path, authorized=False)
+    asyncio.run(mon.login_start("+8613800138000"))
+
+    async def expired(**kwargs):
+        raise PhoneCodeExpiredError(request=None)
+
+    client.sign_in = expired
+    ok, msg = asyncio.run(mon.login_code("12345"))
+    assert ok is False and "过期" in msg and "重新发送" in msg
+
+
+def test_runtime_status_exposes_login_phone(tmp_path):
+    """面板重开要能接续:状态里带手机号与阶段。"""
+    mon, _, _ = _monitor(tmp_path, authorized=False)
+    assert mon.runtime_status()["login_phone"] == ""
+    asyncio.run(mon.login_start("+8613800138000"))
+    rs = mon.runtime_status()
+    assert rs["login_phone"] == "+8613800138000" and rs["login_stage"] == "code"
+    asyncio.run(mon.login_cancel())
+    rs = mon.runtime_status()
+    assert rs["login_phone"] == "" and rs["login_stage"] == ""
