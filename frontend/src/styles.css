@@ -249,3 +249,26 @@ a { color: var(--amber); text-decoration: none; }
 .chan-id { flex: 1; min-width: 150px; background: var(--bg-soft); border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 10px; color: var(--fg); font-size: 12.5px; font-family: var(--mono); }
 .chan-presets { display: flex; gap: 6px; }
 .chan-del { padding: 5px 12px; font-size: 12px; }
+
+/* 账号/服务模态(点击顶栏用户名) */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(8, 6, 4, .65); backdrop-filter: blur(2px);
+  display: grid; place-items: center; padding: 16px;
+}
+.modal-card {
+  width: min(560px, 100%); max-height: 88dvh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line-strong);
+  border-radius: var(--r-l); padding: 18px 20px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .5);
+}
+.modal-head { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; }
+.modal-head .page-sub { margin-top: 2px; }
+.modal-close {
+  background: transparent; border: 1px solid var(--line-strong); color: var(--sub);
+  border-radius: var(--r-m); width: 32px; height: 32px; cursor: pointer; font-size: 14px; flex: none;
+}
+.modal-close:hover { color: var(--text); border-color: var(--faint); }
+.who-btn { color: var(--sub); font-size: 13px; padding: 4px 6px; border-radius: var(--r-m); }
+.who-btn:hover { color: var(--amber-strong); }
+.who-btn b { color: var(--text); font-weight: 600; }

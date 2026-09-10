@@ -2,16 +2,18 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, clearToken } from './api'
+import AccountModal from './views/AccountModal.vue'
 
 const route = useRoute()
 const router = useRouter()
 const status = ref(null)
 const version = ref('v0.1')
+const showAccount = ref(false)
 
 const nav = [
   { to: '/overview', ic: '◉', label: '总览' },
   { to: '/push', ic: '✦', label: '全局配置' },
-  { to: '/system', ic: '⚙', label: '系统设置' },
+  { to: '/logs', ic: '≡', label: '日志' },
 ]
 
 // 整体系统状态:聚合 Bot 进程 / 代理连通 / 115 通道三段健康,一眼看出有无异常
@@ -66,7 +68,6 @@ onMounted(refresh)
         <!-- 预留位:功能到,页面到
         <router-link class="nav-item" to="/transfer"><span class="ic">⇅</span><span class="txt">自动转存</span><span class="soon">soon</span></router-link>
         -->
-        <router-link class="nav-item" to="/logs"><span class="ic">≡</span><span class="txt">日志</span></router-link>
       </nav>
       <div class="side-foot">{{ version }} · amber</div>
     </aside>
@@ -78,7 +79,7 @@ onMounted(refresh)
           {{ sysState.text }}
         </div>
         <div class="top-right">
-          <span class="who">👤 <b>admin</b></span>
+          <button class="link-btn who-btn" title="账号与服务" @click="showAccount = true">👤 <b>admin</b></button>
           <button class="link-btn" @click="logout">退出</button>
         </div>
       </div>
@@ -88,5 +89,7 @@ onMounted(refresh)
         </div>
       </div>
     </div>
+
+    <AccountModal v-if="showAccount" @close="showAccount = false" />
   </div>
 </template>
