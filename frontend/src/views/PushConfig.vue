@@ -47,17 +47,11 @@ const GROUPS = [
       { key: 'pipeline_root_dir', label: '流水线根目录', hint: '填网盘目录 ID(点 📂 选择)或路径;不存在自动创建', picker: true },
     ],
   },
-  {
-    title: '目录监控',
-    desc: '网盘目录出现新资源时,自动整理→建永久分享→审核通过后推送(30 分钟一轮)',
-    fields: [
-      { key: 'monitor_dirs', label: '监控目录(可选)', hint: '网盘目录 ID,多个逗号分隔(点 📂 逐个选择);留空不监控', picker: true, multi: true },
-    ],
-  },
 ]
 
 const model = ref({})
 const channels = ref([])
+const monitorRows = ref([])
 const chanMsg = ref({ text: '', kind: '' })
 const chanBusy = ref(false)
 
@@ -71,6 +65,8 @@ onMounted(async () => {
     }
   }
   model.value = m
+  monitorRows.value = String(cfg.value.monitor_dirs || '')
+    .split(',').map(x => x.trim()).filter(Boolean)
   const d = await api('channels')
   channels.value = d.channels.map(c => ({ ...c }))
 })
@@ -87,6 +83,7 @@ async function save(restart) {
     for (const g of GROUPS) {
       for (const f of g.fields) values[f.key] = model.value[f.key]
     }
+    values.monitor_dirs = monitorRows.value.join(',')
     const d = await api('config', { values }, 'PUT')
     if (restart) {
       await api('restart', {})
@@ -107,25 +104,24 @@ async function save(restart) {
 
 // ── 网盘目录选择器 ──
 const showPicker = ref(false)
-const pickerTarget = ref('')
+const pickerTarget = ref('')  // 'pipeline' 或监控行索引(字符串)
 
-function openPicker(key) {
-  pickerTarget.value = key
+function openPicker(target) {
+  pickerTarget.value = String(target)
   showPicker.value = true
 }
 
 function onPickDir(d) {
-  const key = pickerTarget.value
-  const cur = String(model.value[key] || '').trim()
-  if (key === 'monitor_dirs') {
-    // 多值:追加 CID(去重)
-    const ids = cur ? cur.split(',').map(x => x.trim()).filter(Boolean) : []
-    if (!ids.includes(String(d.cid))) ids.push(String(d.cid))
-    model.value[key] = ids.join(',')
+  if (pickerTarget.value === 'pipeline') {
+    model.value.pipeline_root_dir = d.cid
   } else {
-    model.value[key] = String(d.cid)
+    monitorRows.value[Number(pickerTarget.value)] = d.cid
   }
   showPicker.value = false
+}
+
+function addMonitorRow() {
+  monitorRows.value.push('')
 }
 
 // ── TG 频道配置:归属频道管理 ──
@@ -185,6 +181,33 @@ async function saveChannels() {
       </div>
 
       <div class="actions">
+        <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>目录监控</h3>
+      <div class="desc">网盘目录出现新资源时,自动整理→建永久分享→审核通过后推送(30 分钟一轮)</div>
+
+      <div class="chan-tip">
+        💡 每行一个监控目录:点 <strong>📂</strong> 浏览网盘选择(回填目录 ID),也可手动输入目录 ID。
+        处理完成的资源会自动移出监控目录,无需手动清理。
+      </div>
+
+      <div class="chan-list">
+        <div v-for="(d, i) in monitorRows" :key="i" class="chan-row">
+          <input v-model="monitorRows[i]" class="chan-id" placeholder="网盘目录 ID 或路径" style="flex:1">
+          <button class="btn ghost" style="flex:none;padding:8px 12px" title="浏览网盘选择"
+            @click="openPicker(String(i))">📂</button>
+          <button class="btn danger chan-del" @click="monitorRows.splice(i, 1)">删除</button>
+        </div>
+      </div>
+      <div v-if="!monitorRows.length" class="empty" style="margin-bottom:12px">
+        还没有监控目录 —— 点下方添加,或直接等资源放进来
+      </div>
+
+      <div class="actions">
+        <button class="btn ghost" @click="addMonitorRow">+ 添加目录</button>
         <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
       </div>
     </div>

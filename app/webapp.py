@@ -349,7 +349,7 @@ def create_app(config_path: str | Path) -> FastAPI:
             raise HTTPException(status_code=502, detail=f"列目录失败:{str(exc)[:100]}") from exc
         return {
             "cid": cid,
-            "items": [{"cid": it["fid"], "name": it["name"]} for it in items],
+            "items": [{"cid": str(it["fid"]), "name": it["name"]} for it in items],
         }
 
     # ── 状态 / 历史 / 重启 ──────────────────────────────────
