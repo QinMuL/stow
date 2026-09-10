@@ -1,6 +1,7 @@
 .venv/
 data/
-media/            # 媒体流转目录(体积大,只在本机)
+# 媒体流转目录(体积大,只在本机;注释必须独立成行,不能写在模式同一行)
+media/
 __pycache__/
 *.pyc
 .pytest_cache/
