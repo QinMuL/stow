@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api } from '../api'
+import { clearPageBar, setPageBar } from '../pagebar'
 import DirPickerModal from './DirPickerModal.vue'
 import MonitorLoginModal from './MonitorLoginModal.vue'
 
@@ -86,7 +87,7 @@ function addMonitorChannel() {
 function startLogin() {
   monMsg.value = { text: '', kind: '' }
   if (!mon.value?.api_set) {
-    monMsg.value = { text: '请先填 tg_api_id / tg_api_hash,点「保存并重启」后再登录', kind: 'warn' }
+    monMsg.value = { text: '请先填 tg_api_id / tg_api_hash,点顶部「保存并重启」后再登录', kind: 'warn' }
     return
   }
   showLogin.value = true
@@ -136,26 +137,63 @@ onMounted(async () => {
     .split(',').map(x => x.trim()).filter(Boolean)
   const d = await api('channels')
   channels.value = d.channels.map(c => ({ ...c }))
+  restartPending.value = !!cfg.value.restart_pending
+  baseline.value = snapshot()   // 基线:之后与它比对判断有无未保存变更
   await refreshMonitor()
 })
+
+onUnmounted(clearPageBar)
 
 function isSaved(f) {
   return f.sensitive && cfg.value?.[f.key] === '••••••••'
 }
 
+// ── 提交内容 / 变更检测 ──────────────────────────────────
+function formValues() {
+  const values = {}
+  for (const g of GROUPS) {
+    for (const f of g.fields) values[f.key] = model.value[f.key]
+  }
+  values.monitor_dirs = monitorRows.value.join(',')
+  values.monitor_channels = monitorChannelRows.value.join(',')
+  values.tg_api_id = model.value.tg_api_id
+  values.tg_api_hash = model.value.tg_api_hash
+  return values
+}
+
+function snapshot() {
+  return JSON.stringify({ values: formValues(), channels: channels.value })
+}
+
+const baseline = ref('')
+const restartPending = ref(false)   // 后端口径:改过配置但运行中的 Bot 还没吃上
+const dirty = computed(() => baseline.value !== '' && snapshot() !== baseline.value)
+const needsRestart = computed(() => dirty.value || restartPending.value)
+
+// 顶部操作条:只在"有需要重启的变更"时出现(未保存 或 已保存未生效)
+watch([needsRestart, dirty, busy], () => {
+  if (!needsRestart.value) {
+    clearPageBar()
+    return
+  }
+  setPageBar({
+    text: dirty.value ? '有未保存的配置变更' : '配置已保存,尚未生效',
+    hint: dirty.value
+      ? '保存并重启后生效;仅点卡片内「保存」不会作用于运行中的 Bot'
+      : '服务重启后生效',
+    actionText: '保存并重启',
+    busy: busy.value,
+    action: () => save(true),
+  })
+}, { immediate: true })
+
 async function save(restart) {
   busy.value = true
   msg.value = { text: '', kind: '' }
   try {
-    const values = {}
-    for (const g of GROUPS) {
-      for (const f of g.fields) values[f.key] = model.value[f.key]
-    }
-    values.monitor_dirs = monitorRows.value.join(',')
-    values.monitor_channels = monitorChannelRows.value.join(',')
-    values.tg_api_id = model.value.tg_api_id
-    values.tg_api_hash = model.value.tg_api_hash
-    const d = await api('config', { values }, 'PUT')
+    const d = await api('config', { values: formValues() }, 'PUT')
+    baseline.value = snapshot()
+    restartPending.value = !!d.restart_pending
     if (restart) {
       await api('restart', {})
       msg.value = { text: '已保存,服务重启中…页面将在数秒后自动恢复', kind: 'ok' }
@@ -216,6 +254,8 @@ async function saveChannels() {
   try {
     const d = await api('channels', { channels: channels.value }, 'PUT')
     chanMsg.value = { text: d.message, kind: 'ok' }
+    baseline.value = snapshot()
+    restartPending.value = !!d.restart_pending
   } catch (e) {
     chanMsg.value = { text: e.message, kind: 'err' }
   } finally {
@@ -228,7 +268,7 @@ async function saveChannels() {
   <div>
     <div class="page-head">
       <div class="page-title">全局配置</div>
-      <div class="page-sub">凭据 · 代理 · 频道归属;各卡片独立保存</div>
+      <div class="page-sub">凭据 · 代理 · 频道归属;卡片内保存,需要重启的变更会出现在页面顶部</div>
     </div>
 
     <div v-if="msg.text" class="msg" :class="msg.kind" style="margin-bottom:14px">{{ msg.text }}</div>
@@ -313,7 +353,6 @@ async function saveChannels() {
       <div class="actions">
         <button class="btn ghost" @click="addChannel">+ 添加频道</button>
         <button class="btn primary" :disabled="chanBusy" @click="saveChannels">保存频道</button>
-        <button class="btn ghost" :disabled="busy" @click="save(true)" style="margin-left:auto">保存并重启</button>
       </div>
     </div>
 
@@ -340,7 +379,7 @@ async function saveChannels() {
       <div class="chan-tip">
         💡 每行一个源频道:公开频道填 <strong>@用户名</strong> 或 <code>t.me/xxx</code>,
         私有频道填 <code>-100</code> 开头的频道 ID。首次接入<strong>只从当前消息开始</strong>监听、
-        不回补历史;停机期间的漏档会在重启后按游标补扫。改动后点「保存并重启」生效。
+        不回补历史;停机期间的漏档会在重启后按游标补扫。改动后点页面顶部出现的「保存并重启」生效。
       </div>
 
       <div class="chan-list">
@@ -350,7 +389,7 @@ async function saveChannels() {
         </div>
       </div>
       <div v-if="!monitorChannelRows.length" class="empty" style="margin-bottom:12px">
-        还没有源频道 —— 添加后「保存并重启」,再点右下角「登录账号」开始监听
+        还没有源频道 —— 添加后保存(顶部会出现「保存并重启」),再点「登录账号」开始监听
       </div>
 
       <div class="mon-line">
@@ -387,7 +426,6 @@ async function saveChannels() {
         <button v-else class="btn ghost" style="margin-left:auto" @click="startLogin">
           {{ mon?.login_stage ? '继续登录' : '登录账号' }}
         </button>
-        <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
       </div>
     </div>
 

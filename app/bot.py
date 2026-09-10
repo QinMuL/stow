@@ -209,7 +209,7 @@ class StowBot:
             await query.answer("未知归属")
             return
 
-        from app.config import read_raw, write_raw
+        from app.config import fingerprint, read_raw, write_raw
 
         raw = read_raw(self.config_path)
         channels = [c for c in raw.get("channels", []) if str(c.get("chat_id")) != chat_id]
@@ -220,6 +220,13 @@ class StowBot:
         self.cfg.channels = [
             c for c in self.cfg.channels if c.chat_id != chat_id
         ] + [ChannelConfig(chat_id=chat_id, preset=preset, title=title)]
+        # 登记是热生效的:同步"已生效配置"指纹,免得网页误报"需重启"
+        try:
+            from app.webapp import STATE
+
+            STATE["cfg_fingerprint"] = fingerprint(read_raw(self.config_path))
+        except Exception as exc:  # noqa: BLE001 - 指纹刷新失败不影响登记
+            logger.warning("刷新配置指纹失败:%s", exc)
 
         await query.edit_message_text(
             f"✅ 已登记「{title}」({chat_id}) → {_PRESET_LABEL[preset]}\n"

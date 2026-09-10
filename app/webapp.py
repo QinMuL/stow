@@ -23,6 +23,7 @@ from app.config import (
     MASK,
     SENSITIVE_KEYS,
     ensure_admin,
+    fingerprint,
     load_config,
     read_raw,
     write_raw,
@@ -202,6 +203,16 @@ def create_app(config_path: str | Path) -> FastAPI:
         return {"success": True, "username": new_username or user}
 
     # ── 配置 ────────────────────────────────────────────────
+    def _restart_pending() -> bool:
+        """文件里的配置与运行中 Bot 生效的配置是否不一致(即:改了但没重启)。
+
+        Bot 未运行时返回 False——那种情况由"Bot 未启动"状态表达,不该催重启。
+        """
+        fp = STATE.get("cfg_fingerprint")
+        if not fp or not STATE.get("bot_running"):
+            return False
+        return fingerprint(read_raw(config_path)) != fp
+
     @app.get("/api/config")
     def get_config(request: Request) -> dict:
         _current_user(config_path, _auth_header(request))
@@ -215,6 +226,7 @@ def create_app(config_path: str | Path) -> FastAPI:
                 out[key] = MASK if (s and s.isascii()) else ""
             else:
                 out[key] = v
+        out["restart_pending"] = _restart_pending()
         return out
 
     @app.put("/api/config")
@@ -253,7 +265,12 @@ def create_app(config_path: str | Path) -> FastAPI:
                 raw[key] = s
         write_raw(raw, config_path)
         cfg = load_config(config_path)
-        return {"success": True, "bot_ready": cfg.bot_ready(), "missing": cfg.problems()}
+        return {
+            "success": True,
+            "bot_ready": cfg.bot_ready(),
+            "missing": cfg.problems(),
+            "restart_pending": _restart_pending(),
+        }
 
     # ── 日志 ────────────────────────────────────────────────
     _log_line_re = re.compile(
@@ -347,7 +364,11 @@ def create_app(config_path: str | Path) -> FastAPI:
         raw = read_raw(config_path)
         raw["channels"] = items
         write_raw(raw, config_path)
-        return {"success": True, "message": "已保存,重启后生效(或在 Bot 中转发频道消息登记)"}
+        return {
+            "success": True,
+            "message": "已保存;重启后生效(或在 Bot 中转发频道消息登记)",
+            "restart_pending": _restart_pending(),
+        }
 
     # ── 频道监控(源频道 ed2k → 本项目卡片) ──────────────────
     def _monitor_or_503():

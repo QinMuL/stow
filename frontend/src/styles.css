@@ -302,3 +302,27 @@ a { color: var(--amber); text-decoration: none; }
 .mon-chan:last-child { border-bottom: none; }
 .mon-chan-name { color: var(--text); }
 .mon-err { color: var(--bad); font-size: 12.5px; }
+
+/* 页面级操作条(顶栏下方,位于内容滚动区之外:不随内容滚动、不遮挡卡片) */
+.page-bar {
+  flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 10px 26px; border-bottom: 1px solid rgba(232, 163, 61, .35);
+  background: linear-gradient(90deg, rgba(232, 163, 61, .16), rgba(232, 163, 61, .04));
+}
+.page-bar .pb-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--amber); box-shadow: 0 0 8px rgba(232, 163, 61, .8);
+}
+.page-bar .pb-text { font-size: 13.5px; font-weight: 600; color: var(--amber-strong); }
+.page-bar .pb-hint { font-size: 12.5px; color: var(--sub); }
+.page-bar .btn { margin-left: auto; padding: 8px 16px; }
+
+/* 操作条响应式(写在基础规则之后,否则会被覆盖) */
+@media (max-width: 900px) {
+  .page-bar { padding: 10px 16px; }
+}
+@media (max-width: 640px) {
+  .page-bar { padding: 9px 12px; flex-wrap: wrap; }
+  .page-bar .pb-hint { display: none; }
+  .page-bar .btn { margin-left: 0; flex: 1; padding: 11px 16px; }
+}

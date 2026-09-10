@@ -34,12 +34,15 @@ def _start_web(port: int, config_path: str) -> None:
 
 def _run_bot(config_path: str) -> None:
     from app.bot import run
+    from app.config import fingerprint, read_raw
     from app.webapp import STATE
 
     cfg = load_config(config_path, strict=True)
     store = Store(cfg.db_path)
     STATE["bot_running"] = True
     STATE["bot_error"] = ""
+    # 记下"Bot 实际生效的配置"指纹:网页改了配置但没重启时,前端据此提示需重启
+    STATE["cfg_fingerprint"] = fingerprint(read_raw(config_path))
     try:
         run(cfg, store, config_path)
     except Exception as exc:  # noqa: BLE001 - Bot 异常不拖垮 Web
@@ -48,6 +51,7 @@ def _run_bot(config_path: str) -> None:
         logging.getLogger("stow").error("Bot 退出:%s", exc, exc_info=exc)
     finally:
         STATE["bot_running"] = False
+        STATE.pop("cfg_fingerprint", None)
         store.close()
 
 

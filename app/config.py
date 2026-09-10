@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -146,6 +147,16 @@ def _int(value: object) -> int:
     """整数配置:非法/空值回退 0(Web 表单可能传字符串)。"""
     s = str(value or "").strip()
     return int(s) if s.lstrip("-").isdigit() else 0
+
+
+def fingerprint(raw: dict) -> str:
+    """配置指纹:判断"文件里的配置"与"运行中 Bot 生效的配置"是否一致。
+
+    Bot 启动时记下当时的指纹;此后文件被改(网页保存、/bind 写频道)且**未**同步给
+    Bot 时,指纹就不同 → 前端据此提示"需保存并重启"。键序无关,值变化即变。
+    """
+    payload = json.dumps(raw, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def read_raw(path: str | Path | None = None) -> dict:

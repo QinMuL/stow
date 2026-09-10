@@ -390,3 +390,75 @@ def test_monitor_login_503_when_loop_missing(tmp_path):
         assert r.status_code == 503
     finally:
         wa.STATE.pop("monitor", None)
+
+
+# ── 待重启检测(顶部「保存并重启」条的判据) ────────────────
+def test_fingerprint_tracks_value_changes(tmp_path):
+    """指纹:键序无关;任一值变化即变。"""
+    from app.config import fingerprint
+
+    a = {"b": 2, "a": 1, "channels": [{"chat_id": "-100", "preset": "ed2k"}]}
+    b = {"a": 1, "channels": [{"chat_id": "-100", "preset": "ed2k"}], "b": 2}
+    assert fingerprint(a) == fingerprint(b)          # 键序不影响
+    c = {"a": 1, "b": 3, "channels": a["channels"]}
+    assert fingerprint(a) != fingerprint(c)          # 值变化 → 变化
+
+
+def test_config_restart_pending_false_without_bot(tmp_path):
+    """Bot 未运行:不催重启(由"未启动"状态表达)。"""
+    client = _client(tmp_path)
+    token = _login(client)
+    assert client.get("/api/config", headers=_h(token)).json()["restart_pending"] is False
+
+
+def test_config_restart_pending_after_change(tmp_path):
+    """Bot 运行中(有启动指纹)+ 文件被改 → restart_pending=True;重启(刷新指纹)后回到 False。"""
+    import json as _json
+
+    from app import webapp as wa
+    from app.config import fingerprint
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "proxy_url": "old"}), encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+
+    # 模拟 Bot 启动:记下当时的配置指纹
+    wa.STATE["bot_running"] = True
+    wa.STATE["cfg_fingerprint"] = fingerprint(_json.loads(p.read_text(encoding="utf-8")))
+    try:
+        assert client.get("/api/config", headers=_h(token)).json()["restart_pending"] is False
+        r = client.put("/api/config", json={"values": {"proxy_url": "new"}}, headers=_h(token))
+        assert r.json()["restart_pending"] is True          # 改了但 Bot 还没吃上
+        assert client.get("/api/config", headers=_h(token)).json()["restart_pending"] is True
+        # 重启后 Bot 会重新取指纹 → 不再提示
+        wa.STATE["cfg_fingerprint"] = fingerprint(
+            _json.loads(p.read_text(encoding="utf-8"))
+        )
+        assert client.get("/api/config", headers=_h(token)).json()["restart_pending"] is False
+    finally:
+        wa.STATE["bot_running"] = False
+        wa.STATE.pop("cfg_fingerprint", None)
+
+
+def test_channels_save_sets_restart_pending(tmp_path):
+    """网页改频道归属也要重启才生效 → 同样触发顶部提示。"""
+    import json as _json
+
+    from app import webapp as wa
+    from app.config import fingerprint
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path)}), encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    wa.STATE["bot_running"] = True
+    wa.STATE["cfg_fingerprint"] = fingerprint(_json.loads(p.read_text(encoding="utf-8")))
+    try:
+        r = client.put("/api/channels", json={"channels": [
+            {"chat_id": "-1004300548880", "preset": "ed2k", "title": "ewewe"},
+        ]}, headers=_h(token))
+        assert r.status_code == 200 and r.json()["restart_pending"] is True
+    finally:
+        wa.STATE["bot_running"] = False
+        wa.STATE.pop("cfg_fingerprint", None)

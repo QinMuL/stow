@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, clearToken } from './api'
+import { pageBar } from './pagebar'
 import AccountModal from './views/AccountModal.vue'
 
 const route = useRoute()
@@ -87,6 +88,15 @@ onMounted(refresh)
           <button class="link-btn who-btn" title="账号与服务" @click="showAccount = true">👤 <b>admin</b></button>
           <button class="link-btn" @click="logout">退出</button>
         </div>
+      </div>
+      <!-- 页面级操作条:在滚动区之外,出现/消失都不会遮挡内容(如"保存并重启") -->
+      <div v-if="pageBar" class="page-bar">
+        <span class="pb-dot"></span>
+        <span class="pb-text">{{ pageBar.text }}</span>
+        <span v-if="pageBar.hint" class="pb-hint">{{ pageBar.hint }}</span>
+        <button class="btn primary" :disabled="pageBar.busy" @click="pageBar.action()">
+          {{ pageBar.busy ? '处理中…' : pageBar.actionText }}
+        </button>
       </div>
       <div class="content">
         <div class="page">
