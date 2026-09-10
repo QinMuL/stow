@@ -181,8 +181,15 @@ class SavePipeline:
         bot = self.bot
         if bot.reader.logged_in is False:
             return
-        # 目录值兼容两种形态:纯数字=网盘 CID(选择器回填,必须已存在);否则当路径自动创建
-        root_cid = int(path) if path.strip().isdigit() else await bot.saver.ensure_dir(path)
+        # 目录值兼容两种形态:纯数字=网盘 CID(选择器回填);路径=只查不建
+        # (监控的语义是"盯住已有目录",自动创建空目录没有意义)
+        if path.strip().isdigit():
+            root_cid = int(path)
+        else:
+            root_cid = await bot.reader.find_dir(path)
+            if root_cid is None:
+                logger.warning("监控目录不存在(%s),跳过本轮;请检查路径或重新选择", path)
+                return
         items = await bot.reader.list_dir(root_cid, nf=0)
         for it in items:
             fid, name, is_dir = it["fid"], it["name"], it["is_dir"]

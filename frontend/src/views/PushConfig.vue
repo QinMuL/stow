@@ -112,7 +112,7 @@ function openPicker(target) {
 }
 
 function onPickDir(d) {
-  if (pickerTarget.value === 'pipeline') {
+  if (pickerTarget.value === 'pipeline_root_dir') {
     model.value.pipeline_root_dir = d.cid
   } else {
     monitorRows.value[Number(pickerTarget.value)] = d.cid

@@ -381,6 +381,19 @@ class Pan115Reader:
         except Exception as exc:
             raise ShareError(f"重命名失败(fid={fid}→{new_name}):{exc}") from exc
 
+    async def find_dir(self, path: str) -> int | None:
+        """按路径逐级查找目录(只查不建);任一级不存在返回 None。"""
+        cid = 0
+        for name in re.split(r"[\/]+", path.strip("/")):
+            if not name:
+                continue
+            items = await self.list_dir(cid, nf=1)
+            hit = next((it for it in items if it["name"] == name), None)
+            if hit is None:
+                return None
+            cid = hit["fid"]
+        return cid
+
     async def fs_delete(self, fid: int) -> None:
         """删除文件/目录(进回收站;用于清理塌缩后的空壳目录)。"""
         client = self._require_login()
