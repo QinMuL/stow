@@ -31,8 +31,9 @@ _ERR_ALREADY = 4200045
 class SaveResult:
     ok: bool
     message: str
-    task_cid: int = 0       # 任务子目录 CID(流水线后续整理/建分享用)
-    task_name: str = ""     # 任务子目录名
+    task_cid: int = 0       # 资源根目录 CID(塌缩后;流水线后续整理/建分享用)
+    task_name: str = ""     # 资源根目录名
+    shell_cid: int = 0      # 塌缩后的空壳目录(归档移动成功后应删除)
     saved_items: int = 0    # 接收的条目数
     already: bool = False   # 内容本就已在网盘中
     errors: list[str] = field(default_factory=list)
@@ -138,16 +139,26 @@ class Pan115Saver:
                     errors.append(f"目录映射缺失 pid={pid},跳过 {len(dirs) + len(files)} 项")
                     continue
                 dest = cid_map[pid]
-                ids = [str(d["id"]) for d in dirs] + [str(f["id"]) for f in files]
-                if not ids:
-                    continue
-                # 为子目录建立网盘侧对应目录(映射给下一层用)
+                # 为子目录建立网盘侧对应目录(映射给下一层用);目录条目**不接收**
+                # ——接收目录 = 整棵子树复制,后续逐层又收文件 → 内容双份
                 for d in dirs:
                     sub = await self.ensure_dir(d["name"], parent_cid=dest)
                     cid_map[d["id"]] = sub
+                ids = [str(f["id"]) for f in files]
+                if not ids:
+                    continue
                 n, already = await self._receive_batched(share_code, receive_code, ids, dest)
                 total += n
                 any_already = any_already or already
+
+            # 塌缩一层:任务壳目录若只含一个子目录且无文件(分享根包了一层
+            # 资源文件夹),以内层为资源根;壳记入 shell_cid 供归档后删除
+            shell_cid = 0
+            items = await self._reader.list_dir(task_cid, nf=0)
+            dirs_in = [it for it in items if it["is_dir"]]
+            if len(items) == 1 and dirs_in:
+                shell_cid, task_cid = task_cid, dirs_in[0]["fid"]
+                task_name = dirs_in[0]["name"]
 
             msg = (
                 "已在网盘中(重复转存)"
@@ -156,8 +167,8 @@ class Pan115Saver:
             )
             logger.info("转存完成:%s(耗时 %.1fs)", msg, time.monotonic() - t0)
             return SaveResult(True, msg, task_cid=task_cid, task_name=task_name,
-                              saved_items=total, already=any_already and not total,
-                              errors=errors)
+                              shell_cid=shell_cid, saved_items=total,
+                              already=any_already and not total, errors=errors)
         except TimeoutError:
             logger.error("转存超时(遍历分享树 600s):%s", link.code)
             return SaveResult(False, "转存超时(分享过大或接口缓慢),稍后重试")

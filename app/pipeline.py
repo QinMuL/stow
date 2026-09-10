@@ -40,6 +40,7 @@ class PipelineTask:
     fid: int               # 暂存目录中该资源目录的 CID
     name: str              # 标准化后的资源目录名
     uid: int               # 发起者(TG 通知用)
+    shell_cid: int = 0     # 塌缩后的空壳目录 CID(归档移动成功后删除)
     status: str = "auditing"  # auditing | done | violated | timeout
     attempts: int = 0
     created_at: float = field(default_factory=time.monotonic)
@@ -69,6 +70,13 @@ class SavePipeline:
             return
         if bot.saver is None:
             await msg.reply_text(f"{prefix}⚠️ 未配置 115 Cookie,无法使用转存流水线。")
+            return
+        # 去重:已推送过 / 已在流水线中(审核/已发布) → 拒绝重复转存
+        if bot.store.is_pushed(link.key):
+            await msg.reply_text(f"{prefix}🔁 该分享已推送过,无需再次转存。")
+            return
+        if link.key in bot.pipeline.tasks and bot.pipeline.tasks[link.key].status == "auditing":
+            await msg.reply_text(f"{prefix}⏳ 该分享已在流水线中(等待审核),请勿重复提交。")
             return
 
         label = "115链接推送频道"
@@ -109,7 +117,7 @@ class SavePipeline:
 
         task = PipelineTask(
             share_code=share_code, receive_code=receive_code,
-            fid=nr.fid, name=nr.name, uid=uid,
+            fid=nr.fid, name=nr.name, uid=uid, shell_cid=tr.shell_cid,
         )
         self.tasks[share_code] = task
         self.start_loop()
@@ -196,3 +204,11 @@ class SavePipeline:
             await self.bot.reader.fs_move(task.fid, dest_cid)
         except Exception as exc:  # noqa: BLE001
             logger.warning("移动任务目录失败(%s → %s):%s", task.name, target_dir, exc)
+            return
+        # 塌缩产生的空壳目录清理(失败无害,留待人工)
+        if task.shell_cid:
+            try:
+                await self.bot.reader.fs_delete(task.shell_cid)
+                task.shell_cid = 0
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("清理空壳目录失败(fid=%s):%s", task.shell_cid, exc)

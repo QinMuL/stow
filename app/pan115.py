@@ -381,6 +381,12 @@ class Pan115Reader:
         except Exception as exc:
             raise ShareError(f"重命名失败(fid={fid}→{new_name}):{exc}") from exc
 
+    async def fs_delete(self, fid: int) -> None:
+        """删除文件/目录(进回收站;用于清理塌缩后的空壳目录)。"""
+        client = self._require_login()
+        await self._call(client.fs_delete, fid, async_=False)
+        logger.info("已删除网盘条目 fid=%s(回收站可恢复)", fid)
+
     async def create_share(self, file_ids: int | str) -> tuple[str, str]:
         """创建**永久**分享(share_send + duration=-1),返回 (share_code, receive_code)。"""
         from p115client.client import check_response
