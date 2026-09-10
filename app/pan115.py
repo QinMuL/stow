@@ -388,18 +388,17 @@ class Pan115Reader:
         logger.info("已删除网盘条目 fid=%s(回收站可恢复)", fid)
 
     async def create_share(self, file_ids: int | str) -> tuple[str, str]:
-        """创建**永久**分享并设置随机访问码,返回 (share_code, receive_code)。
+        """创建**永久**分享,返回 (share_code, receive_code)。
 
-        share_send_app 创建(响应默认无访问码)→ share_update 同时设
-        随机 4 位 receive_code 与 duration=-1 永久。
+        share_send 创建时 115 自动生成随机访问码(响应 data.receive_code);
+        share_update 设 duration=-1 永久化。语义同旧项目 provider。
         """
-        import secrets
-        import string
-
         from p115client.client import check_response
 
         client = self._require_login()
-        resp = await self._call(client.share_send_app, str(file_ids), async_=False)
+        resp = await self._call(
+            client.share_send, {"file_ids": str(file_ids), "ignore_warn": 1}, async_=False
+        )
         try:
             check_response(resp)
         except Exception as exc:
@@ -409,22 +408,16 @@ class Pan115Reader:
         receive_code = str(data.get("receive_code") or data.get("recv_code") or "")
         if not share_code:
             raise ShareError("创建分享失败:响应缺少 share_code")
-        # 设访问码(115 建分享默认无码)+ 永久化,一次 update 完成
-        if not receive_code:
-            receive_code = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(4))
+        # 永久化(失败仅告警:默认分享有效期也较长,下轮可补)
         try:
             upd = await self._call(
                 client.share_update,
-                {
-                    "share_code": share_code,
-                    "receive_code": receive_code,
-                    "share_duration": -1,
-                },
+                {"share_code": share_code, "share_duration": -1},
                 async_=False,
             )
             check_response(upd)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("分享设码/永久化失败(保留默认):%s", exc)
+            logger.warning("分享设为永久失败(保留默认有效期):%s", exc)
         return share_code, receive_code
 
     async def share_status(self, code: str, password: str | None = None) -> dict:

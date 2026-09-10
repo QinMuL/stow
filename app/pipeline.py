@@ -200,8 +200,11 @@ class SavePipeline:
             )
             return
 
-        link = ParsedLink("115", task.share_code,
-                          f"https://115.com/s/{task.share_code}", task.receive_code or None)
+        # 卡片链接必须带访问码(建分享时 115 自动生成;此前 URL 拼接漏掉导致丢码)
+        task_url = f"https://115.com/s/{task.share_code}" + (
+            f"?password={task.receive_code}" if task.receive_code else ""
+        )
+        link = ParsedLink("115", task.share_code, task_url, task.receive_code or None)
         # 显式查分享审核状态:违规分享的文件列表依然可读(read_share 成功≠审核通过)
         try:
             st = await bot.reader.share_status(task.share_code, task.receive_code or None)
