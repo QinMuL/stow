@@ -38,3 +38,19 @@ def test_suspect_title_detection():
     assert not _suspect_title("怒火救援")
     assert not _suspect_title("The Movie 2023")
     assert not _suspect_title("")
+
+
+def test_detect_media_season_voting_fallback(tmp_path, monkeypatch):
+    """文件名全是 Season 1.SxxExx 形态时,标题应回退目录名(玲音 (1998))。"""
+    from app.normalizer import ShareNormalizer
+    from app.pan115 import Pan115Reader
+
+    r = Pan115Reader.__new__(Pan115Reader)  # 不触网:_detect_media 不用 client
+    n = ShareNormalizer(r, tmdb=None)
+    items = [
+        {"name": f"Season 1.S01E0{i}.mkv", "size": 1, "is_dir": False} for i in range(1, 8)
+    ]
+    media = n._detect_media("玲音 (1998)", items)
+    assert media is not None
+    assert media.title == "玲音" and media.year == 1998
+    assert media.media_type == "tv"

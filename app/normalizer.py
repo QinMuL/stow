@@ -40,6 +40,20 @@ _CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
            "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
 _VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm")
 
+
+def _season_like(title: str) -> bool:
+    """标题是否为无信息量的季/集形态(Season 1 / S01 / 01 / Season 1 S01E01 / Specials)。"""
+    t = title.strip()
+    if parse_season_dir(t) is not None:
+        return True
+    if t.lower() in ("specials", "ova", "extra", "extras"):
+        return True
+    # 剥离季集 token(Season N / SxxEyy)后无实质内容 → 无信息量
+    stripped = re.sub(r"(?i)\bseason\s*\d+\b", "", t)
+    stripped = re.sub(r"(?i)\bs\d{1,2}\s*e\d{1,4}\b", "", stripped)
+    return re.sub(r"[\s.\-_]", "", stripped) == ""
+
+
 # 疑似垃圾标题:纯小写字母/数字/下划线组合(无大写、无 CJK)且含长数字串
 # (分享码、时间戳形态);区分大小写,"The Movie 2023" 含大写不判垃圾
 _SUSPECT_TITLE_RE = re.compile(r"^[a-z0-9_\- ]+$")
@@ -221,7 +235,12 @@ class ShareNormalizer:
 
     # ── 媒体信息探测(与推送卡片同一入口:analyze_share) ──
     def _detect_media(self, dir_name: str, items: list[dict]) -> AggregatedMedia | None:
-        """复用 analyze_share 聚合(标题多数票/类型判定/画质),保证与卡片同规则。"""
+        """复用 analyze_share 聚合(标题多数票/类型判定/画质),保证与卡片同规则。
+
+        投票盲区修正:文件名形如 "Season 1.S01E01.mkv" 时,多数票会投出
+        "Season 1" 这类无信息量标题——此时回退用目录名(整理过的分享,
+        目录名是最有语义的线索,如 "玲音 (1998)")。
+        """
         entries = [
             ShareFile(name=it["name"], size=it.get("size") or 0, is_dir=it["is_dir"])
             for it in items
@@ -232,6 +251,12 @@ class ShareNormalizer:
         media.tmdb_id = extract_tmdb_id([dir_name]) or extract_tmdb_id(
             [it["name"] for it in items]
         )
+        if _season_like(media.title):
+            dir_parsed = parse_filename(dir_name)
+            if (dir_parsed.title and not _suspect_title(dir_parsed.title)
+                    and not _season_like(dir_parsed.title)):
+                media.title = dir_parsed.title
+                media.year = dir_parsed.year or media.year
         return media
 
     async def _match_details(self, media: AggregatedMedia) -> dict | None:
