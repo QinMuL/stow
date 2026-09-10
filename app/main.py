@@ -64,6 +64,15 @@ def main() -> None:
     setup_logging(cfg.log_level, cfg.log_dir)
     logger = logging.getLogger("stow")
 
+    # 首次部署:自动创建本地媒体流转目录(openlist 下载落地 / CD2 上传源)
+    created = cfg.ensure_media_dirs()
+    if created:
+        logger.info("首次部署:已创建媒体目录 %s", "、".join(str(p) for p in created))
+    logger.info(
+        "媒体流转目录:openlist=%s(下载落地) clouddrive=%s(上传源)",
+        cfg.openlist_dir, cfg.clouddrive_dir,
+    )
+
     _start_web(cfg.web_port, config_path)
 
     if cfg.bot_ready():

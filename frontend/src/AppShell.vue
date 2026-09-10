@@ -8,7 +8,7 @@ import AccountModal from './views/AccountModal.vue'
 const route = useRoute()
 const router = useRouter()
 const status = ref(null)
-const version = ref('v0.1')
+const version = computed(() => status.value?.version ? 'v' + status.value.version : '—')
 const showAccount = ref(false)
 
 const nav = [

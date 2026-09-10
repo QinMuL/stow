@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app import auth
+from app import __version__, auth
 from app.channel_monitor import channel_rows
 from app.config import (
     MASK,
@@ -499,6 +499,7 @@ def create_app(config_path: str | Path) -> FastAPI:
                 "account": "", "connected": False,
             }
         return {
+            "version": __version__,
             "bot_running": STATE["bot_running"],
             "bot_error": STATE["bot_error"],
             "bot_ready": cfg.bot_ready(),

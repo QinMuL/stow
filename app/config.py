@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = "./data/config.json"
 DEFAULT_WEB_PORT = 8686
@@ -53,6 +56,9 @@ class Config:
     tg_api_id: int = 0
     tg_api_hash: str = ""
     monitor_channels: str = ""  # 逗号分隔:@username / t.me 链接 / chat_id
+    # 本地媒体流转目录(容器内 /app/media,与 compose 的 ./media:/app/media 对应)。
+    # 首次部署自动在其下建两个子目录:openlist(下载落地) / clouddrive(CD2 上传源)
+    media_root: str = "./media"
     data_dir: str = "./data"
     log_level: str = "INFO"
     web_port: int = DEFAULT_WEB_PORT
@@ -67,6 +73,35 @@ class Config:
     @property
     def log_dir(self) -> Path:
         return Path(self.data_dir) / "logs"
+
+    # ── 本地媒体流转目录(下载落地 / 上传源) ────────────────
+    @property
+    def openlist_dir(self) -> Path:
+        """openlist 下载落地点(获取段的本地入口)。"""
+        return Path(self.media_root) / "openlist"
+
+    @property
+    def clouddrive_dir(self) -> Path:
+        """CD2 上传源(处理完成后待上传的本地出口)。"""
+        return Path(self.media_root) / "clouddrive"
+
+    def ensure_media_dirs(self) -> list[Path]:
+        """确保媒体目录存在(首次部署自动创建),返回本次**新建**的目录。
+
+        权限放宽到 0777:openlist / CD2 是各自独立的部署(容器 UID 可能不同),
+        目录若为 root 私有,对方会写不进来——这个坑排查起来很费时间。
+        """
+        created: list[Path] = []
+        for path in (Path(self.media_root), self.openlist_dir, self.clouddrive_dir):
+            if path.is_dir():
+                continue
+            path.mkdir(parents=True, exist_ok=True)
+            try:
+                path.chmod(0o777)
+            except OSError as exc:  # noqa: PERF203 - 权限位改不了不影响使用(如 drvfs)
+                logger.debug("设置目录权限失败(%s):%s", path, exc)
+            created.append(path)
+        return created
 
     def problems(self) -> list[str]:
         """必填项缺失清单(空 = 可跑 Bot)。"""
@@ -215,6 +250,7 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         tg_api_id=_int(raw.get("tg_api_id")),
         tg_api_hash=_clean(raw.get("tg_api_hash")),
         monitor_channels=str(raw.get("monitor_channels", "")).strip(),
+        media_root=_dir(raw, "media_root", "./media"),
         data_dir=str(raw.get("data_dir", "./data")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         web_port=int(raw.get("web_port", DEFAULT_WEB_PORT) or DEFAULT_WEB_PORT),

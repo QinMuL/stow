@@ -1,5 +1,6 @@
 .venv/
 data/
+media/            # 媒体流转目录(体积大,只在本机)
 __pycache__/
 *.pyc
 .pytest_cache/

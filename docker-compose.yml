@@ -6,3 +6,7 @@ services:
     network_mode: host        # 直达宿主代理;Bot 无端口监听
     volumes:
       - ./data:/app/data      # config.json 与 stow.db、日志都持久化在此
+      - ./media:/app/media    # 本地媒体流转目录(相对路径,首次启动自动建两个子目录):
+                              #   media/openlist   —— openlist 下载落地
+                              #   media/clouddrive —— CD2 上传源
+                              # openlist / CD2 两个工具的部署请挂载同样的宿主路径

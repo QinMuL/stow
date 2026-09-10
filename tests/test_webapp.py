@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from app.webapp import create_app
@@ -462,3 +464,44 @@ def test_channels_save_sets_restart_pending(tmp_path):
     finally:
         wa.STATE["bot_running"] = False
         wa.STATE.pop("cfg_fingerprint", None)
+
+
+# ── 本地媒体流转目录(首次部署自动创建) ────────────────────
+def test_media_dirs_derived_from_root(tmp_path):
+    from app.config import Config
+
+    cfg = Config(media_root=str(tmp_path / "media"))
+    assert cfg.openlist_dir == tmp_path / "media" / "openlist"
+    assert cfg.clouddrive_dir == tmp_path / "media" / "clouddrive"
+
+
+def test_ensure_media_dirs_creates_once_then_idempotent(tmp_path):
+    """首次部署建 openlist / clouddrive 两个子目录;再跑不重复创建。"""
+    from app.config import Config
+
+    cfg = Config(media_root=str(tmp_path / "media"))
+    created = cfg.ensure_media_dirs()
+    assert [Path(p).name for p in created] == ["media", "openlist", "clouddrive"]
+    assert cfg.openlist_dir.is_dir() and cfg.clouddrive_dir.is_dir()
+    assert cfg.ensure_media_dirs() == []          # 幂等
+    assert cfg.openlist_dir.is_dir()
+
+
+def test_media_root_from_config_file(tmp_path):
+    import json as _json
+
+    from app.config import load_config
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"media_root": str(tmp_path / "m")}), encoding="utf-8")
+    assert load_config(p).openlist_dir == tmp_path / "m" / "openlist"
+
+
+def test_status_reports_version(tmp_path):
+    """侧栏版本号取自后端单一真源(app.__version__)。"""
+    from app import __version__
+
+    client = _client(tmp_path)
+    token = _login(client)
+    assert client.get("/api/status", headers=_h(token)).json()["version"] == __version__
+    assert __version__.startswith("0.2")
