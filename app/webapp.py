@@ -126,7 +126,8 @@ EDITABLE = {
     "tg_bot_token": "s", "tg_admin_ids": "ids",
     "tmdb_api_key": "s", "proxy_url": "s", "log_level": "s", "web_port": "i",
     "pan115_cookie": "s",
-    "transfer_enabled": "b", "transfer_dir": "s",
+    "pipeline_staging_dir": "s", "pipeline_published_dir": "s",
+    "pipeline_violated_dir": "s",
 }
 
 

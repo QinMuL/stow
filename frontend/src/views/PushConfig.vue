@@ -40,11 +40,12 @@ const GROUPS = [
     ],
   },
   {
-    title: '115 转存配置',
-    desc: '推送成功后自动把 115 分享内容转存到自己网盘;需先配置上方 Cookie',
+    title: '转存流水线目录',
+    desc: '/save <链接> 触发:转存→整理→建永久分享→审核通过后推送;需先配置上方 Cookie',
     fields: [
-      { key: 'transfer_enabled', label: '启用自动转存', hint: '开启后 115 链接推送成功即自动转存', bool: true },
-      { key: 'transfer_dir', label: '保存目录', hint: '网盘内路径(相对根),不存在会自动创建;每次转存落到其下的独立子目录' },
+      { key: 'pipeline_staging_dir', label: '暂存目录', hint: '转存落盘点;整理与建分享在此进行' },
+      { key: 'pipeline_published_dir', label: '已发布目录', hint: '推送成功后移入' },
+      { key: 'pipeline_violated_dir', label: '违规目录', hint: '审核失败/违规的分享移入,不予推送' },
     ],
   },
 ]
@@ -145,11 +146,7 @@ async function saveChannels() {
           {{ f.label }} <code>{{ f.key }}</code>
           <span v-if="isSaved(f)" class="saved-tag">✓ 已保存</span>
         </label>
-        <label v-if="f.bool" class="switch-row">
-          <input type="checkbox" v-model="model[f.key]" class="switch">
-          <span class="switch-state">{{ model[f.key] ? '已开启' : '已关闭' }}</span>
-        </label>
-        <input v-else v-model="model[f.key]" :placeholder="f.hint" autocomplete="off">
+        <input v-model="model[f.key]" :placeholder="f.hint" autocomplete="off">
         <div v-if="!isSaved(f)" class="hint">{{ f.hint }}</div>
       </div>
 

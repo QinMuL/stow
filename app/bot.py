@@ -32,6 +32,7 @@ from app.pan115 import (
     ShareRateLimited,
     ShareSnapshotting,
 )
+from app.pipeline import SavePipeline
 from app.saver import Pan115Saver
 from app.store import Store
 from app.tmdb import TmdbClient, image_url
@@ -49,10 +50,12 @@ _HELP = (
     "📦 Stow · 媒体推送\n\n"
     "直接发送 115 分享链接或 ed2k 链接(一条消息多个会逐个处理)\n"
     "或使用:/push <链接>\n\n"
+    "💾 转存流水线:/save <115链接>\n"
+    "转存到网盘 → 目录标准化 → 建永久分享 → 审核通过后自动推送并归档\n\n"
     "📁 登记推送频道(二选一):\n"
     "① 先发 /bind,5 分钟内把频道里的任意一条消息转发给本 Bot\n"
     "② 转发时在附言里写 /bind(随时有效)\n"
-    "弹出面板选归属(115 网盘 / ed2k),即时生效;✖ 可取消\n\n"
+    "弹出面板选归属(115链接推送频道 / ed2k链接推送频道),即时生效;✖ 可取消\n\n"
     "Bot 会读取分享 → 匹配 TMDB → 按链接类型推到对应频道。"
 )
 
@@ -64,7 +67,8 @@ class StowBot:
         self.config_path = config_path
         self.reader = Pan115Reader(cfg.pan115_cookie)
         self.tmdb = TmdbClient(cfg.tmdb_api_key, cfg.proxy_url) if cfg.tmdb_api_key else None
-        self.saver = Pan115Saver(self.reader) if self.reader.logged_in else None
+        self.saver = Pan115Saver(self.reader)
+        self.pipeline = SavePipeline(self)
         self._push_lock = asyncio.Lock()  # 投递串行,防 flood
         self._pending_channels: dict[str, str] = {}  # 登记选择中:chat_id → 标题(回调取)
         self._bind_wait: dict[int, float] = {}  # /bind 等待期:uid → 截止时间戳
@@ -74,6 +78,11 @@ class StowBot:
         from telegram.request import HTTPXRequest
 
         proxy = self.cfg.proxy_url or None
+
+        async def _post_init(app: Application) -> None:
+            self._bot_ref = app.bot
+            self.pipeline.start_loop()  # /save 流水线审核轮询
+
         builder = (
             Application.builder()
             .token(self.cfg.tg_bot_token)
@@ -83,12 +92,14 @@ class StowBot:
                 write_timeout=30, media_write_timeout=60,
             ))
             .get_updates_request(HTTPXRequest(proxy=proxy, connect_timeout=10, read_timeout=15))
+            .post_init(_post_init)
             .concurrent_updates(True)
         )
         app = builder.build()
         app.add_handler(CommandHandler("start", self._cmd_help))
         app.add_handler(CommandHandler("help", self._cmd_help))
         app.add_handler(CommandHandler("push", self._cmd_push))
+        app.add_handler(CommandHandler("save", self._cmd_save))
         app.add_handler(CommandHandler("bind", self._cmd_bind))
         app.add_handler(CommandHandler("bindcancel", self._cmd_bindcancel))
         app.add_handler(CallbackQueryHandler(self._on_channel_preset))
@@ -230,6 +241,18 @@ class StowBot:
             return
         await self._handle(update, link)
 
+    async def _cmd_save(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/save <115链接>:转存→整理→建永久分享→审核通过后自动推送。"""
+        if not self._is_admin(update):
+            await update.effective_message.reply_text("⛔ 仅管理员可用")
+            return
+        arg = " ".join(ctx.args) if ctx.args else ""
+        link = parse_one(arg)
+        if link is None:
+            await update.effective_message.reply_text("用法:/save <115 分享链接>")
+            return
+        await self.pipeline.handle_save(update, link)
+
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # 转发登记走 _on_forward(FORWARDED 过滤器先匹配);这里只响应直接文本
         if update.effective_user is None:
@@ -296,20 +319,7 @@ class StowBot:
         self.store.mark_pushed(link.key, title)
         n = media.file_count or len(files)
         label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
-        final = f"{prefix}✅ 已推送 · {n} 文件 · {label}"
-
-        # 自动转存(仅 115 分享;失败不影响已完成的推送)
-        if link.provider == "115" and self.cfg.transfer_enabled:
-            if self.saver is None:
-                tr_msg = "⚠️ 未配置 115 Cookie,无法转存"
-            else:
-                tr = await self.saver.save_share(link, self.cfg.transfer_dir)
-                tr_msg = ("💾 " if tr.ok else "⚠️ ") + tr.message
-                if tr.errors:
-                    tr_msg += f"({';'.join(tr.errors[:2])})"
-                logger.info("转存结果:%s → %s", link.dedup_display, tr_msg)
-            final += f"\n{tr_msg}"
-        await status.edit_text(final)
+        await status.edit_text(f"{prefix}✅ 已推送 · {n} 文件 · {label}")
 
     async def _load_media(self, link: ParsedLink, status, prefix: str):
         """按 provider 读取内容 → 聚合。失败已回报,返回 (files, None)。"""
@@ -348,6 +358,13 @@ class StowBot:
         return files, media
 
     # ── 频道投递(串行;仅 RetryAfter 重试——超时重试会重复投递) ──
+    async def _notify_uid(self, uid: int, text: str) -> None:
+        """私聊通知用户(流水线状态变化);不可达仅告警。"""
+        try:
+            await self._bot_ref.send_message(uid, text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("通知用户 %s 失败:%s", uid, exc)
+
     async def _send_with_retry(self, sender):
         """发送并返回 Message;记 message_id 便于事后撤卡。"""
         for attempt in range(3):

@@ -31,8 +31,9 @@ _ERR_ALREADY = 4200045
 class SaveResult:
     ok: bool
     message: str
-    path: str = ""          # 实际落盘的完整目录路径
-    saved_items: int = 0    # 接收的顶层条目数
+    task_cid: int = 0       # 任务子目录 CID(流水线后续整理/建分享用)
+    task_name: str = ""     # 任务子目录名
+    saved_items: int = 0    # 接收的条目数
     already: bool = False   # 内容本就已在网盘中
     errors: list[str] = field(default_factory=list)
 
@@ -93,8 +94,12 @@ class Pan115Saver:
             await asyncio.sleep(1.0)  # 接收指令间隔,防风控
         return len(ids), already
 
-    async def save_share(self, link, target_dir: str) -> SaveResult:
-        """转存一个 115 分享到 target_dir(自动建任务子目录)。link 为 links.ParsedLink。"""
+    async def save_share(self, link, parent_cid: int, task_name: str | None = None) -> SaveResult:
+        """转存一个 115 分享到 parent_cid 下的任务子目录。link 为 links.ParsedLink。
+
+        task_name 缺省时用 分享标识_时间戳;返回 SaveResult.task_cid 供流水线
+        后续(标准化/建分享)定位。
+        """
         if not self._reader.logged_in:
             return SaveResult(False, "未配置 115 Cookie,无法转存(匿名接口只能读,不能转存)")
         t0 = time.monotonic()
@@ -103,13 +108,11 @@ class Pan115Saver:
         share_code = payload["share_code"]
 
         try:
-            root_cid = await self.ensure_dir(target_dir)
             # 任务独立子目录:标题_时间戳(标题不可用时退化为时间戳)
             ts = time.strftime("%Y%m%d_%H%M%S")
-            clean = re.sub(r'[\\/:*?"<>|]', "", link.dedup_display).strip()[:40]
+            clean = re.sub(r'[\\/:*?"<>|]', "", task_name or link.dedup_display).strip()[:40]
             task_name = f"{clean}_{ts}" if clean else ts
-            task_cid = await self.ensure_dir(task_name, parent_cid=root_cid)
-            full_path = f"{target_dir.rstrip('/')}/{task_name}"
+            task_cid = await self.ensure_dir(task_name, parent_cid=parent_cid)
 
             total = 0
             any_already = False
@@ -149,11 +152,12 @@ class Pan115Saver:
             msg = (
                 "已在网盘中(重复转存)"
                 if any_already and not total
-                else f"已转存 {total} 个条目 → {full_path}"
+                else f"已转存 {total} 个条目 → {task_name}"
             )
             logger.info("转存完成:%s(耗时 %.1fs)", msg, time.monotonic() - t0)
-            return SaveResult(True, msg, path=full_path, saved_items=total,
-                              already=any_already and not total, errors=errors)
+            return SaveResult(True, msg, task_cid=task_cid, task_name=task_name,
+                              saved_items=total, already=any_already and not total,
+                              errors=errors)
         except TimeoutError:
             logger.error("转存超时(遍历分享树 600s):%s", link.code)
             return SaveResult(False, "转存超时(分享过大或接口缓慢),稍后重试")

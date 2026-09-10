@@ -280,3 +280,132 @@ class Pan115Reader:
         if not files:
             raise ShareError("分享内容为空(可能仍在生成快照,或 115 风控限流,稍后重试)")
         return files
+
+    # ── 网盘 FS 操作(登录态;转存流水线用,语义移植旧项目 provider) ──
+
+    def _require_login(self):
+        if not self.logged_in:
+            raise ShareError("需要 115 Cookie 才能操作网盘(转存/建分享)")
+        return self._get_client()
+
+    async def list_dir(self, cid: int = 0, *, nf: int = 0) -> list[dict]:
+        """列自己网盘目录子项(自动翻页)。返回 [{fid, name, is_dir, size}]。
+
+        nf=1 仅目录,nf=0 文件+目录。webapi 响应两种格式(老 data=list / 新
+        data={"list", "count"})都兼容;目录条目无 "fid" 键(id 在 "cid")。
+        """
+        from p115client.client import check_response
+
+        client = self._require_login()
+        items: list[dict] = []
+        offset, limit = 0, 1000
+        while True:
+            resp = await self._call(
+                client.fs_files,
+                {"cid": cid, "limit": limit, "offset": offset, "nf": nf, "asc": 1, "o": "file_name"},
+                async_=False,
+            )
+            try:
+                check_response(resp)
+            except Exception as exc:
+                raise ShareError(f"列目录失败:{exc}") from exc
+            data = resp.get("data")
+            if isinstance(data, dict):
+                batch = data.get("list") or []
+                count = int(data.get("count") or 0)
+            elif isinstance(data, list):
+                batch, count = data, int(resp.get("count") or 0)
+            else:
+                batch, count = [], 0
+            for it in batch:
+                is_dir = "fid" not in it  # webapi:目录无 fid,id 在 cid
+                items.append({
+                    "fid": int(it.get("cid") if is_dir else it.get("fid") or 0),
+                    "name": str(it.get("n") or it.get("file_name") or ""),
+                    "is_dir": is_dir,
+                    "size": int(it.get("s") or it.get("file_size") or 0),
+                })
+            offset += len(batch)  # 按实际条数递增(limit=1000 时 +=limit 会跳页)
+            if offset >= count or not batch:
+                break
+        return items
+
+    async def fs_makedirs(self, path: str) -> int:
+        """幂等创建目录(含中间节点,fs_makedirs_app 支持全路径),返回 CID。"""
+        from p115client.client import check_response
+
+        client = self._require_login()
+        resp = await self._call(client.fs_makedirs_app, path, pid=0, async_=False)
+        check_response(resp)
+        data = resp.get("data") or {}
+        cid = int(resp.get("cid") or data.get("cid") or data.get("file_id") or 0)
+        if cid <= 0:
+            raise ShareError(f"创建目录失败({path}):响应缺少 cid")
+        return cid
+
+    async def fs_move(self, fid: int, to_cid: int) -> None:
+        """移动文件/目录(服务端异步:连发会撞 errno 990009,渐进重试)。"""
+        from p115client.client import check_response
+
+        client = self._require_login()
+        waits = (0.0, 3.0, 6.0)
+        for attempt, wait in enumerate(waits, 1):
+            if wait:
+                await asyncio.sleep(wait)
+            resp = await self._call(
+                lambda: client.fs_move(fid, pid=to_cid, async_=False)
+            )
+            try:
+                check_response(resp)
+                return
+            except Exception as exc:
+                busy = attempt < len(waits) and (
+                    "990009" in str(exc) or "尚未执行完成" in str(exc)
+                )
+                if not busy:
+                    raise ShareError(f"移动失败(fid={fid}→{to_cid}):{exc}") from exc
+                logger.warning("上一个移动尚未完成,%.0fs 后重试(%d/%d)", waits[attempt], attempt)
+
+    async def fs_rename(self, fid: int, new_name: str) -> None:
+        """重命名文件/目录(fs_rename_app;web cookie 调 open API 会被 990002 拒)。"""
+        from p115client.client import check_response
+
+        client = self._require_login()
+        resp = await self._call(
+            client.fs_rename_app,
+            {f"files_new_name[{fid}]": new_name},
+            async_=False,
+        )
+        try:
+            check_response(resp)
+        except Exception as exc:
+            raise ShareError(f"重命名失败(fid={fid}→{new_name}):{exc}") from exc
+
+    async def create_share(self, file_ids: int | str) -> tuple[str, str]:
+        """创建**永久**分享(share_send + duration=-1),返回 (share_code, receive_code)。"""
+        from p115client.client import check_response
+
+        client = self._require_login()
+        resp = await self._call(
+            client.share_send, {"file_ids": str(file_ids), "ignore_warn": 1}, async_=False
+        )
+        try:
+            check_response(resp)
+        except Exception as exc:
+            raise ShareError(f"创建分享失败:{exc}") from exc
+        data = resp.get("data") or {}
+        share_code = str(data.get("share_code") or "")
+        receive_code = str(data.get("receive_code") or data.get("recv_code") or "")
+        if not share_code:
+            raise ShareError("创建分享失败:响应缺少 share_code")
+        # 永久化(失败仅告警:默认分享有效期也较长,下轮可补)
+        try:
+            upd = await self._call(
+                client.share_update,
+                {"share_code": share_code, "share_duration": -1},
+                async_=False,
+            )
+            check_response(upd)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("分享设为永久失败(保留默认有效期):%s", exc)
+        return share_code, receive_code

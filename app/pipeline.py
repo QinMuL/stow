@@ -1,0 +1,198 @@
+"""/save 转存流水线:转存 → 目录标准化 → 建永久分享 → 审核轮询 → 推送 → 归档。
+
+流程(/save <115链接> 触发,同步段 Bot 回复进度):
+  1. 转存分享内容到 暂存目录/任务子目录(Pan115Saver)
+  2. 目录结构标准化(ShareNormalizer,Emby 标准结构;失败降级原结构)
+  3. 创建永久分享(share_send + duration=-1)
+  4. 登记审核轮询任务 —— 115 分享需服务端审核(快慢不定)
+审核轮询(audit_loop,2 分钟一轮,上限 24h):
+  - 分享可读(审核通过)→ TMDB 匹配 → 推卡到 115 归属频道 → 移入 已发布目录
+  - 分享失效/违规 → 不推送 → 移入 违规目录
+  - 超时未过 → 放弃并通知,文件留在暂存目录供人工处理
+
+状态在内存:Bot 重启后未完成的流水线任务丢失(文件仍在网盘,可重新 /save)。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass, field
+
+from app.links import ParsedLink
+from app.media import AggregatedMedia, analyze_share
+from app.normalizer import ShareNormalizer
+from app.pan115 import ShareDead, ShareError
+
+logger = logging.getLogger(__name__)
+
+_AUDIT_INTERVAL = 120      # 审核轮询间隔(秒)
+_AUDIT_TIMEOUT = 24 * 3600  # 放弃前最长等待
+
+
+@dataclass
+class PipelineTask:
+    """一条 /save 流水线任务(审核轮询阶段的状态)。"""
+
+    share_code: str
+    receive_code: str
+    fid: int               # 暂存目录中该资源目录的 CID
+    name: str              # 标准化后的资源目录名
+    uid: int               # 发起者(TG 通知用)
+    status: str = "auditing"  # auditing | done | violated | timeout
+    attempts: int = 0
+    created_at: float = field(default_factory=time.monotonic)
+
+
+class SavePipeline:
+    """流水线编排;持有 bot(复用其 reader/tmdb/store/_deliver/回复通道)。"""
+
+    def __init__(self, bot) -> None:
+        self.bot = bot
+        self.tasks: dict[str, PipelineTask] = {}  # share_code → task
+        self._loop_task: asyncio.Task | None = None
+
+    def start_loop(self) -> None:
+        if self._loop_task is None or self._loop_task.done():
+            self._loop_task = asyncio.create_task(self._audit_loop())
+
+    # ── 同步段:/save 触发 ──────────────────────────────────
+    async def handle_save(self, update, link: ParsedLink, prefix: str = "") -> None:
+        bot = self.bot
+        msg = update.effective_message
+        uid = update.effective_user.id
+        cfg = bot.cfg
+
+        if link.provider != "115":
+            await msg.reply_text(f"{prefix}转存流水线仅支持 115 分享链接(ed2k 无需转存)。")
+            return
+        if bot.saver is None:
+            await msg.reply_text(f"{prefix}⚠️ 未配置 115 Cookie,无法使用转存流水线。")
+            return
+
+        label = "115链接推送频道"
+        if cfg.channel_for("115") is None:
+            await msg.reply_text(
+                f"{prefix}📭 尚未登记{label},建分享后无处推送。\n"
+                "请先登记:发 /bind 后转发频道消息选归属。"
+            )
+            return
+
+        status = await msg.reply_text(f"{prefix}⏳ [1/3] 正在转存分享内容…")
+        try:
+            staging_cid = await bot.saver.ensure_dir(cfg.pipeline_staging_dir)
+            tr = await bot.saver.save_share(link, parent_cid=staging_cid)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("转存失败 %s:%s", link.code, exc, exc_info=exc)
+            await status.edit_text(f"{prefix}❌ 转存失败:{str(exc)[:120]}")
+            return
+        if not tr.ok:
+            await status.edit_text(f"{prefix}❌ 转存失败:{tr.message}")
+            return
+
+        await status.edit_text(
+            f"{prefix}✅ [2/3] 转存完成({tr.message});正在整理目录结构…"
+        )
+        normalizer = ShareNormalizer(bot.reader, bot.tmdb)
+        nr = await normalizer.normalize(tr.task_cid, tr.task_name, True, staging_cid)
+        for a in nr.actions:
+            logger.info("流水线标准化:%s", a)
+
+        await status.edit_text(f"{prefix}⏳ [3/3] 整理完成;正在创建永久分享…")
+        try:
+            share_code, receive_code = await bot.reader.create_share(nr.fid)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("建分享失败 %s:%s", nr.name, exc, exc_info=exc)
+            await status.edit_text(f"{prefix}❌ 创建分享失败:{str(exc)[:120]}")
+            return
+
+        task = PipelineTask(
+            share_code=share_code, receive_code=receive_code,
+            fid=nr.fid, name=nr.name, uid=uid,
+        )
+        self.tasks[share_code] = task
+        self.start_loop()
+        if nr.actions:
+            detail = ";".join(nr.actions[:3]) + ("…" if len(nr.actions) > 3 else "")
+        else:
+            detail = "结构已标准"
+        await status.edit_text(
+            f"{prefix}✅ 流水线就绪 · {nr.name}\n"
+            f"🔗 分享码 {share_code}(已设永久)\n"
+            f"🗂️ 标准化:{detail}\n"
+            f"⏳ 115 审核中(通常几分钟~数小时,每 2 分钟自动检查;通过后自动推送到{label})"
+        )
+
+    # ── 审核轮询段 ──────────────────────────────────────────
+    async def _audit_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_AUDIT_INTERVAL)
+            pending = [t for t in self.tasks.values() if t.status == "auditing"]
+            for task in pending:
+                try:
+                    await self._check_task(task)
+                except Exception as exc:  # noqa: BLE001 - 单任务异常不拖垮轮询
+                    logger.error("审核轮询任务异常(%s):%s", task.share_code, exc, exc_info=exc)
+
+    async def _check_task(self, task: PipelineTask) -> None:
+        bot = self.bot
+        cfg = bot.cfg
+        if time.monotonic() - task.created_at > _AUDIT_TIMEOUT:
+            task.status = "timeout"
+            logger.warning("分享审核超 24h,放弃推送:%s(%s)", task.name, task.share_code)
+            await bot._notify_uid(
+                task.uid, f"⌛ 分享「{task.name}」审核超 24h 未通过,已放弃推送;文件保留在暂存目录。"
+            )
+            return
+
+        link = ParsedLink("115", task.share_code,
+                          f"https://115.com/s/{task.share_code}", task.receive_code or None)
+        try:
+            files = await bot.reader.read_share(link)
+        except ShareDead:
+            # 失效/违规:不推送,移入违规目录
+            task.status = "violated"
+            logger.warning("分享审核未通过(失效/违规):%s(%s)", task.name, task.share_code)
+            await self._move_to(cfg.pipeline_violated_dir, task)
+            await bot._notify_uid(
+                task.uid, f"🚫 分享「{task.name}」审核未通过或已失效,不予推送;已移入违规目录。"
+            )
+            return
+        except ShareError as exc:
+            # 审核中/快照生成中/限速:正常中间态,继续等
+            task.attempts += 1
+            logger.info("分享审核中(%s,第 %d 次检查):%s", task.share_code, task.attempts, exc)
+            return
+
+        # 审核通过:推卡(与手动推送同链路)
+        media = analyze_share(files) or AggregatedMedia(
+            title=task.name, file_count=len(files),
+            total_size=sum(f.size for f in files if not f.is_dir),
+        )
+        details = await bot.tmdb.match(media) if bot.tmdb else None
+        target = cfg.channel_for("115")
+        if target is None:
+            logger.warning("流水线推送中止:未登记 115 归属频道(%s)", task.name)
+            return  # 保留 auditing,等用户登记后下轮推送
+        title = (details["title"] if details else media.title) or task.name
+        try:
+            await bot._deliver(media, details, link, files, target)
+        except Exception as exc:  # noqa: BLE001 - 推送失败下轮重试(分享码不变,不会重复建)
+            logger.error("流水线推送失败(%s):%s", task.name, exc, exc_info=exc)
+            task.attempts += 1
+            return
+        bot.store.mark_pushed(task.share_code, title)
+        task.status = "done"
+        logger.info("流水线推送成功:%s(%s)", task.name, task.share_code)
+        await self._move_to(cfg.pipeline_published_dir, task)
+        label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
+        await bot._notify_uid(task.uid, f"✅ 分享「{task.name}」审核通过并已推送({label});已移入已发布目录。")
+
+    async def _move_to(self, target_dir: str, task: PipelineTask) -> None:
+        """任务目录移入目标目录;失败仅告警(文件留原地,不影响状态)。"""
+        try:
+            dest_cid = await self.bot.saver.ensure_dir(target_dir)
+            await self.bot.reader.fs_move(task.fid, dest_cid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("移动任务目录失败(%s → %s):%s", task.name, target_dir, exc)
