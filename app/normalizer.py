@@ -41,8 +41,9 @@ _CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
            "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
 _VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm")
 
-# 疑似垃圾标题:纯小写字母/数字/下划线组合且含长数字串(分享码、时间戳形态)
-_SUSPECT_TITLE_RE = re.compile(r"^[a-z0-9_\- ]{6,}$", re.IGNORECASE)
+# 疑似垃圾标题:纯小写字母/数字/下划线组合(无大写、无 CJK)且含长数字串
+# (分享码、时间戳形态);区分大小写,"The Movie 2023" 含大写不判垃圾
+_SUSPECT_TITLE_RE = re.compile(r"^[a-z0-9_\- ]+$")
 
 
 def _suspect_title(title: str) -> bool:
