@@ -13,6 +13,7 @@ const routes = [
       { path: 'logs', name: 'logs', component: () => import('./views/Logs.vue') },
     ],
   },
+  { path: '/:pathMatch(.*)*', redirect: '/overview' }, // 旧链接(/system 等)回总览
 ]
 
 export const router = createRouter({ history: createWebHistory(), routes })

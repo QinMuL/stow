@@ -389,6 +389,7 @@ def create_app(config_path: str | Path) -> FastAPI:
         candidate = (_STATIC.parent / full_path).resolve()
         if full_path and candidate.is_file() and candidate.is_relative_to(_STATIC.parent):
             return FileResponse(candidate)
-        return FileResponse(_STATIC)
+        # 入口 HTML 禁缓存:发版后浏览器立即用新页(assets 带 hash 可长缓存)
+        return FileResponse(_STATIC, headers={"Cache-Control": "no-cache"})
 
     return app
