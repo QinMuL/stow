@@ -28,6 +28,7 @@ from app.pan115 import ShareDead, ShareError
 logger = logging.getLogger(__name__)
 
 _AUDIT_INTERVAL = 120      # 审核轮询间隔(秒)
+_MONITOR_INTERVAL = 1800   # 目录监控间隔(秒,30 分钟)
 _AUDIT_TIMEOUT = 24 * 3600  # 放弃前最长等待
 
 
@@ -51,11 +52,15 @@ class SavePipeline:
     def __init__(self, bot) -> None:
         self.bot = bot
         self.tasks: dict[str, PipelineTask] = {}  # share_code → task
+        self.normalizer = ShareNormalizer(bot.reader, bot.tmdb)
         self._loop_task: asyncio.Task | None = None
+        self._monitor_task: asyncio.Task | None = None
 
     def start_loop(self) -> None:
         if self._loop_task is None or self._loop_task.done():
             self._loop_task = asyncio.create_task(self._audit_loop())
+        if self._monitor_task is None or self._monitor_task.done():
+            self._monitor_task = asyncio.create_task(self.monitor_loop())
 
     # ── 同步段:/save 触发 ──────────────────────────────────
     async def handle_save(self, update, link: ParsedLink, prefix: str = "") -> None:
@@ -88,7 +93,7 @@ class SavePipeline:
 
         status = await msg.reply_text(f"{prefix}⏳ [1/3] 正在转存分享内容…")
         try:
-            staging_cid = await bot.saver.ensure_dir(cfg.pipeline_staging_dir)
+            staging_cid = await bot.saver.ensure_dir(cfg.pipeline_dirs()[0])
             tr = await bot.saver.save_share(link, parent_cid=staging_cid)
         except Exception as exc:  # noqa: BLE001
             logger.error("转存失败 %s:%s", link.code, exc, exc_info=exc)
@@ -142,6 +147,48 @@ class SavePipeline:
                 except Exception as exc:  # noqa: BLE001 - 单任务异常不拖垮轮询
                     logger.error("审核轮询任务异常(%s):%s", task.share_code, exc, exc_info=exc)
 
+    # ── 目录监控:监控目录出现新资源 → 标准化 → 建分享 → 登记审核 ──
+    async def monitor_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_MONITOR_INTERVAL)
+            dirs = self.bot.cfg.monitor_dir_list()
+            if not dirs or self.bot.saver is None:
+                continue
+            for path in dirs:
+                try:
+                    await self._scan_monitor_dir(path)
+                except Exception as exc:  # noqa: BLE001 - 单目录异常不拖垮轮询
+                    logger.error("监控目录扫描异常(%s):%s", path, exc, exc_info=exc)
+
+    async def _scan_monitor_dir(self, path: str) -> None:
+        """扫描监控目录:未标准化处理过的新子项 → 标准化 → 建分享 → 登记审核。
+
+        已处理项会被移入已发布/违规目录,留在监控目录的即为新资源(移动即标记,
+        无需额外去重存储);审核中任务记录在内存(tasks),重启后重扫同项会复用
+        ——重复建分享的窗口仅在重启后的一个审核周期内,可接受。
+        """
+        bot = self.bot
+        if bot.reader.logged_in is False:
+            return
+        root_cid = await bot.saver.ensure_dir(path)
+        items = await bot.reader.list_dir(root_cid, nf=0)
+        for it in items:
+            fid, name, is_dir = it["fid"], it["name"], it["is_dir"]
+            if any(t.fid == fid for t in self.tasks.values()):
+                continue  # 审核中,跳过
+            nr = await self.normalizer.normalize(fid, name, is_dir, root_cid)
+            if nr.actions:
+                joined = ";".join(nr.actions[:3])
+                suffix = "…" if len(nr.actions) > 3 else ""
+                logger.info("监控目录标准化:%s → %s(%s%s)", name, nr.name, joined, suffix)
+            share_code, receive_code = await bot.reader.create_share(nr.fid)
+            self.tasks[share_code] = PipelineTask(
+                share_code=share_code, receive_code=receive_code,
+                fid=nr.fid, name=nr.name, uid=bot.cfg.tg_admin_ids[0],
+            )
+            logger.info("监控目录新资源已建分享:%s(%s),进入审核轮询", nr.name, share_code)
+            await asyncio.sleep(3)
+
     async def _check_task(self, task: PipelineTask) -> None:
         bot = self.bot
         cfg = bot.cfg
@@ -166,7 +213,7 @@ class SavePipeline:
             task.status = "violated"
             reason = "违规" if st["violating"] else "已失效"
             logger.warning("分享审核未通过(%s):%s(%s)", reason, task.name, task.share_code)
-            await self._move_to(cfg.pipeline_violated_dir, task)
+            await self._move_to(cfg.pipeline_dirs()[2], task)
             await bot._notify_uid(
                 task.uid, f"🚫 分享「{task.name}」审核未通过({reason}),不予推送;已移入违规目录。"
             )
@@ -181,7 +228,7 @@ class SavePipeline:
             # 失效/违规:不推送,移入违规目录
             task.status = "violated"
             logger.warning("分享审核未通过(失效/违规):%s(%s)", task.name, task.share_code)
-            await self._move_to(cfg.pipeline_violated_dir, task)
+            await self._move_to(cfg.pipeline_dirs()[2], task)
             await bot._notify_uid(
                 task.uid, f"🚫 分享「{task.name}」审核未通过或已失效,不予推送;已移入违规目录。"
             )
@@ -212,7 +259,7 @@ class SavePipeline:
         bot.store.mark_pushed(task.share_code, title)
         task.status = "done"
         logger.info("流水线推送成功:%s(%s)", task.name, task.share_code)
-        await self._move_to(cfg.pipeline_published_dir, task)
+        await self._move_to(cfg.pipeline_dirs()[1], task)
         label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
         await bot._notify_uid(task.uid, f"✅ 分享「{task.name}」审核通过并已推送({label});已移入已发布目录。")
 

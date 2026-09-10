@@ -40,12 +40,17 @@ const GROUPS = [
     ],
   },
   {
-    title: '转存流水线目录',
+    title: '转存流水线',
     desc: '/save <链接> 触发:转存→整理→建永久分享→审核通过后推送;需先配置上方 Cookie',
     fields: [
-      { key: 'pipeline_staging_dir', label: '暂存目录', hint: '转存落盘点;整理与建分享在此进行' },
-      { key: 'pipeline_published_dir', label: '已发布目录', hint: '推送成功后移入' },
-      { key: 'pipeline_violated_dir', label: '违规目录', hint: '审核失败/违规的分享移入,不予推送' },
+      { key: 'pipeline_root_dir', label: '流水线根目录', hint: '其下自动派生 待整理/已发布/违规 三个子目录' },
+    ],
+  },
+  {
+    title: '目录监控',
+    desc: '网盘目录出现新资源时,自动整理→建永久分享→审核通过后推送(30 分钟一轮)',
+    fields: [
+      { key: 'monitor_dirs', label: '监控目录(可选)', hint: '网盘内路径,多个用逗号分隔,如 剧集,电影;留空不监控' },
     ],
   },
 ]

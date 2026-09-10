@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,10 +43,10 @@ class Config:
     # 未登记某归属时,该类链接不推送,日志与 Bot 明确提示原因
     channels: list[ChannelConfig] = field(default_factory=list)
     # 转存流水线(/save <链接> 触发):暂存 → 整理 → 建分享 → 推送 → 归档/违规
-    # 需 115 Cookie;目录均相对网盘根,不存在自动创建
-    pipeline_staging_dir: str = "stow流水线/待整理"
-    pipeline_published_dir: str = "stow流水线/已发布"
-    pipeline_violated_dir: str = "stow流水线/违规"
+    # 需 115 Cookie;目录相对网盘根,不存在自动创建;子目录由根目录派生
+    pipeline_root_dir: str = "stow流水线"
+    # 目录监控:这些网盘目录里出现新资源时,自动标准化+建分享+推送(逗号分隔)
+    monitor_dirs: str = ""
     data_dir: str = "./data"
     log_level: str = "INFO"
     web_port: int = DEFAULT_WEB_PORT
@@ -82,6 +83,16 @@ class Config:
             if ch.preset == provider:
                 return ch.chat_id
         return None
+
+    def pipeline_dirs(self) -> tuple[str, str, str]:
+        """流水线三目录:(暂存, 已发布, 违规),由根目录派生。"""
+        root = self.pipeline_root_dir.rstrip("/")
+        return (f"{root}/待整理", f"{root}/已发布", f"{root}/违规")
+
+    def monitor_dir_list(self) -> list[str]:
+        """监控目录列表(逗号/换行分隔,去空)。"""
+        parts = re.split(r"[,，\n]+", self.monitor_dirs or "")
+        return [p.strip() for p in parts if p.strip()]
 
     def channels_summary(self) -> str:
         """启动日志用:归属分流一览。"""
@@ -157,9 +168,8 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         proxy_url=_clean(raw.get("proxy_url")),
         pan115_cookie=_clean(raw.get("pan115_cookie")),
         channels=channels,
-        pipeline_staging_dir=_dir(raw, "pipeline_staging_dir", "stow流水线/待整理"),
-        pipeline_published_dir=_dir(raw, "pipeline_published_dir", "stow流水线/已发布"),
-        pipeline_violated_dir=_dir(raw, "pipeline_violated_dir", "stow流水线/违规"),
+        pipeline_root_dir=_dir(raw, "pipeline_root_dir", "stow流水线"),
+        monitor_dirs=str(raw.get("monitor_dirs", "")).strip(),
         data_dir=str(raw.get("data_dir", "./data")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         web_port=int(raw.get("web_port", DEFAULT_WEB_PORT) or DEFAULT_WEB_PORT),
