@@ -293,3 +293,12 @@ a { color: var(--amber); text-decoration: none; }
 .crumb:hover { color: var(--text); }
 .crumb.cur { color: var(--amber-strong); cursor: default; }
 .crumb-sep { color: var(--faint); margin: 0 4px; }
+
+/* 频道监控状态 */
+.mon-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13.5px; padding: 6px 0 10px; }
+.mon-sub { color: var(--sub); font-size: 12.5px; }
+.mon-chans { border: 1px solid var(--line); border-radius: var(--r-m); margin-bottom: 12px; }
+.mon-chan { display: flex; align-items: center; gap: 10px; padding: 9px 12px; font-size: 13px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.mon-chan:last-child { border-bottom: none; }
+.mon-chan-name { color: var(--text); }
+.mon-err { color: var(--bad); font-size: 12.5px; }

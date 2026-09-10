@@ -11,7 +11,7 @@ async function load() {
   } catch { /* 401 已跳转 */ }
 }
 
-// 链路健康三行:Bot 服务 / 网络代理 / 115 通道(ok=正常,bad=故障,warn=降级可用)
+// 链路健康:Bot 服务 / 网络代理 / 115 通道 / 频道监控(ok=正常,bad=故障,warn=降级可用)
 const rows = computed(() => {
   const s = status.value
   if (!s) return []
@@ -37,7 +37,23 @@ const rows = computed(() => {
       : '匿名模式 · 易触发 405 限流',
     sub: c.cookie_set ? (c.ok ? '走稳定 proapi 通道' : c.error || '') : '建议在推送配置页填入 115 Cookie',
   }
-  return [bot, proxy, pan]
+  const out = [bot, proxy, pan]
+  // 频道监控:未配置源频道或 Bot 未运行时不计入(Bot 行已说明问题)
+  const m = s.monitor
+  if (m && m.configured && s.bot_running) {
+    const ok = m.state === 'running' && m.connected
+    out.push({
+      name: '频道监控',
+      state: ok ? 'ok' : 'bad',
+      text: ok
+        ? `监听中 · ${m.configured} 个源频道`
+        : `异常 · ${m.state_text}`,
+      sub: m.state === 'no-login'
+        ? '账号未登录:到全局配置页 → 频道监控 → 登录账号'
+        : m.account ? `账号 ${m.account}` : m.state_text,
+    })
+  }
+  return out
 })
 
 const healthCount = computed(() => rows.value.filter(r => r.state === 'ok').length)
@@ -62,15 +78,15 @@ onMounted(load)
         <div class="lbl">累计推送</div>
       </div>
       <div class="stat">
-        <div class="num" :style="{ color: healthCount === 3 ? 'var(--ok)' : healthCount === 0 ? 'var(--bad)' : 'var(--amber)' }">
-          {{ status ? healthCount + '/3' : '—' }}</div>
+        <div class="num" :style="{ color: healthCount === rows.length ? 'var(--ok)' : healthCount === 0 ? 'var(--bad)' : 'var(--amber)' }">
+          {{ status ? healthCount + '/' + rows.length : '—' }}</div>
         <div class="lbl">链路健康</div>
       </div>
     </div>
 
     <div class="card">
       <h3>LINK HEALTH</h3>
-      <div class="desc">推送链健康 · Bot / 代理 / 115 三段实时探测(代理 60s、Cookie 5min 缓存)</div>
+      <div class="desc">推送链健康 · Bot / 代理 / 115 / 频道监控实时探测(代理 60s、Cookie 5min 缓存)</div>
       <div v-for="r in rows" :key="r.name" class="health-row">
         <span class="dot" :class="r.state"></span>
         <div class="health-name">{{ r.name }}</div>

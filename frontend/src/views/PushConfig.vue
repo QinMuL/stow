@@ -1,7 +1,8 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import DirPickerModal from './DirPickerModal.vue'
+import MonitorLoginModal from './MonitorLoginModal.vue'
 
 const emit = defineEmits(['refresh-status'])
 
@@ -55,6 +56,59 @@ const monitorRows = ref([])
 const chanMsg = ref({ text: '', kind: '' })
 const chanBusy = ref(false)
 
+// ── 频道监控(TG 源频道 → ed2k 卡片) ──
+const mon = ref(null)
+const monitorChannelRows = ref([])
+const monMsg = ref({ text: '', kind: '' })
+const showLogin = ref(false)
+
+const apiHashSaved = computed(() => cfg.value?.tg_api_hash === '••••••••')
+const okChannels = computed(() => (mon.value?.channels || []).filter(c => c.ok).length)
+const monDot = computed(() => {
+  if (!mon.value) return ''
+  if (mon.value.state === 'running') return mon.value.connected ? 'ok' : 'bad'
+  if (mon.value.state === 'disabled') return 'warn'
+  return 'bad'
+})
+
+async function refreshMonitor() {
+  try {
+    mon.value = await api('monitor')
+  } catch (e) {
+    monMsg.value = { text: e.message, kind: 'err' }
+  }
+}
+
+function addMonitorChannel() {
+  monitorChannelRows.value.push('')
+}
+
+function startLogin() {
+  monMsg.value = { text: '', kind: '' }
+  if (!mon.value?.api_set) {
+    monMsg.value = { text: '请先填 tg_api_id / tg_api_hash,点「保存并重启」后再登录', kind: 'warn' }
+    return
+  }
+  showLogin.value = true
+}
+
+function onLoginDone(d) {
+  showLogin.value = false
+  mon.value = d
+  monMsg.value = { text: d.message, kind: 'ok' }
+}
+
+async function logoutMonitor() {
+  if (!window.confirm('退出登录会删除会话文件,下次需重新用手机号登录。继续?')) return
+  try {
+    const d = await api('monitor/logout', {})
+    mon.value = d
+    monMsg.value = { text: d.message, kind: 'ok' }
+  } catch (e) {
+    monMsg.value = { text: e.message, kind: 'err' }
+  }
+}
+
 onMounted(async () => {
   cfg.value = await api('config')
   const m = {}
@@ -64,11 +118,17 @@ onMounted(async () => {
       m[f.key] = Array.isArray(v) ? v.join(',') : (v ?? '')
     }
   }
+  // 频道监控的 API 凭据不在 GROUPS 里,单独回填(数字 0 视为未填)
+  m.tg_api_id = cfg.value.tg_api_id || ''
+  m.tg_api_hash = cfg.value.tg_api_hash ?? ''
   model.value = m
   monitorRows.value = String(cfg.value.monitor_dirs || '')
     .split(',').map(x => x.trim()).filter(Boolean)
+  monitorChannelRows.value = String(cfg.value.monitor_channels || '')
+    .split(',').map(x => x.trim()).filter(Boolean)
   const d = await api('channels')
   channels.value = d.channels.map(c => ({ ...c }))
+  await refreshMonitor()
 })
 
 function isSaved(f) {
@@ -84,6 +144,9 @@ async function save(restart) {
       for (const f of g.fields) values[f.key] = model.value[f.key]
     }
     values.monitor_dirs = monitorRows.value.join(',')
+    values.monitor_channels = monitorChannelRows.value.join(',')
+    values.tg_api_id = model.value.tg_api_id
+    values.tg_api_hash = model.value.tg_api_hash
     const d = await api('config', { values }, 'PUT')
     if (restart) {
       await api('restart', {})
@@ -219,7 +282,7 @@ async function saveChannels() {
       <div class="chan-tip">
         💡 登记方式:先发 <code>/bind</code> 给 Bot,再把频道里的任意一条消息
         <strong>转发给 Bot</strong>,按提示选择归属(115链接推送频道 / ed2k链接推送频道);
-        或在下方手动添加。后续将在此扩展频道监控能力。
+        或在下方手动添加。让 Bot 自动把别处的 ed2k 转进来,见下方「频道监控」卡片。
       </div>
 
       <div class="chan-list">
@@ -246,6 +309,76 @@ async function saveChannels() {
       </div>
     </div>
 
+    <div class="card">
+      <h3>频道监控</h3>
+      <div class="desc">
+        盯住 TG 源频道:消息里的 ed2k 链接按本项目卡片模板自动转发到
+        ed2k 链接推送频道(需先登记 ed2k 归属频道)
+      </div>
+
+      <div class="field">
+        <label>TG API ID <code>tg_api_id</code></label>
+        <input v-model="model.tg_api_id" placeholder="my.telegram.org 申请的数字 api_id" autocomplete="off">
+        <div class="hint">在 my.telegram.org → API development tools 申请(可与旧项目复用同一份)</div>
+      </div>
+      <div class="field">
+        <label>
+          TG API Hash <code>tg_api_hash</code>
+          <span v-if="apiHashSaved" class="saved-tag">✓ 已保存</span>
+        </label>
+        <input v-model="model.tg_api_hash" placeholder="32 位 api_hash" autocomplete="off">
+      </div>
+
+      <div class="chan-tip">
+        💡 每行一个源频道:公开频道填 <strong>@用户名</strong> 或 <code>t.me/xxx</code>,
+        私有频道填 <code>-100</code> 开头的频道 ID。首次接入<strong>只从当前消息开始</strong>监听、
+        不回补历史;停机期间的漏档会在重启后按游标补扫。改动后点「保存并重启」生效。
+      </div>
+
+      <div class="chan-list">
+        <div v-for="(r, i) in monitorChannelRows" :key="i" class="chan-row">
+          <input v-model="monitorChannelRows[i]" class="chan-id" placeholder="@频道用户名 / t.me 链接 / -100 频道 ID">
+          <button class="btn danger chan-del" @click="monitorChannelRows.splice(i, 1)">删除</button>
+        </div>
+      </div>
+      <div v-if="!monitorChannelRows.length" class="empty" style="margin-bottom:12px">
+        还没有源频道 —— 添加后「保存并重启」,再点右下角「登录账号」开始监听
+      </div>
+
+      <div class="mon-line">
+        <span class="dot" :class="monDot"></span>
+        <span>{{ mon ? mon.state_text : '状态加载中…' }}</span>
+        <span v-if="mon?.account" class="mon-sub">· {{ mon.account }}</span>
+        <span v-if="mon?.channels?.length" class="mon-sub">
+          · {{ okChannels }}/{{ mon.channels.length }} 频道可达
+        </span>
+      </div>
+
+      <div v-if="mon?.channels?.length" class="mon-chans">
+        <div v-for="c in mon.channels" :key="c.ref" class="mon-chan">
+          <span class="dot" :class="c.error ? 'bad' : c.ok ? 'ok' : 'warn'"></span>
+          <span class="mon-chan-name">{{ c.title || c.ref }}</span>
+          <span class="mon-sub">{{ c.ref }}</span>
+          <span v-if="c.error" class="mon-err">{{ c.error }}</span>
+          <span v-else-if="c.chat_id" class="mon-sub">游标消息 {{ c.last_msg_id }}</span>
+          <span v-else class="mon-sub">尚未接入(重启后解析)</span>
+        </div>
+      </div>
+
+      <div v-if="monMsg.text" class="msg" :class="monMsg.kind">{{ monMsg.text }}</div>
+
+      <div class="actions">
+        <button class="btn ghost" @click="addMonitorChannel">+ 添加源频道</button>
+        <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
+        <button v-if="mon?.account" class="btn ghost" style="margin-left:auto" @click="logoutMonitor">
+          退出登录
+        </button>
+        <button v-else class="btn ghost" style="margin-left:auto" @click="startLogin">登录账号</button>
+        <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
+      </div>
+    </div>
+
     <DirPickerModal v-if="showPicker" @pick="onPickDir" @close="showPicker = false" />
+    <MonitorLoginModal v-if="showLogin" @done="onLoginDone" @close="showLogin = false" />
   </div>
 </template>

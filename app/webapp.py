@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app import auth
+from app.channel_monitor import channel_rows
 from app.config import (
     MASK,
     SENSITIVE_KEYS,
@@ -28,7 +29,9 @@ from app.config import (
 )
 from app.store import Store
 
-# 进程状态(bot 线程写入,web 读取)
+# 进程状态(bot 线程写入,web 读取);Bot 就绪后还会写入:
+#   "monitor" —— 频道监控实例(Web 登录端点用)
+#   "bot_loop" —— Bot 事件循环(Telethon 客户端绑定该循环,只能投递到它执行)
 STATE = {"bot_running": False, "bot_error": ""}
 
 _STATIC = Path(__file__).parent.parent / "static" / "index.html"
@@ -121,12 +124,25 @@ class ChannelsUpdate(BaseModel):
     channels: list[ChannelItem]
 
 
+class MonitorPhone(BaseModel):
+    phone: str = ""
+
+
+class MonitorCode(BaseModel):
+    code: str = ""
+
+
+class MonitorPassword(BaseModel):
+    password: str = ""
+
+
 # 可经 Web 修改的配置键白名单(类型: s=字符串, i=整数, ids=ID 列表)
 EDITABLE = {
     "tg_bot_token": "s", "tg_admin_ids": "ids",
     "tmdb_api_key": "s", "proxy_url": "s", "log_level": "s", "web_port": "i",
     "pan115_cookie": "s",
     "pipeline_root_dir": "s", "monitor_dirs": "s",
+    "tg_api_id": "i", "tg_api_hash": "s", "monitor_channels": "s",
 }
 
 
@@ -332,6 +348,86 @@ def create_app(config_path: str | Path) -> FastAPI:
         write_raw(raw, config_path)
         return {"success": True, "message": "已保存,重启后生效(或在 Bot 中转发频道消息登记)"}
 
+    # ── 频道监控(源频道 ed2k → 本项目卡片) ──────────────────
+    def _monitor_or_503():
+        mon = STATE.get("monitor")
+        if mon is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Bot 未运行,频道监控不可用(先在配置页补齐配置并重启)",
+            )
+        return mon
+
+    def _monitor_call(name: str, *args):
+        """在 Bot 事件循环里跑监控协程:Telethon 客户端绑定该循环,不能跨循环直调。
+
+        Web 跑在独立线程/FastAPI 线程池,故用 run_coroutine_threadsafe 投递。
+        """
+        mon = _monitor_or_503()
+        loop = STATE.get("bot_loop")
+        if loop is None:
+            raise HTTPException(status_code=503, detail="Bot 事件循环未就绪,请稍后重试")
+        fut = asyncio.run_coroutine_threadsafe(getattr(mon, name)(*args), loop)
+        try:
+            return fut.result(timeout=120)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"操作失败:{str(exc)[:120]}") from exc
+
+    def _monitor_payload(cfg) -> dict:
+        """监控状态:内存字段取自监控实例,游标行用本线程自己的 Store 读。"""
+        mon = STATE.get("monitor")
+        store = Store(cfg.db_path)
+        try:
+            states = store.monitor_states()
+        finally:
+            store.close()
+        data = mon.runtime_status() if mon is not None else {
+            "state": "stopped", "state_text": "Bot 未运行", "account": "",
+            "connected": False, "login_stage": "", "last_error": "", "unreachable": {},
+        }
+        data["channels"] = channel_rows(cfg, states, data.pop("unreachable"))
+        data["api_set"] = bool(cfg.tg_api_id and cfg.tg_api_hash)
+        return data
+
+    @app.get("/api/monitor")
+    def monitor_state(request: Request) -> dict:
+        _current_user(config_path, _auth_header(request))
+        return _monitor_payload(load_config(config_path))
+
+    @app.post("/api/monitor/login/start")
+    def monitor_login_start(body: MonitorPhone, request: Request) -> dict:
+        """发验证码(手机号含国家码)。"""
+        _current_user(config_path, _auth_header(request))
+        ok, message = _monitor_call("login_start", body.phone)
+        return {"success": ok, "message": message, **_monitor_payload(load_config(config_path))}
+
+    @app.post("/api/monitor/login/code")
+    def monitor_login_code(body: MonitorCode, request: Request) -> dict:
+        _current_user(config_path, _auth_header(request))
+        ok, message = _monitor_call("login_code", body.code)
+        return {"success": ok, "message": message, **_monitor_payload(load_config(config_path))}
+
+    @app.post("/api/monitor/login/password")
+    def monitor_login_password(body: MonitorPassword, request: Request) -> dict:
+        _current_user(config_path, _auth_header(request))
+        ok, message = _monitor_call("login_password", body.password)
+        return {"success": ok, "message": message, **_monitor_payload(load_config(config_path))}
+
+    @app.post("/api/monitor/login/cancel")
+    def monitor_login_cancel(request: Request) -> dict:
+        _current_user(config_path, _auth_header(request))
+        message = _monitor_call("login_cancel")
+        return {"success": True, "message": message, **_monitor_payload(load_config(config_path))}
+
+    @app.post("/api/monitor/logout")
+    def monitor_logout(request: Request) -> dict:
+        """退出登录:断开客户端并删除会话文件(下次需重新登录)。"""
+        _current_user(config_path, _auth_header(request))
+        message = _monitor_call("logout")
+        return {"success": True, "message": message, **_monitor_payload(load_config(config_path))}
+
     # ── 网盘目录浏览(目录选择器数据源) ──────────────────────
     @app.get("/api/115/dirs")
     async def list_115_dirs(request: Request, cid: int = 0) -> dict:
@@ -364,6 +460,21 @@ def create_app(config_path: str | Path) -> FastAPI:
             _health_cache["pan115"] = (
                 now, await asyncio.to_thread(_check_pan115, cfg.pan115_cookie)
             )
+        # 频道监控:未配置源频道时不参与健康判定(configured=0)
+        mon = STATE.get("monitor")
+        if mon is not None:
+            rs = mon.runtime_status()
+            monitor = {
+                "configured": len(cfg.monitor_channel_list()), "ready": cfg.monitor_ready(),
+                "state": rs["state"], "state_text": rs["state_text"],
+                "account": rs["account"], "connected": rs["connected"],
+            }
+        else:
+            monitor = {
+                "configured": len(cfg.monitor_channel_list()), "ready": cfg.monitor_ready(),
+                "state": "stopped", "state_text": "Bot 未运行",
+                "account": "", "connected": False,
+            }
         return {
             "bot_running": STATE["bot_running"],
             "bot_error": STATE["bot_error"],
@@ -371,6 +482,7 @@ def create_app(config_path: str | Path) -> FastAPI:
             "missing": cfg.problems(),
             "proxy": _health_cache["proxy"][1],
             "pan115": _health_cache["pan115"][1],
+            "monitor": monitor,
         }
 
     @app.get("/api/history")

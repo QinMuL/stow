@@ -9,14 +9,15 @@ from pathlib import Path
 
 sys.path.insert(0, "/app")
 
+from telegram import Bot
+from telegram.request import HTTPXRequest
+
 from app.bot import StowBot
 from app.config import load_config
 from app.media import analyze_share
-from app.pan115 import Pan115Reader, ShareLink
+from app.pan115 import ShareLink
 from app.store import Store
 from app.tmdb import TmdbClient
-from telegram import Bot
-from telegram.request import HTTPXRequest
 
 
 async def main() -> None:
@@ -40,8 +41,12 @@ async def main() -> None:
         await t.aclose()
     print(f"TMDB:{details['title']!r} id={details['tmdb_id'] if details else None}")
 
-    await bot._deliver(media, details, link, files)
-    print("[OK] _deliver(生产路径)投递成功")
+    target = cfg.channel_for("115")  # 多频道归属:115 链接推 115 归属频道
+    if target is None:
+        print("[跳过] 未登记 115 归属频道")
+        return
+    await bot._deliver(media, details, link, files, target)
+    print(f"[OK] _deliver(生产路径)投递成功 → {target}")
     await tg.shutdown()
 
 

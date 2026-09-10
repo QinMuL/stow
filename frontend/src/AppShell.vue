@@ -16,7 +16,7 @@ const nav = [
   { to: '/logs', ic: '≡', label: '日志' },
 ]
 
-// 整体系统状态:聚合 Bot 进程 / 代理连通 / 115 通道三段健康,一眼看出有无异常
+// 整体系统状态:聚合 Bot 进程 / 代理连通 / 115 通道 / 频道监控四段健康,一眼看出有无异常
 const sysState = computed(() => {
   const s = status.value
   if (!s) return { cls: 'bad', text: '检测中…', detail: '' }
@@ -28,12 +28,17 @@ const sysState = computed(() => {
   const c = s.pan115 || {}
   if (c.cookie_set && !c.ok) issues.push('115 Cookie 失效')
   else if (!c.cookie_set) warn = true
+  const m = s.monitor
+  if (m && m.configured && s.bot_running) {
+    if (m.state === 'no-login') issues.push('频道监控未登录')
+    else if (m.state !== 'running' || !m.connected) issues.push(`频道监控${m.state_text}`)
+  }
   if (issues.length) {
     return { cls: 'bad', text: '系统异常', detail: issues.join(' · ') }
   }
   return warn
     ? { cls: 'warn', text: '系统运行中(降级)', detail: '115 未配置 Cookie,匿名通道易限流' }
-    : { cls: 'ok', text: '系统运行中', detail: 'Bot / 代理 / 115 全部正常' }
+    : { cls: 'ok', text: '系统运行中', detail: 'Bot / 代理 / 115 / 频道监控 全部正常' }
 })
 
 async function refresh() {

@@ -17,7 +17,7 @@ DEFAULT_CONFIG_PATH = "./data/config.json"
 DEFAULT_WEB_PORT = 8686
 
 # 敏感键:Web 展示脱敏;PUT 收到掩码值表示"未修改"
-SENSITIVE_KEYS = ("tg_bot_token", "tmdb_api_key", "pan115_cookie")
+SENSITIVE_KEYS = ("tg_bot_token", "tmdb_api_key", "pan115_cookie", "tg_api_hash")
 MASK = "••••••••"
 
 
@@ -47,6 +47,11 @@ class Config:
     pipeline_root_dir: str = "stow流水线"
     # 目录监控:这些网盘目录里出现新资源时,自动标准化+建分享+推送(逗号分隔)
     monitor_dirs: str = ""
+    # TG 频道监控(Telethon 用户账号):源频道里的 ed2k 链接 → 本项目卡片 → ed2k 归属频道。
+    # 频道列表为空 = 监控不启动(无需额外开关);api_id/api_hash 在 my.telegram.org 申请
+    tg_api_id: int = 0
+    tg_api_hash: str = ""
+    monitor_channels: str = ""  # 逗号分隔:@username / t.me 链接 / chat_id
     data_dir: str = "./data"
     log_level: str = "INFO"
     web_port: int = DEFAULT_WEB_PORT
@@ -94,6 +99,26 @@ class Config:
         parts = re.split(r"[,，\n]+", self.monitor_dirs or "")
         return [p.strip() for p in parts if p.strip()]
 
+    @property
+    def monitor_session_path(self) -> Path:
+        """Telethon 会话文件(随 data 目录持久化,容器重建不丢登录)。"""
+        return Path(self.data_dir) / "monitor.session"
+
+    def monitor_channel_list(self) -> list[str]:
+        """源频道列表(逗号/换行分隔,去空、按序去重)。"""
+        seen: set[str] = set()
+        out: list[str] = []
+        for part in re.split(r"[,，\n]+", self.monitor_channels or ""):
+            ref = part.strip()
+            if ref and ref not in seen:
+                seen.add(ref)
+                out.append(ref)
+        return out
+
+    def monitor_ready(self) -> bool:
+        """频道监控能否启动:需凭据 + 至少一个源频道。"""
+        return bool(self.tg_api_id and self.tg_api_hash and self.monitor_channel_list())
+
     def channels_summary(self) -> str:
         """启动日志用:归属分流一览。"""
         if not self.channels:
@@ -115,6 +140,12 @@ def _clean(value: object) -> str:
 def _dir(raw: dict, key: str, default: str) -> str:
     """目录配置:去空白;空值回退默认。"""
     return str(raw.get(key, default)).strip() or default
+
+
+def _int(value: object) -> int:
+    """整数配置:非法/空值回退 0(Web 表单可能传字符串)。"""
+    s = str(value or "").strip()
+    return int(s) if s.lstrip("-").isdigit() else 0
 
 
 def read_raw(path: str | Path | None = None) -> dict:
@@ -170,6 +201,9 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         channels=channels,
         pipeline_root_dir=_dir(raw, "pipeline_root_dir", "stow流水线"),
         monitor_dirs=str(raw.get("monitor_dirs", "")).strip(),
+        tg_api_id=_int(raw.get("tg_api_id")),
+        tg_api_hash=_clean(raw.get("tg_api_hash")),
+        monitor_channels=str(raw.get("monitor_channels", "")).strip(),
         data_dir=str(raw.get("data_dir", "./data")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         web_port=int(raw.get("web_port", DEFAULT_WEB_PORT) or DEFAULT_WEB_PORT),
@@ -201,6 +235,8 @@ def ensure_admin(cfg_path: str | Path | None = None) -> None:
     raw.setdefault("proxy_url", "")
     raw.setdefault("pan115_cookie", "")
     raw.setdefault("channels", [])
+    raw.setdefault("monitor_dirs", "")
+    raw.setdefault("monitor_channels", "")
     raw.pop("tg_chat_id", None)  # 默认频道概念已移除,旧配置顺手清理
     raw["admin_username"] = auth.DEFAULT_ADMIN_USER
     raw["admin_password_hash"] = auth.hash_password(auth.DEFAULT_ADMIN_PASSWORD)

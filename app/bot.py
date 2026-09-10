@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -19,6 +20,7 @@ from telegram.ext import (
 )
 
 from app import card
+from app.channel_monitor import ChannelMonitor
 from app.config import ChannelConfig, Config
 from app.links import ParsedLink, ed2k_file, parse_all, parse_one
 from app.media import AggregatedMedia, analyze_share
@@ -44,6 +46,15 @@ class DeliveryUncertain(Exception):
     """投递超时:消息可能已送达,重试/回退都会重复投递,只能让用户核实。"""
 
 
+@dataclass
+class PushResult:
+    """一次链接推送的结果(手动推送与频道监控共用)。"""
+
+    ok: bool
+    text: str
+    uncertain: bool = False  # 投递超时(可能已送达):不得重试、不得标记已推送
+
+
 _PRESET_LABEL = {"115": "115链接推送频道", "ed2k": "ed2k链接推送频道"}
 
 _HELP = (
@@ -53,6 +64,8 @@ _HELP = (
     "💾 转存流水线:/save <115链接>\n"
     "转存到网盘 → 目录标准化 → 建永久分享 → 审核通过后自动推送并归档\n\n"
     "📂 目录监控:/scan 立即扫描监控目录(常规 30 分钟自动一轮)\n\n"
+    "📡 频道监控(Web 全局配置页配置):盯住源频道,把里面的 ed2k 链接\n"
+    "按本卡片模板自动转发到 ed2k 链接推送频道\n\n"
     "📁 登记推送频道(二选一):\n"
     "① 先发 /bind,5 分钟内把频道里的任意一条消息转发给本 Bot\n"
     "② 转发时在附言里写 /bind(随时有效)\n"
@@ -70,6 +83,7 @@ class StowBot:
         self.tmdb = TmdbClient(cfg.tmdb_api_key, cfg.proxy_url) if cfg.tmdb_api_key else None
         self.saver = Pan115Saver(self.reader)
         self.pipeline = SavePipeline(self)
+        self.monitor = ChannelMonitor(self)  # TG 频道监控(ed2k → 卡片 → ed2k 频道)
         self._push_lock = asyncio.Lock()  # 投递串行,防 flood
         self._pending_channels: dict[str, str] = {}  # 登记选择中:chat_id → 标题(回调取)
         self._bind_wait: dict[int, float] = {}  # /bind 等待期:uid → 截止时间戳
@@ -83,6 +97,12 @@ class StowBot:
         async def _post_init(app: Application) -> None:
             self._bot_ref = app.bot
             self.pipeline.start_loop()  # /save 流水线审核轮询
+            self.monitor.start()        # TG 频道监控(源频道 → ed2k 卡片)
+            # Web 登录端点需在 Bot 事件循环里驱动 Telethon 客户端(Web 跑在另一线程)
+            from app.webapp import STATE
+
+            STATE["monitor"] = self.monitor
+            STATE["bot_loop"] = asyncio.get_running_loop()
 
         builder = (
             Application.builder()
@@ -301,43 +321,63 @@ class StowBot:
         if self.store.is_pushed(link.key):
             await msg.reply_text(f"{prefix}🔁 已推送过:{link.dedup_display}")
             return
+        verb = "ed2k 链接" if link.provider == "ed2k" else "分享"
+        status = await msg.reply_text(f"{prefix}⏳ 正在读取{verb}…")
+        await self.push_link(link, status=status, prefix=prefix)
+
+    async def _say(self, status, text: str) -> None:
+        """进度消息可选:频道监控链路没有聊天上下文,只落日志。"""
+        if status is not None:
+            await status.edit_text(text)
+
+    async def push_link(
+        self, link: ParsedLink, *, status=None, prefix: str = ""
+    ) -> PushResult:
+        """链接 → 卡片 → 归属频道(手动推送与频道监控共用同一条链路)。
+
+        去重由调用方负责(先查 store.is_pushed);推送成功即标记已推送。
+        status 为可编辑的进度消息(可选);失败原因一律落日志。
+        """
         label = _PRESET_LABEL[link.provider]
         target = self.cfg.channel_for(link.provider)
         if target is None:
-            # 未登记该归属:不推送,给出明确原因与登记指引
+            # 未登记该归属:不推送,给出明确原因与登记指引(不静默兜底)
             logger.warning("未配置%s,链接 %s 不推送", label, link.dedup_display)
-            await msg.reply_text(
-                f"{prefix}📭 尚未登记{label},该链接未推送。\n"
+            text = (
+                f"📭 尚未登记{label},该链接未推送。\n"
                 "登记方式:发 /bind 后转发频道消息选归属,或在全局配置页手动添加。"
             )
-            return
-        verb = "ed2k 链接" if link.provider == "ed2k" else "分享"
-        status = await msg.reply_text(f"{prefix}⏳ 正在读取{verb}…")
+            await self._say(status, prefix + text)
+            return PushResult(False, text)
+
         files, media = await self._load_media(link, status, prefix)
         if media is None:
-            return  # _load_media 已回报错误
+            return PushResult(False, "读取失败")  # _load_media 已回报原因
         details = await self.tmdb.match(media) if self.tmdb else None
         logger.info("TMDB 匹配:%s → %s", media.title[:40], details["title"] if details else "未命中")
 
         try:
             await self._deliver(media, details, link, files, target)
         except DeliveryUncertain as exc:
-            # 不标记已推送:若实际没送达,用户重发链接即可重推
+            # 不标记已推送:若实际没送达,链接再次出现即可重推
             logger.warning("投递超时(结果不确定):%s", exc)
-            await status.edit_text(f"{prefix}⚠️ {exc}")
-            return
+            await self._say(status, f"{prefix}⚠️ {exc}")
+            return PushResult(False, str(exc), uncertain=True)
         except Exception as exc:  # noqa: BLE001 - 投递失败保留状态可重试
             logger.error("卡片投递失败:%s", exc, exc_info=exc)
-            await status.edit_text(f"{prefix}❌ 投递失败:{str(exc)[:120]}")
-            return
+            text = f"❌ 投递失败:{str(exc)[:120]}"
+            await self._say(status, prefix + text)
+            return PushResult(False, text)
 
         title = (details["title"] if details else media.title) or link.dedup_display
         self.store.mark_pushed(link.key, title)
         n = media.file_count or len(files)
         label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
-        await status.edit_text(f"{prefix}✅ 已推送 · {n} 文件 · {label}")
+        text = f"✅ 已推送 · {n} 文件 · {label}"
+        await self._say(status, prefix + text)
+        return PushResult(True, text)
 
-    async def _load_media(self, link: ParsedLink, status, prefix: str):
+    async def _load_media(self, link: ParsedLink, status=None, prefix: str = ""):
         """按 provider 读取内容 → 聚合。失败已回报,返回 (files, None)。"""
         if link.provider == "ed2k":
             name, size, _ = ed2k_file(link.code)
@@ -353,19 +393,19 @@ class StowBot:
                 else "该分享需要访问码,请在链接中带上 ?password= 或正文注明"
             )
             logger.warning("分享 %s 需要访问码(code_changed=%s)", link.code, exc.code_changed)
-            await status.edit_text(f"{prefix}🔐 {tip}")
+            await self._say(status, f"{prefix}🔐 {tip}")
             return [], None
         except ShareDead:
             logger.warning("分享 %s 已失效", link.code)
-            await status.edit_text(f"{prefix}💀 分享已失效或被取消")
+            await self._say(status, f"{prefix}💀 分享已失效或被取消")
             return [], None
         except (ShareRateLimited, ShareSnapshotting) as exc:
             logger.warning("分享 %s 限速/快照中:%s", link.code, exc)
-            await status.edit_text(f"{prefix}⏳ {exc},稍后重试")
+            await self._say(status, f"{prefix}⏳ {exc},稍后重试")
             return [], None
         except ShareError as exc:
             logger.error("分享 %s 读取失败:%s", link.code, exc, exc_info=True)
-            await status.edit_text(f"{prefix}❌ {exc}")
+            await self._say(status, f"{prefix}❌ {exc}")
             return [], None
         media = analyze_share(files) or AggregatedMedia(
             title=link.code, file_count=len(files),

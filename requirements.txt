@@ -4,3 +4,8 @@ httpx>=0.28,<1
 fastapi>=0.115,<1
 uvicorn>=0.30,<1
 guessit>=3.8
+# 频道监控:Telethon 用户账号(源频道 → ed2k → 卡片)。
+# python-socks 必须显式装:缺失时 Telethon 只 warn 一句就**静默忽略代理参数**,
+# 容器内代理不通会表现为"连不上 TG"而看不出真因。
+telethon>=1.36,<2
+python-socks>=2,<3

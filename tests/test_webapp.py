@@ -262,3 +262,131 @@ def test_config_put_rejects_placeholder(tmp_path):
     )
     assert r.status_code == 400
     assert "占位符" in r.json()["detail"]
+
+
+# ── 频道监控(Web 侧) ───────────────────────────────────────
+def test_config_accepts_monitor_keys(tmp_path):
+    """API 凭据与源频道可经 Web 保存;api_hash 脱敏展示。"""
+    client = _client(tmp_path)
+    token = _login(client)
+    r = client.put(
+        "/api/config",
+        json={"values": {"tg_api_id": "36174218", "tg_api_hash": "e778abcdef0123456789abcdef012345",
+                         "monitor_channels": "@src1,t.me/src2"}},
+        headers=_h(token),
+    )
+    assert r.status_code == 200, r.text
+    body = client.get("/api/config", headers=_h(token)).json()
+    assert body["tg_api_id"] == 36174218
+    assert body["tg_api_hash"] == "••••••••"          # 敏感键脱敏
+    assert body["monitor_channels"] == "@src1,t.me/src2"
+
+
+def test_config_put_keeps_masked_api_hash(tmp_path):
+    """掩码值表示未修改,不覆盖已存 api_hash。"""
+    import json as _json
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "tg_api_hash": "realhash123"}),
+                 encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    client.put("/api/config", json={"values": {"tg_api_hash": "••••••••"}}, headers=_h(token))
+    assert _json.loads(p.read_text(encoding="utf-8"))["tg_api_hash"] == "realhash123"
+
+
+def test_monitor_status_without_bot(tmp_path):
+    """Bot 未运行时:状态接口照常可用,并明确标注 Bot 未运行。"""
+    import json as _json
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "tg_api_id": 1, "tg_api_hash": "h",
+                              "monitor_channels": "@src"}), encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    r = client.get("/api/monitor", headers=_h(token))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["state"] == "stopped" and body["state_text"] == "Bot 未运行"
+    assert body["api_set"] is True
+    assert [c["ref"] for c in body["channels"]] == ["@src"]   # 配置行照常展示
+    assert body["channels"][0]["ok"] is False                 # 未接入 → 不可达
+
+
+def test_monitor_login_requires_bot(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    r = client.post("/api/monitor/login/start", json={"phone": "+8613800138000"}, headers=_h(token))
+    assert r.status_code == 503
+
+
+def test_status_includes_monitor_block(tmp_path):
+    import json as _json
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "monitor_channels": "@a,@b"}),
+                 encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    mon = client.get("/api/status", headers=_h(token)).json()["monitor"]
+    assert mon["configured"] == 2 and mon["ready"] is False   # 缺 API 凭据 → 未就绪
+
+
+def test_monitor_call_runs_on_bot_loop(tmp_path):
+    """跨线程调度:Web 线程把监控协程投递到 Bot 事件循环里执行。
+
+    Telethon 客户端绑定 Bot 循环,Web 侧必须走 run_coroutine_threadsafe——
+    这里用真事件循环(另一个线程)+ 假监控实例验证这条通路。
+    """
+    import asyncio
+    import threading
+
+    from app import webapp as wa
+
+    client = _client(tmp_path)
+    token = _login(client)
+
+    class FakeMonitor:
+        def __init__(self):
+            self.ran_in = None
+
+        async def login_cancel(self):
+            self.ran_in = threading.get_ident()
+            return "已取消登录。"
+
+        def runtime_status(self):
+            return {"state": "stopped", "state_text": "未运行", "account": "",
+                    "connected": False, "login_stage": "", "last_error": "",
+                    "unreachable": {}}
+
+    mon = FakeMonitor()
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    wa.STATE["monitor"] = mon
+    wa.STATE["bot_loop"] = loop
+    try:
+        r = client.post("/api/monitor/login/cancel", headers=_h(token))
+        assert r.status_code == 200, r.text
+        assert r.json()["message"] == "已取消登录。"
+        assert mon.ran_in == thread.ident       # 协程确实跑在 Bot 线程的循环里
+    finally:
+        wa.STATE.pop("monitor", None)
+        wa.STATE.pop("bot_loop", None)
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+
+def test_monitor_login_503_when_loop_missing(tmp_path):
+    """有监控实例但事件循环未就绪:明确 503 而非卡死。"""
+    from app import webapp as wa
+
+    client = _client(tmp_path)
+    token = _login(client)
+    wa.STATE["monitor"] = object()
+    try:
+        r = client.post("/api/monitor/login/cancel", headers=_h(token))
+        assert r.status_code == 503
+    finally:
+        wa.STATE.pop("monitor", None)
