@@ -145,6 +145,8 @@ EDITABLE = {
     "pan115_cookie": "s",
     "pipeline_root_dir": "s", "monitor_dirs": "s",
     "tg_api_id": "i", "tg_api_hash": "s", "monitor_channels": "s",
+    "openlist_base_url": "s", "openlist_token": "s", "openlist_path": "s",
+    "cd2_address": "s", "cd2_token": "s", "cd2_source_path": "s",
 }
 
 

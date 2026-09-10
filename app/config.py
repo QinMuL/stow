@@ -21,7 +21,10 @@ DEFAULT_CONFIG_PATH = "./data/config.json"
 DEFAULT_WEB_PORT = 8686
 
 # 敏感键:Web 展示脱敏;PUT 收到掩码值表示"未修改"
-SENSITIVE_KEYS = ("tg_bot_token", "tmdb_api_key", "pan115_cookie", "tg_api_hash")
+SENSITIVE_KEYS = (
+    "tg_bot_token", "tmdb_api_key", "pan115_cookie", "tg_api_hash",
+    "openlist_token", "cd2_token",
+)
 MASK = "••••••••"
 
 
@@ -56,6 +59,13 @@ class Config:
     tg_api_id: int = 0
     tg_api_hash: str = ""
     monitor_channels: str = ""  # 逗号分隔:@username / t.me 链接 / chat_id
+    # 下载/上传闭环的外部工具(v0.2):openlist 挂载其它网盘取资源,CD2 上传到 115
+    openlist_base_url: str = ""   # openlist 服务地址,如 http://127.0.0.1:5244
+    openlist_token: str = ""      # openlist API token(敏感)
+    openlist_path: str = ""       # openlist 侧的挂载路径(资源所在),如 /项目测试
+    cd2_address: str = ""         # CD2 gRPC 地址,如 127.0.0.1:19798
+    cd2_token: str = ""           # CD2 API token(敏感)
+    cd2_source_path: str = ""     # CD2 侧看到的本地待上传目录,如 /clouddrive
     # 本地媒体流转目录(容器内 /app/media,与 compose 的 ./media:/app/media 对应)。
     # 首次部署自动在其下建两个子目录:openlist(下载落地) / clouddrive(CD2 上传源)
     media_root: str = "./media"
@@ -250,6 +260,12 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         tg_api_id=_int(raw.get("tg_api_id")),
         tg_api_hash=_clean(raw.get("tg_api_hash")),
         monitor_channels=str(raw.get("monitor_channels", "")).strip(),
+        openlist_base_url=_clean(raw.get("openlist_base_url")),
+        openlist_token=_clean(raw.get("openlist_token")),
+        openlist_path=str(raw.get("openlist_path", "")).strip(),
+        cd2_address=_clean(raw.get("cd2_address")),
+        cd2_token=_clean(raw.get("cd2_token")),
+        cd2_source_path=str(raw.get("cd2_source_path", "")).strip(),
         media_root=_dir(raw, "media_root", "./media"),
         data_dir=str(raw.get("data_dir", "./data")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
