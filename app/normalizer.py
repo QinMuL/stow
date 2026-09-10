@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 from app.media import AggregatedMedia, extract_tmdb_id, parse_filename
@@ -39,6 +40,15 @@ _SEASON_DIR_PATTERNS: list[tuple[re.Pattern, str]] = [
 _CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
            "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
 _VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm")
+
+# 疑似垃圾标题:纯小写字母/数字/下划线组合且含长数字串(分享码、时间戳形态)
+_SUSPECT_TITLE_RE = re.compile(r"^[a-z0-9_\- ]{6,}$", re.IGNORECASE)
+
+
+def _suspect_title(title: str) -> bool:
+    return bool(title) and bool(
+        _SUSPECT_TITLE_RE.fullmatch(title) and re.search(r"\d{4,}", title)
+    )
 
 
 def _cn_to_int(s: str) -> int | None:
@@ -92,6 +102,7 @@ class NormalizeResult:
     fid: int              # 标准化后的 fid(可能变了:散文件时建了新资源目录)
     name: str             # 标准化后的名称
     changed: bool
+    recognized: bool = True  # 媒体信息是否识别成功(TMDB 命中);未识别不应建分享
     actions: list[str] = field(default_factory=list)
 
 
@@ -112,7 +123,7 @@ class ShareNormalizer:
             return await self._wrap_single_file(fid, name, parent_cid)
         except Exception as exc:  # noqa: BLE001
             logger.warning("目录标准化失败(%s),降级用原结构:%s", name, exc)
-            return NormalizeResult(fid=fid, name=name, changed=False)
+            return NormalizeResult(fid=fid, name=name, changed=False, recognized=False)
 
     # ── 场景 A/B/C:已有目录 ────────────────────────────────
     async def _normalize_folder(self, fid: int, name: str) -> NormalizeResult:
@@ -123,8 +134,8 @@ class ShareNormalizer:
 
         media = self._detect_media(name, items)
         if media is None:
-            logger.info("目录标准化跳过(无法识别媒体信息):%s", name)
-            return NormalizeResult(fid=fid, name=name, changed=False)
+            logger.info("目录标准化:无法识别媒体信息:%s", name)
+            return NormalizeResult(fid=fid, name=name, changed=False, recognized=False)
         title, year, media_type, tmdb_id = media
 
         if tmdb_id is None:
@@ -134,6 +145,11 @@ class ShareNormalizer:
                 if details:
                     title = details.get("title") or title
                     year = details.get("year") or year
+
+        if tmdb_id is None:
+            # TMDB 未命中:无法产出可信的标准名,交人工处理(流水线拦截建分享)
+            logger.warning("目录标准化:TMDB 未命中(%s),资源保留原结构待人工处理", title)
+            return NormalizeResult(fid=fid, name=name, changed=False, recognized=False)
 
         new_name = build_resource_name(title, year, tmdb_id)
         root_changed = False
@@ -146,7 +162,7 @@ class ShareNormalizer:
         season_changed = await self._handle_seasons(fid, subdirs, files, actions)
         return NormalizeResult(
             fid=fid, name=new_name if root_changed else name,
-            changed=root_changed or season_changed, actions=actions,
+            changed=root_changed or season_changed, recognized=True, actions=actions,
         )
 
     # ── 季目录处理(A 重命名 / B 散集归季) ────────────────────
@@ -193,11 +209,12 @@ class ShareNormalizer:
         parsed = parse_filename(name)
         title, year, media_type = parsed.title, parsed.year, parsed.media_type
         tmdb_id = await self._tmdb_match(title, year, media_type)
-        if tmdb_id is not None:
-            details = await self._tmdb_details(tmdb_id, media_type)
-            if details:
-                title = details.get("title") or title
-                year = details.get("year") or year
+        if tmdb_id is None:
+            return NormalizeResult(fid=fid, name=name, changed=False, recognized=False)
+        details = await self._tmdb_details(tmdb_id, media_type)
+        if details:
+            title = details.get("title") or title
+            year = details.get("year") or year
         root_name = build_resource_name(title, year, tmdb_id)
 
         root_cid = await self._makedirs_under(parent_cid, root_name)
@@ -217,6 +234,17 @@ class ShareNormalizer:
         )
         parsed = parse_filename(dir_name)
         title, year, media_type = parsed.title, parsed.year, parsed.media_type
+
+        if _suspect_title(title):
+            # 目录名疑似分享码/乱码(如 swseiuq3znw_20260910):从子项文件名
+            # 投票取标题(多数票),识别不出就交给 TMDB 匹配失败的拦截分支
+            votes = [
+                p.title for it in items if not it["is_dir"]
+                if (p := parse_filename(it["name"])).title
+                and not _suspect_title(p.title)
+            ]
+            if votes:
+                title = Counter(votes).most_common(1)[0][0]
 
         if media_type == "movie":
             for it in items:

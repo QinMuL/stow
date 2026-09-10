@@ -110,6 +110,14 @@ class SavePipeline:
         nr = await normalizer.normalize(tr.task_cid, tr.task_name, True, staging_cid)
         for a in nr.actions:
             logger.info("流水线标准化:%s", a)
+        if not nr.recognized:
+            # 无法识别(无 TMDB 命中):不建分享不推送,资源留暂存待人工处理
+            logger.warning("流水线中止:资源未识别(%s),不建分享", nr.name)
+            await status.edit_text(
+                f"{prefix}❓ 无法自动识别该资源(目录名与文件名均无可识别标题,"
+                "TMDB 未命中),已保留在暂存目录。请人工重命名后重新 /save,或手动处理。"
+            )
+            return
 
         await status.edit_text(f"{prefix}⏳ [3/3] 整理完成;正在创建永久分享…")
         try:
@@ -177,6 +185,9 @@ class SavePipeline:
             if any(t.fid == fid for t in self.tasks.values()):
                 continue  # 审核中,跳过
             nr = await self.normalizer.normalize(fid, name, is_dir, root_cid)
+            if not nr.recognized:
+                logger.warning("监控目录:资源未识别(%s),跳过建分享", name)
+                continue
             if nr.actions:
                 joined = ";".join(nr.actions[:3])
                 suffix = "…" if len(nr.actions) > 3 else ""
