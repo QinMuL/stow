@@ -146,6 +146,8 @@ EDITABLE = {
     "pipeline_root_dir": "s", "monitor_dirs": "s",
     "tg_api_id": "i", "tg_api_hash": "s", "monitor_channels": "s",
     "openlist_base_url": "s", "openlist_token": "s", "openlist_path": "s",
+    "openlist_monitor_dirs": "s", "openlist_dest_path": "s",
+    "openlist_max_tasks": "i", "fetch_interval_minutes": "i",
     "cd2_address": "s", "cd2_token": "s", "cd2_source_path": "s",
 }
 

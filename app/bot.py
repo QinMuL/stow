@@ -22,6 +22,7 @@ from telegram.ext import (
 from app import card
 from app.channel_monitor import ChannelMonitor
 from app.config import ChannelConfig, Config
+from app.fetcher import ResourceFetcher
 from app.links import ParsedLink, ed2k_file, parse_all, parse_one
 from app.media import AggregatedMedia, analyze_share
 from app.pan115 import (
@@ -84,6 +85,7 @@ class StowBot:
         self.saver = Pan115Saver(self.reader)
         self.pipeline = SavePipeline(self)
         self.monitor = ChannelMonitor(self)  # TG 频道监控(ed2k → 卡片 → ed2k 频道)
+        self.fetcher = ResourceFetcher(self)  # 获取段:openlist 监控 → 移动到本地
         self._push_lock = asyncio.Lock()  # 投递串行,防 flood
         self._pending_channels: dict[str, str] = {}  # 登记选择中:chat_id → 标题(回调取)
         self._bind_wait: dict[int, float] = {}  # /bind 等待期:uid → 截止时间戳
@@ -98,6 +100,7 @@ class StowBot:
             self._bot_ref = app.bot
             self.pipeline.start_loop()  # /save 流水线审核轮询
             self.monitor.start()        # TG 频道监控(源频道 → ed2k 卡片)
+            self.fetcher.start()        # 获取段:openlist 监控目录 → 移动到 media/openlist
             # Web 登录端点需在 Bot 事件循环里驱动 Telethon 客户端(Web 跑在另一线程)
             from app.webapp import STATE
 
@@ -122,6 +125,7 @@ class StowBot:
         app.add_handler(CommandHandler("push", self._cmd_push))
         app.add_handler(CommandHandler("save", self._cmd_save))
         app.add_handler(CommandHandler("scan", self._cmd_scan))
+        app.add_handler(CommandHandler("fetch", self._cmd_fetch))
         app.add_handler(CommandHandler("bind", self._cmd_bind))
         app.add_handler(CommandHandler("bindcancel", self._cmd_bindcancel))
         app.add_handler(CallbackQueryHandler(self._on_channel_preset))
@@ -292,6 +296,20 @@ class StowBot:
             report = await self.pipeline.scan_now()
         except Exception as exc:  # noqa: BLE001
             logger.error("手动扫描失败:%s", exc, exc_info=exc)
+            await status.edit_text(f"❌ 扫描失败:{str(exc)[:120]}")
+            return
+        await status.edit_text(report)
+
+    async def _cmd_fetch(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/fetch:立即扫一轮 openlist 监控目录(常规为定时自动轮)。"""
+        if not self._is_admin(update):
+            await update.effective_message.reply_text("⛔ 仅管理员可用")
+            return
+        status = await update.effective_message.reply_text("📥 正在扫描 openlist 监控目录…")
+        try:
+            report = await self.fetcher.scan_now()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("手动获取扫描失败:%s", exc, exc_info=exc)
             await status.edit_text(f"❌ 扫描失败:{str(exc)[:120]}")
             return
         await status.edit_text(report)

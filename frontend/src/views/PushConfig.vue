@@ -60,6 +60,7 @@ const chanBusy = ref(false)
 // ── 频道监控(TG 源频道 → ed2k 卡片) ──
 const mon = ref(null)
 const monitorChannelRows = ref([])
+const fetchRows = ref([])          // openlist 监控目录(一栏一项)
 const monMsg = ref({ text: '', kind: '' })
 const showLogin = ref(false)
 
@@ -130,10 +131,17 @@ onMounted(async () => {
   // 频道监控的 API 凭据不在 GROUPS 里,单独回填(数字 0 视为未填)
   m.tg_api_id = cfg.value.tg_api_id || ''
   m.tg_api_hash = cfg.value.tg_api_hash ?? ''
+  m.openlist_base_url = cfg.value.openlist_base_url ?? ''
+  m.openlist_token = cfg.value.openlist_token ?? ''
+  m.openlist_dest_path = cfg.value.openlist_dest_path || '/项目测试'
+  m.openlist_max_tasks = cfg.value.openlist_max_tasks ?? 2
+  m.fetch_interval_minutes = cfg.value.fetch_interval_minutes ?? 5
   model.value = m
   monitorRows.value = String(cfg.value.monitor_dirs || '')
     .split(',').map(x => x.trim()).filter(Boolean)
   monitorChannelRows.value = String(cfg.value.monitor_channels || '')
+    .split(',').map(x => x.trim()).filter(Boolean)
+  fetchRows.value = String(cfg.value.openlist_monitor_dirs || '')
     .split(',').map(x => x.trim()).filter(Boolean)
   const d = await api('channels')
   channels.value = d.channels.map(c => ({ ...c }))
@@ -320,6 +328,64 @@ async function saveChannels() {
       <div class="actions">
         <button class="btn ghost" @click="addMonitorRow">+ 添加目录</button>
         <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>资源获取(openlist)</h3>
+      <div class="desc">
+        监控 openlist 目录,新资源自动**移动**到本地落地点(media/openlist),再交给处理链;
+        移动而非复制,源盘不留副本。并发上限默认 2(openlist 本身可跑更多,为机器压力设小)
+      </div>
+
+      <div class="field">
+        <label>openlist 地址 <code>openlist_base_url</code></label>
+        <input v-model="model.openlist_base_url" placeholder="http://127.0.0.1:5244" autocomplete="off">
+        <div class="hint">自建 openlist 的服务地址(不是文档站)</div>
+      </div>
+      <div class="field">
+        <label>
+          openlist 令牌 <code>openlist_token</code>
+          <span v-if="cfg?.openlist_token === '••••••••'" class="saved-tag">✓ 已保存</span>
+        </label>
+        <input v-model="model.openlist_token" placeholder="openlist-xxxxxxxx..." autocomplete="off">
+        <div class="hint">openlist 网页端「个人设置 → API 令牌」里生成</div>
+      </div>
+
+      <div class="chan-tip">
+        💡 每行一个**监控目录**(openlist 侧路径,如 <code>/夸克云盘/001临时影库</code>):
+        该目录下出现新条目时,自动移动到落地点。目录留空 = 获取段不启动。
+      </div>
+      <div class="chan-list">
+        <div v-for="(r, i) in fetchRows" :key="i" class="chan-row">
+          <input v-model="fetchRows[i]" class="chan-id" placeholder="/夸克云盘/001临时影库">
+          <button class="btn danger chan-del" @click="fetchRows.splice(i, 1)">删除</button>
+        </div>
+      </div>
+      <div v-if="!fetchRows.length" class="empty" style="margin-bottom:12px">
+        还没有监控目录 —— 获取段当前不会启动
+      </div>
+
+      <div class="field">
+        <label>落地点 <code>openlist_dest_path</code></label>
+        <input v-model="model.openlist_dest_path" placeholder="/项目测试" autocomplete="off">
+        <div class="hint">openlist 侧视图,对应本地 media/openlist;默认 /项目测试(项目自带映射)</div>
+      </div>
+      <div class="grid2" style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="field">
+          <label>并发上限 <code>openlist_max_tasks</code></label>
+          <input v-model="model.openlist_max_tasks" type="number" min="1" max="5">
+        </div>
+        <div class="field">
+          <label>扫描间隔(分钟)<code>fetch_interval_minutes</code></label>
+          <input v-model="model.fetch_interval_minutes" type="number" min="1">
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn ghost" @click="fetchRows.push('')">+ 添加监控目录</button>
+        <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
+        <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
       </div>
     </div>
 

@@ -63,6 +63,11 @@ class Config:
     openlist_base_url: str = ""   # openlist 服务地址,如 http://127.0.0.1:5244
     openlist_token: str = ""      # openlist API token(敏感)
     openlist_path: str = ""       # openlist 侧的挂载路径(资源所在),如 /项目测试
+    # 获取段(自动流):监控这些 openlist 目录,新资源自动**移动**到 openlist_dest_path
+    openlist_monitor_dirs: str = ""       # 逗号分隔,一栏一项(Web 上填)
+    openlist_dest_path: str = "/项目测试"  # 落地点 = 本地 media/openlist 的挂载视图
+    openlist_max_tasks: int = 2           # 同时在搬的任务数上限(用户要求 2)
+    fetch_interval_minutes: int = 5        # 扫描间隔(分钟)
     cd2_address: str = ""         # CD2 gRPC 地址,如 127.0.0.1:19798
     cd2_token: str = ""           # CD2 API token(敏感)
     cd2_source_path: str = ""     # CD2 侧看到的本地待上传目录,如 /clouddrive
@@ -149,6 +154,22 @@ class Config:
     def monitor_session_path(self) -> Path:
         """Telethon 会话文件(随 data 目录持久化,容器重建不丢登录)。"""
         return Path(self.data_dir) / "monitor.session"
+
+    def openlist_monitor_list(self) -> list[str]:
+        """获取段监控的 openlist 目录(逗号/换行分隔,去空、按序去重)。"""
+        seen: set[str] = set()
+        out: list[str] = []
+        parts = re.split("[,，" + chr(10) + "]+", self.openlist_monitor_dirs or "")
+        for part in parts:
+            p = part.strip()
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
+
+    def openlist_ready(self) -> bool:
+        """获取段能否启动:需地址 + 令牌 + 至少一个监控目录。"""
+        return bool(self.openlist_base_url and self.openlist_token and self.openlist_monitor_list())
 
     def monitor_channel_list(self) -> list[str]:
         """源频道列表(逗号/换行分隔,去空、按序去重)。"""
@@ -263,6 +284,10 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         openlist_base_url=_clean(raw.get("openlist_base_url")),
         openlist_token=_clean(raw.get("openlist_token")),
         openlist_path=str(raw.get("openlist_path", "")).strip(),
+        openlist_monitor_dirs=str(raw.get("openlist_monitor_dirs", "")).strip(),
+        openlist_dest_path=str(raw.get("openlist_dest_path", "/项目测试")).strip() or "/项目测试",
+        openlist_max_tasks=max(1, int(raw.get("openlist_max_tasks", 2) or 2)),
+        fetch_interval_minutes=max(1, int(raw.get("fetch_interval_minutes", 5) or 5)),
         cd2_address=_clean(raw.get("cd2_address")),
         cd2_token=_clean(raw.get("cd2_token")),
         cd2_source_path=str(raw.get("cd2_source_path", "")).strip(),

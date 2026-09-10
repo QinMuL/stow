@@ -3,6 +3,7 @@
 外加两张表:
 - monitor_state(源频道 → 已处理到的消息 ID):首次接入只记起点、不回补历史,此后重启按游标补扫
 - pipeline_tasks(流水线任务):审核中的任务落库,重启后继续轮询,不再重复建分享
+- fetch_state(获取段):openlist 侧每个源条目的搬运动作与任务 id,防重复提交、支撑重启续跑
 """
 
 from __future__ import annotations
@@ -33,6 +34,11 @@ class Store:
             "CREATE TABLE IF NOT EXISTS pipeline_tasks ("
             " share_code TEXT PRIMARY KEY, receive_code TEXT, fid INTEGER, name TEXT,"
             " uid INTEGER, status TEXT, created_at REAL, attempts INTEGER)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS fetch_state ("
+            " src_path TEXT PRIMARY KEY, src_size INTEGER, dest_path TEXT, task_id TEXT,"
+            " status TEXT, attempts INTEGER, error TEXT, updated_at REAL)"
         )
         self._conn.commit()
 
@@ -148,6 +154,46 @@ class Store:
         rows = self._conn.execute(
             "SELECT status, COUNT(*) FROM pipeline_tasks GROUP BY status"
         ).fetchall()
+        return {s: n for s, n in rows}
+
+    # ── 获取段状态(openlist 搬运) ──────────────────────────
+    def save_fetch(self, src_path: str, src_size: int, *, dest_path: str = "",
+                   task_id: str = "", status: str = "moving", attempts: int = 0,
+                   error: str = "") -> None:
+        self._conn.execute(
+            "INSERT INTO fetch_state(src_path, src_size, dest_path, task_id, status,"
+            " attempts, error, updated_at) VALUES(?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(src_path) DO UPDATE SET src_size=excluded.src_size,"
+            " dest_path=excluded.dest_path, task_id=excluded.task_id, status=excluded.status,"
+            " attempts=excluded.attempts, error=excluded.error, updated_at=excluded.updated_at",
+            (src_path, int(src_size or 0), dest_path, task_id, status,
+             int(attempts or 0), error, time.time()),
+        )
+        self._conn.commit()
+
+    def get_fetch(self, src_path: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT src_path, src_size, dest_path, task_id, status, attempts, error, updated_at"
+            " FROM fetch_state WHERE src_path = ?", (src_path,)).fetchone()
+        if row is None:
+            return None
+        return dict(zip(("src_path", "src_size", "dest_path", "task_id", "status",
+                         "attempts", "error", "updated_at"), row, strict=False))
+
+    def list_fetch(self, status: str | None = None) -> list[dict]:
+        sql = ("SELECT src_path, src_size, dest_path, task_id, status, attempts, error, updated_at"
+               " FROM fetch_state")
+        args: tuple = ()
+        if status:
+            sql += " WHERE status = ?"
+            args = (status,)
+        rows = self._conn.execute(sql + " ORDER BY updated_at", args).fetchall()
+        return [dict(zip(("src_path", "src_size", "dest_path", "task_id", "status",
+                          "attempts", "error", "updated_at"), r, strict=False)) for r in rows]
+
+    def fetch_stats(self) -> dict:
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) FROM fetch_state GROUP BY status").fetchall()
         return {s: n for s, n in rows}
 
     def close(self) -> None:
