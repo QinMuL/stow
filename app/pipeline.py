@@ -171,16 +171,18 @@ class SavePipeline:
                 except Exception as exc:  # noqa: BLE001 - 单目录异常不拖垮轮询
                     logger.error("监控目录扫描异常(%s):%s", path, exc, exc_info=exc)
 
-    async def _scan_monitor_dir(self, path: str) -> None:
+    async def _scan_monitor_dir(self, path: str) -> dict:
         """扫描监控目录:未标准化处理过的新子项 → 标准化 → 建分享 → 登记审核。
 
         已处理项会被移入已发布/违规目录,留在监控目录的即为新资源(移动即标记,
         无需额外去重存储);审核中任务记录在内存(tasks),重启后重扫同项会复用
         ——重复建分享的窗口仅在重启后的一个审核周期内,可接受。
+        返回统计 {new, shared, skipped, unrecognized}。
         """
         bot = self.bot
+        stat = {"new": 0, "shared": 0, "skipped": 0, "unrecognized": 0}
         if bot.reader.logged_in is False:
-            return
+            return stat
         # 目录值兼容两种形态:纯数字=网盘 CID(选择器回填);路径=只查不建
         # (监控的语义是"盯住已有目录",自动创建空目录没有意义)
         if path.strip().isdigit():
@@ -189,14 +191,17 @@ class SavePipeline:
             root_cid = await bot.reader.find_dir(path)
             if root_cid is None:
                 logger.warning("监控目录不存在(%s),跳过本轮;请检查路径或重新选择", path)
-                return
+                stat["skipped"] += 1
+                return stat
         items = await bot.reader.list_dir(root_cid, nf=0)
         for it in items:
             fid, name, is_dir = it["fid"], it["name"], it["is_dir"]
             if any(t.fid == fid for t in self.tasks.values()):
                 continue  # 审核中,跳过
+            stat["new"] += 1
             nr = await self.normalizer.normalize(fid, name, is_dir, root_cid)
             if not nr.recognized:
+                stat["unrecognized"] += 1
                 logger.warning("监控目录:资源未识别(%s),跳过建分享", name)
                 continue
             if nr.actions:
@@ -208,8 +213,43 @@ class SavePipeline:
                 share_code=share_code, receive_code=receive_code,
                 fid=nr.fid, name=nr.name, uid=bot.cfg.tg_admin_ids[0],
             )
+            stat["shared"] += 1
             logger.info("监控目录新资源已建分享:%s(%s),进入审核轮询", nr.name, share_code)
             await asyncio.sleep(3)
+        return stat
+
+    async def scan_now(self) -> str:
+        """手动触发一轮监控扫描(/scan),返回报告文本。"""
+        bot = self.bot
+        if bot.saver is None or not bot.reader.logged_in:
+            return "⚠️ 未配置 115 Cookie,无法扫描(建分享需登录态)。"
+        dirs = bot.cfg.monitor_dir_list()
+        if not dirs:
+            return "未配置监控目录 —— 全局配置 → 目录监控,添加后重试。"
+        lines = []
+        total_shared = total_unrecognized = 0
+        for path in dirs:
+            try:
+                st = await self._scan_monitor_dir(path)
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"• {path}:扫描异常 {str(exc)[:80]}")
+                continue
+            if st["skipped"]:
+                lines.append(f"• {path}:目录不存在,跳过(请检查路径)")
+                continue
+            line = f"• {path}:新资源 {st['new']} → 建分享 {st['shared']}"
+            if st["unrecognized"]:
+                line += f",未识别跳过 {st['unrecognized']}"
+            lines.append(line)
+            total_shared += st["shared"]
+            total_unrecognized += st["unrecognized"]
+        head = "📂 目录监控报告\n" + "\n".join(lines)
+        tail = ""
+        if total_shared:
+            tail += f"\n⏳ {total_shared} 个新分享进入审核轮询(每 2 分钟检查,通过后自动推送)"
+        if total_unrecognized:
+            tail += f"\n❓ {total_unrecognized} 个资源未识别,保留在原目录待人工处理"
+        return head + tail
 
     async def _check_task(self, task: PipelineTask) -> None:
         bot = self.bot

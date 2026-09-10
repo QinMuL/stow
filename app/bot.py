@@ -52,6 +52,7 @@ _HELP = (
     "或使用:/push <链接>\n\n"
     "💾 转存流水线:/save <115链接>\n"
     "转存到网盘 → 目录标准化 → 建永久分享 → 审核通过后自动推送并归档\n\n"
+    "📂 目录监控:/scan 立即扫描监控目录(常规 30 分钟自动一轮)\n\n"
     "📁 登记推送频道(二选一):\n"
     "① 先发 /bind,5 分钟内把频道里的任意一条消息转发给本 Bot\n"
     "② 转发时在附言里写 /bind(随时有效)\n"
@@ -100,6 +101,7 @@ class StowBot:
         app.add_handler(CommandHandler("help", self._cmd_help))
         app.add_handler(CommandHandler("push", self._cmd_push))
         app.add_handler(CommandHandler("save", self._cmd_save))
+        app.add_handler(CommandHandler("scan", self._cmd_scan))
         app.add_handler(CommandHandler("bind", self._cmd_bind))
         app.add_handler(CommandHandler("bindcancel", self._cmd_bindcancel))
         app.add_handler(CallbackQueryHandler(self._on_channel_preset))
@@ -252,6 +254,20 @@ class StowBot:
             await update.effective_message.reply_text("用法:/save <115 分享链接>")
             return
         await self.pipeline.handle_save(update, link)
+
+    async def _cmd_scan(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/scan:立即触发一轮目录监控扫描(常规为 30 分钟自动一轮)。"""
+        if not self._is_admin(update):
+            await update.effective_message.reply_text("⛔ 仅管理员可用")
+            return
+        status = await update.effective_message.reply_text("📂 正在扫描监控目录…")
+        try:
+            report = await self.pipeline.scan_now()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("手动扫描失败:%s", exc, exc_info=exc)
+            await status.edit_text(f"❌ 扫描失败:{str(exc)[:120]}")
+            return
+        await status.edit_text(report)
 
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # 转发登记走 _on_forward(FORWARDED 过滤器先匹配);这里只响应直接文本
