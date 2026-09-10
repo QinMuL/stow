@@ -388,13 +388,15 @@ class Pan115Reader:
         logger.info("已删除网盘条目 fid=%s(回收站可恢复)", fid)
 
     async def create_share(self, file_ids: int | str) -> tuple[str, str]:
-        """创建**永久**分享(share_send + duration=-1),返回 (share_code, receive_code)。"""
+        """创建**永久**分享,返回 (share_code, receive_code)。
+
+        用 proapi 的 share_send_app(115 会自动生成访问码,响应 receive_code/recv_code);
+        webapi share_send 拿不到访问码。share_update_app 设 duration=-1 永久。
+        """
         from p115client.client import check_response
 
         client = self._require_login()
-        resp = await self._call(
-            client.share_send, {"file_ids": str(file_ids), "ignore_warn": 1}, async_=False
-        )
+        resp = await self._call(client.share_send_app, str(file_ids), async_=False)
         try:
             check_response(resp)
         except Exception as exc:
@@ -407,7 +409,7 @@ class Pan115Reader:
         # 永久化(失败仅告警:默认分享有效期也较长,下轮可补)
         try:
             upd = await self._call(
-                client.share_update,
+                client.share_update_app,
                 {"share_code": share_code, "share_duration": -1},
                 async_=False,
             )
@@ -415,3 +417,26 @@ class Pan115Reader:
         except Exception as exc:  # noqa: BLE001
             logger.warning("分享设为永久失败(保留默认有效期):%s", exc)
         return share_code, receive_code
+
+    async def share_status(self, code: str, password: str | None = None) -> dict:
+        """查自建分享的审核状态(share_snap 的 shareinfo)。
+
+        返回 {state, violating, auditing, expired, title}:
+        state 0=审核中 1=正常 7=失效;have_vio_file=1 违规(内容仍可读!必须显式判)。
+        """
+        resp = await self._snap(code, password)
+        data = resp.get("data") or {}
+        info = data.get("shareinfo") or data.get("share_info") or {}
+        state = data.get("share_state", info.get("share_state", info.get("status")))
+        try:
+            state = int(state) if state is not None else None
+        except (TypeError, ValueError):
+            state = None
+        snapshotting = "正在生成文件快照" in str(resp)
+        return {
+            "state": state,
+            "auditing": state == 0 or snapshotting,
+            "expired": state == 7,
+            "violating": str(info.get("have_vio_file") or "") == "1",
+            "title": str(info.get("share_title") or ""),
+        }

@@ -40,7 +40,6 @@ class PipelineTask:
     fid: int               # 暂存目录中该资源目录的 CID
     name: str              # 标准化后的资源目录名
     uid: int               # 发起者(TG 通知用)
-    shell_cid: int = 0     # 塌缩后的空壳目录 CID(归档移动成功后删除)
     status: str = "auditing"  # auditing | done | violated | timeout
     attempts: int = 0
     created_at: float = field(default_factory=time.monotonic)
@@ -117,7 +116,7 @@ class SavePipeline:
 
         task = PipelineTask(
             share_code=share_code, receive_code=receive_code,
-            fid=nr.fid, name=nr.name, uid=uid, shell_cid=tr.shell_cid,
+            fid=nr.fid, name=nr.name, uid=uid,
         )
         self.tasks[share_code] = task
         self.start_loop()
@@ -156,6 +155,26 @@ class SavePipeline:
 
         link = ParsedLink("115", task.share_code,
                           f"https://115.com/s/{task.share_code}", task.receive_code or None)
+        # 显式查分享审核状态:违规分享的文件列表依然可读(read_share 成功≠审核通过)
+        try:
+            st = await bot.reader.share_status(task.share_code, task.receive_code or None)
+        except Exception as exc:  # noqa: BLE001 - 状态查询失败按继续等待处理
+            logger.warning("分享状态查询失败(%s):%s", task.share_code, exc)
+            task.attempts += 1
+            return
+        if st["violating"] or st["expired"]:
+            task.status = "violated"
+            reason = "违规" if st["violating"] else "已失效"
+            logger.warning("分享审核未通过(%s):%s(%s)", reason, task.name, task.share_code)
+            await self._move_to(cfg.pipeline_violated_dir, task)
+            await bot._notify_uid(
+                task.uid, f"🚫 分享「{task.name}」审核未通过({reason}),不予推送;已移入违规目录。"
+            )
+            return
+        if st["auditing"]:
+            task.attempts += 1
+            logger.info("分享审核中(第 %d 次检查):%s", task.attempts, task.share_code)
+            return
         try:
             files = await bot.reader.read_share(link)
         except ShareDead:
@@ -205,10 +224,4 @@ class SavePipeline:
         except Exception as exc:  # noqa: BLE001
             logger.warning("移动任务目录失败(%s → %s):%s", task.name, target_dir, exc)
             return
-        # 塌缩产生的空壳目录清理(失败无害,留待人工)
-        if task.shell_cid:
-            try:
-                await self.bot.reader.fs_delete(task.shell_cid)
-                task.shell_cid = 0
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("清理空壳目录失败(fid=%s):%s", task.shell_cid, exc)
+

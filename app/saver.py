@@ -33,7 +33,6 @@ class SaveResult:
     message: str
     task_cid: int = 0       # 资源根目录 CID(塌缩后;流水线后续整理/建分享用)
     task_name: str = ""     # 资源根目录名
-    shell_cid: int = 0      # 塌缩后的空壳目录(归档移动成功后应删除)
     saved_items: int = 0    # 接收的条目数
     already: bool = False   # 内容本就已在网盘中
     errors: list[str] = field(default_factory=list)
@@ -152,13 +151,16 @@ class Pan115Saver:
                 any_already = any_already or already
 
             # 塌缩一层:任务壳目录若只含一个子目录且无文件(分享根包了一层
-            # 资源文件夹),以内层为资源根;壳记入 shell_cid 供归档后删除
-            shell_cid = 0
+            # 资源文件夹),把内层移出到 parent、删掉壳——暂存目录不留垃圾层
             items = await self._reader.list_dir(task_cid, nf=0)
             dirs_in = [it for it in items if it["is_dir"]]
             if len(items) == 1 and dirs_in:
-                shell_cid, task_cid = task_cid, dirs_in[0]["fid"]
-                task_name = dirs_in[0]["name"]
+                inner_fid, inner_name = dirs_in[0]["fid"], dirs_in[0]["name"]
+                await self._reader.fs_move(inner_fid, parent_cid)
+                await asyncio.sleep(3)  # 115 移动服务端异步,等它落定再删壳
+                await self._reader.fs_delete(task_cid)
+                task_cid, task_name = inner_fid, inner_name
+                logger.info("已塌缩任务壳目录:资源根 = %s(CID %s)", inner_name, inner_fid)
 
             msg = (
                 "已在网盘中(重复转存)"
@@ -167,8 +169,8 @@ class Pan115Saver:
             )
             logger.info("转存完成:%s(耗时 %.1fs)", msg, time.monotonic() - t0)
             return SaveResult(True, msg, task_cid=task_cid, task_name=task_name,
-                              shell_cid=shell_cid, saved_items=total,
-                              already=any_already and not total, errors=errors)
+                              saved_items=total, already=any_already and not total,
+                              errors=errors)
         except TimeoutError:
             logger.error("转存超时(遍历分享树 600s):%s", link.code)
             return SaveResult(False, "转存超时(分享过大或接口缓慢),稍后重试")
