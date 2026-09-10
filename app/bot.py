@@ -32,6 +32,7 @@ from app.pan115 import (
     ShareRateLimited,
     ShareSnapshotting,
 )
+from app.saver import Pan115Saver
 from app.store import Store
 from app.tmdb import TmdbClient, image_url
 
@@ -63,6 +64,7 @@ class StowBot:
         self.config_path = config_path
         self.reader = Pan115Reader(cfg.pan115_cookie)
         self.tmdb = TmdbClient(cfg.tmdb_api_key, cfg.proxy_url) if cfg.tmdb_api_key else None
+        self.saver = Pan115Saver(self.reader) if self.reader.logged_in else None
         self._push_lock = asyncio.Lock()  # 投递串行,防 flood
         self._pending_channels: dict[str, str] = {}  # 登记选择中:chat_id → 标题(回调取)
         self._bind_wait: dict[int, float] = {}  # /bind 等待期:uid → 截止时间戳
@@ -294,7 +296,20 @@ class StowBot:
         self.store.mark_pushed(link.key, title)
         n = media.file_count or len(files)
         label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
-        await status.edit_text(f"{prefix}✅ 已推送 · {n} 文件 · {label}")
+        final = f"{prefix}✅ 已推送 · {n} 文件 · {label}"
+
+        # 自动转存(仅 115 分享;失败不影响已完成的推送)
+        if link.provider == "115" and self.cfg.transfer_enabled:
+            if self.saver is None:
+                tr_msg = "⚠️ 未配置 115 Cookie,无法转存"
+            else:
+                tr = await self.saver.save_share(link, self.cfg.transfer_dir)
+                tr_msg = ("💾 " if tr.ok else "⚠️ ") + tr.message
+                if tr.errors:
+                    tr_msg += f"({';'.join(tr.errors[:2])})"
+                logger.info("转存结果:%s → %s", link.dedup_display, tr_msg)
+            final += f"\n{tr_msg}"
+        await status.edit_text(final)
 
     async def _load_media(self, link: ParsedLink, status, prefix: str):
         """按 provider 读取内容 → 聚合。失败已回报,返回 (files, None)。"""

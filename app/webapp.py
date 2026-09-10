@@ -126,6 +126,7 @@ EDITABLE = {
     "tg_bot_token": "s", "tg_admin_ids": "ids",
     "tmdb_api_key": "s", "proxy_url": "s", "log_level": "s", "web_port": "i",
     "pan115_cookie": "s",
+    "transfer_enabled": "b", "transfer_dir": "s",
 }
 
 
@@ -209,7 +210,9 @@ def create_app(config_path: str | Path) -> FastAPI:
             if key in SENSITIVE_KEYS and str(value) == MASK:
                 continue  # 未修改
             kind = EDITABLE[key]
-            if kind == "i":
+            if kind == "b":
+                raw[key] = str(value).strip().lower() in ("1", "true", "on", "开")
+            elif kind == "i":
                 try:
                     raw[key] = int(str(value))
                 except ValueError as exc:

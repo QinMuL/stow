@@ -39,6 +39,14 @@ const GROUPS = [
       { key: 'pan115_cookie', label: '115 Cookie(可选)', hint: '浏览器登录 115 后 F12 复制整行 Cookie', sensitive: true },
     ],
   },
+  {
+    title: '115 转存配置',
+    desc: '推送成功后自动把 115 分享内容转存到自己网盘;需先配置上方 Cookie',
+    fields: [
+      { key: 'transfer_enabled', label: '启用自动转存', hint: '开启后 115 链接推送成功即自动转存', bool: true },
+      { key: 'transfer_dir', label: '保存目录', hint: '网盘内路径(相对根),不存在会自动创建;每次转存落到其下的独立子目录' },
+    ],
+  },
 ]
 
 const model = ref({})
@@ -137,7 +145,11 @@ async function saveChannels() {
           {{ f.label }} <code>{{ f.key }}</code>
           <span v-if="isSaved(f)" class="saved-tag">✓ 已保存</span>
         </label>
-        <input v-model="model[f.key]" :placeholder="f.hint" autocomplete="off">
+        <label v-if="f.bool" class="switch-row">
+          <input type="checkbox" v-model="model[f.key]" class="switch">
+          <span class="switch-state">{{ model[f.key] ? '已开启' : '已关闭' }}</span>
+        </label>
+        <input v-else v-model="model[f.key]" :placeholder="f.hint" autocomplete="off">
         <div v-if="!isSaved(f)" class="hint">{{ f.hint }}</div>
       </div>
 

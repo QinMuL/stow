@@ -272,3 +272,8 @@ a { color: var(--amber); text-decoration: none; }
 .who-btn { color: var(--sub); font-size: 13px; padding: 4px 6px; border-radius: var(--r-m); }
 .who-btn:hover { color: var(--amber-strong); }
 .who-btn b { color: var(--text); font-weight: 600; }
+
+/* 开关行(布尔配置) */
+.switch-row { display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 6px 0; }
+.switch { width: 20px; height: 20px; accent-color: var(--amber); cursor: pointer; }
+.switch-state { font-size: 13.5px; color: var(--text); }

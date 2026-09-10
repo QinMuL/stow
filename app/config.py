@@ -41,6 +41,9 @@ class Config:
     # 多频道:归属预设分流(115 链接 → preset=115 的频道;ed2k → preset=ed2k)。
     # 未登记某归属时,该类链接不推送,日志与 Bot 明确提示原因
     channels: list[ChannelConfig] = field(default_factory=list)
+    # 自动转存:推送成功后把 115 分享内容转存到自己网盘(需 115 Cookie)
+    transfer_enabled: bool = False
+    transfer_dir: str = "stow转存"  # 网盘内保存目录(相对根,不存在自动创建)
     data_dir: str = "./data"
     log_level: str = "INFO"
     web_port: int = DEFAULT_WEB_PORT
@@ -147,6 +150,8 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         proxy_url=_clean(raw.get("proxy_url")),
         pan115_cookie=_clean(raw.get("pan115_cookie")),
         channels=channels,
+        transfer_enabled=bool(raw.get("transfer_enabled", False)),
+        transfer_dir=str(raw.get("transfer_dir", "stow转存")).strip() or "stow转存",
         data_dir=str(raw.get("data_dir", "./data")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         web_port=int(raw.get("web_port", DEFAULT_WEB_PORT) or DEFAULT_WEB_PORT),
