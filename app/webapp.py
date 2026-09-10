@@ -332,6 +332,26 @@ def create_app(config_path: str | Path) -> FastAPI:
         write_raw(raw, config_path)
         return {"success": True, "message": "已保存,重启后生效(或在 Bot 中转发频道消息登记)"}
 
+    # ── 网盘目录浏览(目录选择器数据源) ──────────────────────
+    @app.get("/api/115/dirs")
+    async def list_115_dirs(request: Request, cid: int = 0) -> dict:
+        """列出网盘某目录下的子目录(需 115 Cookie;目录选择器用)。"""
+        _current_user(config_path, _auth_header(request))
+        cfg = load_config(config_path)
+        if not cfg.pan115_cookie:
+            raise HTTPException(status_code=503, detail="未配置 115 Cookie,无法浏览网盘目录")
+        from app.pan115 import Pan115Reader
+
+        reader = Pan115Reader(cfg.pan115_cookie)
+        try:
+            items = await reader.list_dir(cid, nf=1)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"列目录失败:{str(exc)[:100]}") from exc
+        return {
+            "cid": cid,
+            "items": [{"cid": it["fid"], "name": it["name"]} for it in items],
+        }
+
     # ── 状态 / 历史 / 重启 ──────────────────────────────────
     @app.get("/api/status")
     async def status(request: Request) -> dict:

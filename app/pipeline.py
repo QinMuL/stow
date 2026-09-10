@@ -93,7 +93,10 @@ class SavePipeline:
 
         status = await msg.reply_text(f"{prefix}⏳ [1/3] 正在转存分享内容…")
         try:
-            staging_cid = await bot.saver.ensure_dir(cfg.pipeline_dirs()[0])
+            # 流水线根:纯数字=网盘 CID(选择器回填);否则当路径自动创建
+            root = cfg.pipeline_root_dir
+            root_cid = int(root) if root.strip().isdigit() else await bot.saver.ensure_dir(root)
+            staging_cid = await bot.saver.ensure_dir("待整理", parent_cid=root_cid)
             tr = await bot.saver.save_share(link, parent_cid=staging_cid)
         except Exception as exc:  # noqa: BLE001
             logger.error("转存失败 %s:%s", link.code, exc, exc_info=exc)
@@ -178,7 +181,8 @@ class SavePipeline:
         bot = self.bot
         if bot.reader.logged_in is False:
             return
-        root_cid = await bot.saver.ensure_dir(path)
+        # 目录值兼容两种形态:纯数字=网盘 CID(选择器回填,必须已存在);否则当路径自动创建
+        root_cid = int(path) if path.strip().isdigit() else await bot.saver.ensure_dir(path)
         items = await bot.reader.list_dir(root_cid, nf=0)
         for it in items:
             fid, name, is_dir = it["fid"], it["name"], it["is_dir"]
@@ -227,7 +231,7 @@ class SavePipeline:
             task.status = "violated"
             reason = "违规" if st["violating"] else "已失效"
             logger.warning("分享审核未通过(%s):%s(%s)", reason, task.name, task.share_code)
-            await self._move_to(cfg.pipeline_dirs()[2], task)
+            await self._move_to("违规", task)
             await bot._notify_uid(
                 task.uid, f"🚫 分享「{task.name}」审核未通过({reason}),不予推送;已移入违规目录。"
             )
@@ -242,7 +246,7 @@ class SavePipeline:
             # 失效/违规:不推送,移入违规目录
             task.status = "violated"
             logger.warning("分享审核未通过(失效/违规):%s(%s)", task.name, task.share_code)
-            await self._move_to(cfg.pipeline_dirs()[2], task)
+            await self._move_to("违规", task)
             await bot._notify_uid(
                 task.uid, f"🚫 分享「{task.name}」审核未通过或已失效,不予推送;已移入违规目录。"
             )
@@ -277,12 +281,20 @@ class SavePipeline:
         label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
         await bot._notify_uid(task.uid, f"✅ 分享「{task.name}」审核通过并已推送({label});已移入已发布目录。")
 
-    async def _move_to(self, target_dir: str, task: PipelineTask) -> None:
-        """任务目录移入目标目录;失败仅告警(文件留原地,不影响状态)。"""
+    async def _move_to(self, sub_name: str, task: PipelineTask) -> None:
+        """任务目录移入流水线子目录(已发布/违规);失败仅告警。
+
+        sub_name 为相对流水线根的子目录名("已发布"/"违规");根为 CID 时
+        在其下建/取子目录,根为路径时整路径 ensure_dir。
+        """
         try:
-            dest_cid = await self.bot.saver.ensure_dir(target_dir)
+            root = self.bot.cfg.pipeline_root_dir
+            if root.strip().isdigit():
+                dest_cid = await self.bot.saver.ensure_dir(sub_name, parent_cid=int(root))
+            else:
+                dest_cid = await self.bot.saver.ensure_dir(f"{root.rstrip('/')}/{sub_name}")
             await self.bot.reader.fs_move(task.fid, dest_cid)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("移动任务目录失败(%s → %s):%s", task.name, target_dir, exc)
+            logger.warning("移动任务目录失败(%s → %s):%s", task.name, sub_name, exc)
             return
 

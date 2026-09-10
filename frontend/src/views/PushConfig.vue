@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
+import DirPickerModal from './DirPickerModal.vue'
 
 const emit = defineEmits(['refresh-status'])
 
@@ -43,14 +44,14 @@ const GROUPS = [
     title: '转存流水线',
     desc: '/save <链接> 触发:转存→整理→建永久分享→审核通过后推送;需先配置上方 Cookie',
     fields: [
-      { key: 'pipeline_root_dir', label: '流水线根目录', hint: '其下自动派生 待整理/已发布/违规 三个子目录' },
+      { key: 'pipeline_root_dir', label: '流水线根目录', hint: '填网盘目录 ID(点 📂 选择)或路径;不存在自动创建', picker: true },
     ],
   },
   {
     title: '目录监控',
     desc: '网盘目录出现新资源时,自动整理→建永久分享→审核通过后推送(30 分钟一轮)',
     fields: [
-      { key: 'monitor_dirs', label: '监控目录(可选)', hint: '网盘内路径,多个用逗号分隔,如 剧集,电影;留空不监控' },
+      { key: 'monitor_dirs', label: '监控目录(可选)', hint: '网盘目录 ID,多个逗号分隔(点 📂 逐个选择);留空不监控', picker: true, multi: true },
     ],
   },
 ]
@@ -104,6 +105,29 @@ async function save(restart) {
   }
 }
 
+// ── 网盘目录选择器 ──
+const showPicker = ref(false)
+const pickerTarget = ref('')
+
+function openPicker(key) {
+  pickerTarget.value = key
+  showPicker.value = true
+}
+
+function onPickDir(d) {
+  const key = pickerTarget.value
+  const cur = String(model.value[key] || '').trim()
+  if (key === 'monitor_dirs') {
+    // 多值:追加 CID(去重)
+    const ids = cur ? cur.split(',').map(x => x.trim()).filter(Boolean) : []
+    if (!ids.includes(String(d.cid))) ids.push(String(d.cid))
+    model.value[key] = ids.join(',')
+  } else {
+    model.value[key] = String(d.cid)
+  }
+  showPicker.value = false
+}
+
 // ── TG 频道配置:归属频道管理 ──
 const PRESET_NAMES = { '115': '115链接推送频道', ed2k: 'ed2k链接推送频道' }
 
@@ -151,7 +175,12 @@ async function saveChannels() {
           {{ f.label }} <code>{{ f.key }}</code>
           <span v-if="isSaved(f)" class="saved-tag">✓ 已保存</span>
         </label>
-        <input v-model="model[f.key]" :placeholder="f.hint" autocomplete="off">
+        <div v-if="f.picker" style="display:flex;gap:8px">
+          <input v-model="model[f.key]" :placeholder="f.hint" autocomplete="off">
+          <button class="btn ghost" style="flex:none;padding:8px 12px"
+            title="浏览网盘选择目录" @click="openPicker(f.key)">📂</button>
+        </div>
+        <input v-else v-model="model[f.key]" :placeholder="f.hint" autocomplete="off">
         <div v-if="!isSaved(f)" class="hint">{{ f.hint }}</div>
       </div>
 
@@ -193,5 +222,7 @@ async function saveChannels() {
         <button class="btn ghost" :disabled="busy" @click="save(true)" style="margin-left:auto">保存并重启</button>
       </div>
     </div>
+
+    <DirPickerModal v-if="showPicker" @pick="onPickDir" @close="showPicker = false" />
   </div>
 </template>

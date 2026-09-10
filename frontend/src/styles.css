@@ -277,3 +277,13 @@ a { color: var(--amber); text-decoration: none; }
 .switch-row { display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 6px 0; }
 .switch { width: 20px; height: 20px; accent-color: var(--amber); cursor: pointer; }
 .switch-state { font-size: 13.5px; color: var(--text); }
+
+/* 网盘目录选择器 */
+.dir-list { max-height: 46dvh; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--r-m); }
+.dir-row { padding: 10px 14px; cursor: pointer; font-size: 13.5px; border-bottom: 1px solid var(--line); }
+.dir-row:hover { background: rgba(232,163,61,.08); color: var(--amber-strong); }
+.dir-row:last-child { border-bottom: none; }
+.crumb { color: var(--sub); cursor: pointer; }
+.crumb:hover { color: var(--text); }
+.crumb.cur { color: var(--amber-strong); cursor: default; }
+.crumb-sep { color: var(--faint); margin: 0 4px; }
