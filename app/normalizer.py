@@ -3,9 +3,9 @@
 把待分享资源整理成 Emby/Jellyfin 标准目录结构:
 
     片名 (年份) {tmdb-ID}/
-    ├── 01/          ← 季目录(零填充两位)
+    ├── 一/          ← 季目录(中文数字)
     │   └── S01E01.mkv
-    └── 02/
+    └── 二/
 
 四种场景:
   A. 已有季子目录 → 重命名根目录 + 季子目录
@@ -29,7 +29,7 @@ from app.pan115 import Pan115Reader, ShareError
 
 logger = logging.getLogger(__name__)
 
-# 季目录名匹配(Season 1 / S01 / 第1季 / 第一季 / 01)
+# 季目录名匹配(Season 1 / S01 / 第1季 / 第一季 / 01 / 一)
 _SEASON_DIR_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"^Season\s*(\d{1,2})$", re.IGNORECASE), "en"),
     (re.compile(r"^S(\d{1,2})$", re.IGNORECASE), "en"),
@@ -80,11 +80,29 @@ def _cn_to_int(s: str) -> int | None:
     return None
 
 
+def _int_to_cn(n: int) -> str:
+    """int → 中文数字(一~九十九;超出范围回退零填充两位)。"""
+    if not 1 <= n <= 99:
+        return f"{n:02d}"
+    digits = "一二三四五六七八九"
+    if n <= 9:
+        return digits[n - 1]
+    tens, ones = divmod(n, 10)
+    prefix = (digits[tens - 1] + "十") if tens > 1 else "十"  # 11~19 规范省略"一"
+    return prefix + (digits[ones - 1] if ones else "")
+
+
 def parse_season_dir(name: str) -> int | None:
-    """从目录名解析季号(01/Season 1/S02/第3季/第一季);非季目录 None。"""
+    """从目录名解析季号(01/Season 1/S02/第3季/第一季/一/二十);非季目录 None。
+
+    裸中文数字(一/二/十/二十…)是标准季目录形态;注意"三体"这类资源名
+    因字符集不 fullmatch 而天然排除。
+    """
     m = re.match(r"^0*(\d{1,2})$", name)
     if m and 1 <= int(m.group(1)) <= 99:
         return int(m.group(1))
+    if re.fullmatch(r"[一二三四五六七八九十]{1,3}", name):
+        return _cn_to_int(name)
     for pattern, kind in _SEASON_DIR_PATTERNS:
         m = pattern.match(name)
         if m:
@@ -94,7 +112,8 @@ def parse_season_dir(name: str) -> int | None:
 
 
 def format_season_dir(season: int) -> str:
-    return f"{season:02d}"
+    """季号 → 标准季目录名(中文数字:一/二/…/十/十一/…)。"""
+    return _int_to_cn(season)
 
 
 def build_resource_name(title: str, year: int | None, tmdb_id: int | None) -> str:

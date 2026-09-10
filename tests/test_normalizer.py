@@ -24,8 +24,28 @@ def test_parse_season_dir_chinese_numbers():
     assert parse_season_dir("第二十季") == 20
 
 
+def test_parse_season_dir_bare_chinese():
+    # 裸中文数字季目录(当前标准格式)必须可识别,保证 normalize 幂等
+    for n, name in ((1, "一"), (3, "三"), (10, "十"), (11, "十一"), (20, "二十"), (23, "二十三")):
+        assert parse_season_dir(name) == n
+    # 非季目录名不误判
+    assert parse_season_dir("三体") is None
+    assert parse_season_dir("十面埋伏") is None
+
+
+def test_format_parse_roundtrip():
+    # 全范围 round-trip:生成 ↔ 识别 幂等闭环(防牵连 bug)
+    for n in list(range(1, 30)) + [47, 99]:
+        assert parse_season_dir(format_season_dir(n)) == n
+
+
 def test_format_and_build():
-    assert format_season_dir(3) == "03"
+    assert format_season_dir(1) == "一"
+    assert format_season_dir(3) == "三"
+    assert format_season_dir(10) == "十"
+    assert format_season_dir(11) == "十一"
+    assert format_season_dir(20) == "二十"
+    assert format_season_dir(21) == "二十一"
     assert build_resource_name("葬送的芙莉莲", 2026, 246389) == "葬送的芙莉莲 (2026) {tmdb-246389}"
     assert build_resource_name("沙丘", None, 693134) == "沙丘 {tmdb-693134}"
 
