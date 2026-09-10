@@ -31,8 +31,9 @@ _ERR_ALREADY = 4200045
 class SaveResult:
     ok: bool
     message: str
-    task_cid: int = 0       # 资源根目录 CID(塌缩后;流水线后续整理/建分享用)
-    task_name: str = ""     # 资源根目录名
+    task_cid: int = 0       # 资源根(单文件夹)或资源文件 CID,流水线定位用
+    task_name: str = ""     # 资源名
+    is_dir: bool = True     # 资源是否目录(单文件 False → 标准化走散文件包裹)
     saved_items: int = 0    # 接收的条目数
     already: bool = False   # 内容本就已在网盘中
     errors: list[str] = field(default_factory=list)
@@ -50,6 +51,14 @@ class Pan115Saver:
 
     async def _call(self, fn, *args, **kwargs):
         return await self._reader._call(fn, *args, **kwargs)
+
+    async def _share_title(self, share_code: str, receive_code: str) -> str:
+        """取分享标题(资源目录命名用);失败返回空。"""
+        try:
+            st = await self._reader.share_status(share_code, receive_code)
+            return st.get("title") or ""
+        except Exception:  # noqa: BLE001
+            return ""
 
     # ── 目录 ───────────────────────────────────────────────
     async def ensure_dir(self, path: str, parent_cid: int = 0) -> int:
@@ -94,11 +103,13 @@ class Pan115Saver:
             await asyncio.sleep(1.0)  # 接收指令间隔,防风控
         return len(ids), already
 
-    async def save_share(self, link, parent_cid: int, task_name: str | None = None) -> SaveResult:
-        """转存一个 115 分享到 parent_cid 下的任务子目录。link 为 links.ParsedLink。
+    async def save_share(self, link, parent_cid: int) -> SaveResult:
+        """转存一个 115 分享到 parent_cid,**内容原样落盘**(无包装目录)。
 
-        task_name 缺省时用 分享标识_时间戳;返回 SaveResult.task_cid 供流水线
-        后续(标准化/建分享)定位。
+        - 分享根只有一个条目(文件夹/文件)→ 原样落在 parent 下,零包装
+        - 分享根有多个条目 → 收进一个资源目录(分享标题命名)——多个散项
+          需要一个资源根才能标准化与建分享
+        返回 SaveResult.task_cid(资源根/文件的 CID)+ is_dir 供流水线定位。
         """
         if not self._reader.logged_in:
             return SaveResult(False, "未配置 115 Cookie,无法转存(匿名接口只能读,不能转存)")
@@ -108,18 +119,14 @@ class Pan115Saver:
         share_code = payload["share_code"]
 
         try:
-            # 任务独立子目录:标题_时间戳(标题不可用时退化为时间戳)
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            clean = re.sub(r'[\\/:*?"<>|]', "", task_name or link.dedup_display).strip()[:40]
-            task_name = f"{clean}_{ts}" if clean else ts
-            task_cid = await self.ensure_dir(task_name, parent_cid=parent_cid)
-
             total = 0
             any_already = False
             errors: list[str] = []
 
-            # 递归遍历分享树:每个目录的直属条目(id 集合)接收一次;topdown 父先于子
-            cid_map = {0: task_cid}
+            # 遍历分享树:目录建网盘侧对应结构(不接收——接收目录=整树复制会双份),
+            # 文件按层分批接收;topdown 父先于子
+            cid_map = {0: parent_cid}
+            root_dirs = root_files = None
 
             def _walk_sync():
                 out = []
@@ -131,15 +138,14 @@ class Pan115Saver:
                 return out
 
             tree = await asyncio.wait_for(asyncio.to_thread(_walk_sync), timeout=600)
+            if tree:
+                root_dirs, root_files = tree[0][1], tree[0][2]
 
             for pid, dirs, files in tree:
                 if pid not in cid_map:
-                    # 理论上 topdown 遍历父目录先于子目录;缺失则跳过并记录
                     errors.append(f"目录映射缺失 pid={pid},跳过 {len(dirs) + len(files)} 项")
                     continue
                 dest = cid_map[pid]
-                # 为子目录建立网盘侧对应目录(映射给下一层用);目录条目**不接收**
-                # ——接收目录 = 整棵子树复制,后续逐层又收文件 → 内容双份
                 for d in dirs:
                     sub = await self.ensure_dir(d["name"], parent_cid=dest)
                     cid_map[d["id"]] = sub
@@ -150,17 +156,40 @@ class Pan115Saver:
                 total += n
                 any_already = any_already or already
 
-            # 塌缩一层:任务壳目录若只含一个子目录且无文件(分享根包了一层
-            # 资源文件夹),把内层移出到 parent、删掉壳——暂存目录不留垃圾层
-            items = await self._reader.list_dir(task_cid, nf=0)
-            dirs_in = [it for it in items if it["is_dir"]]
-            if len(items) == 1 and dirs_in:
-                inner_fid, inner_name = dirs_in[0]["fid"], dirs_in[0]["name"]
-                await self._reader.fs_move(inner_fid, parent_cid)
-                await asyncio.sleep(3)  # 115 移动服务端异步,等它落定再删壳
-                await self._reader.fs_delete(task_cid)
-                task_cid, task_name = inner_fid, inner_name
-                logger.info("已塌缩任务壳目录:资源根 = %s(CID %s)", inner_name, inner_fid)
+            # 资源根定位:单根条目原样;多根条目收进资源目录(分享标题命名)
+            n_root = (len(root_dirs or []) + len(root_files or [])) if tree else 0
+            is_dir = bool(root_dirs)
+            if n_root > 1:
+                title = await self._share_title(share_code, receive_code)
+                clean = re.sub(r'[\\/:*?"<>|]', "", title or "").strip()[:40]
+                task_name = f"{clean}_{time.strftime('%Y%m%d_%H%M%S')}" if clean else \
+                    f"未整理_{time.strftime('%Y%m%d_%H%M%S')}"
+                root_cid = await self.ensure_dir(task_name, parent_cid=parent_cid)
+                moved = 0
+                for it in await self._reader.list_dir(parent_cid, nf=0):
+                    if it["name"] in {d["name"] for d in (root_dirs or [])} | \
+                       {f["name"] for f in (root_files or [])}:
+                        await self._reader.fs_move(it["fid"], root_cid)
+                        await asyncio.sleep(1)
+                        moved += 1
+                task_cid, is_dir = root_cid, True
+                logger.info("多根条目收拢:%d/%d 项 → %s", moved, n_root, task_name)
+            elif is_dir:
+                # 单文件夹:名字匹配拿 fid(接收时 115 保留原名)
+                want = root_dirs[0]["name"]
+                items = await self._reader.list_dir(parent_cid, nf=1)
+                match = next((it for it in items if it["name"] == want), None)
+                if match is None:
+                    raise RuntimeError(f"转存后未找到资源目录 {want}")
+                task_cid, task_name = match["fid"], match["name"]
+            else:
+                # 单文件
+                want = root_files[0]["name"]
+                items = await self._reader.list_dir(parent_cid, nf=0)
+                match = next((it for it in items if it["name"] == want), None)
+                if match is None:
+                    raise RuntimeError(f"转存后未找到文件 {want}")
+                task_cid, task_name, is_dir = match["fid"], match["name"], False
 
             msg = (
                 "已在网盘中(重复转存)"
@@ -169,8 +198,8 @@ class Pan115Saver:
             )
             logger.info("转存完成:%s(耗时 %.1fs)", msg, time.monotonic() - t0)
             return SaveResult(True, msg, task_cid=task_cid, task_name=task_name,
-                              saved_items=total, already=any_already and not total,
-                              errors=errors)
+                              is_dir=is_dir, saved_items=total,
+                              already=any_already and not total, errors=errors)
         except TimeoutError:
             logger.error("转存超时(遍历分享树 600s):%s", link.code)
             return SaveResult(False, "转存超时(分享过大或接口缓慢),稍后重试")

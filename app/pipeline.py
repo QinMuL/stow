@@ -107,7 +107,7 @@ class SavePipeline:
             f"{prefix}✅ [2/3] 转存完成({tr.message});正在整理目录结构…"
         )
         normalizer = ShareNormalizer(bot.reader, bot.tmdb)
-        nr = await normalizer.normalize(tr.task_cid, tr.task_name, True, staging_cid)
+        nr = await normalizer.normalize(tr.task_cid, tr.task_name, tr.is_dir, staging_cid)
         for a in nr.actions:
             logger.info("流水线标准化:%s", a)
         if not nr.recognized:
