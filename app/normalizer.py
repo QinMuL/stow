@@ -22,10 +22,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections import Counter
 from dataclasses import dataclass, field
 
-from app.media import AggregatedMedia, extract_tmdb_id, parse_filename
+from app.media import AggregatedMedia, ShareFile, analyze_share, extract_tmdb_id, parse_filename
 from app.pan115 import Pan115Reader, ShareError
 
 logger = logging.getLogger(__name__)
@@ -135,22 +134,16 @@ class ShareNormalizer:
 
         media = self._detect_media(name, items)
         if media is None:
-            logger.info("目录标准化:无法识别媒体信息:%s", name)
+            logger.warning("目录标准化:无法识别媒体信息:%s", name)
             return NormalizeResult(fid=fid, name=name, changed=False, recognized=False)
-        title, year, media_type, tmdb_id = media
 
-        if tmdb_id is None:
-            tmdb_id = await self._tmdb_match(title, year, media_type)
-            if tmdb_id is not None:
-                details = await self._tmdb_details(tmdb_id, media_type)
-                if details:
-                    title = details.get("title") or title
-                    year = details.get("year") or year
-
-        if tmdb_id is None:
-            # TMDB 未命中:无法产出可信的标准名,交人工处理(流水线拦截建分享)
-            logger.warning("目录标准化:TMDB 未命中(%s),资源保留原结构待人工处理", title)
+        # 与推送卡片同一识别入口:tmdb.match(两轮搜索+别名+年份门槛)
+        details = await self._match_details(media)
+        if details is None:
+            logger.warning("目录标准化:TMDB 未命中(%s),资源保留原结构待人工处理", media.title)
             return NormalizeResult(fid=fid, name=name, changed=False, recognized=False)
+        title, year = details["title"], details["year"]
+        tmdb_id = int(details["tmdb_id"])
 
         new_name = build_resource_name(title, year, tmdb_id)
         root_changed = False
@@ -207,92 +200,51 @@ class ShareNormalizer:
     async def _wrap_single_file(self, fid: int, name: str,
                                 parent_cid: int) -> NormalizeResult:
         actions: list[str] = []
-        parsed = parse_filename(name)
-        title, year, media_type = parsed.title, parsed.year, parsed.media_type
-        tmdb_id = await self._tmdb_match(title, year, media_type)
-        if tmdb_id is None:
+        media = self._detect_media(name, [dict(name=name, size=0, is_dir=False)])
+        if media is None:
             return NormalizeResult(fid=fid, name=name, changed=False, recognized=False)
-        details = await self._tmdb_details(tmdb_id, media_type)
-        if details:
-            title = details.get("title") or title
-            year = details.get("year") or year
-        root_name = build_resource_name(title, year, tmdb_id)
+        details = await self._match_details(media)
+        if details is None:
+            return NormalizeResult(fid=fid, name=name, changed=False, recognized=False)
+        title, year = details["title"], details["year"]
+        root_name = build_resource_name(title, year, int(details["tmdb_id"]))
 
         root_cid = await self._makedirs_under(parent_cid, root_name)
-        if parsed.season is not None:
-            season_cid = await self._makedirs_under(root_cid, format_season_dir(parsed.season))
+        if media.season is not None:
+            season_cid = await self._makedirs_under(root_cid, format_season_dir(media.season))
             await self.pan115.fs_move(fid, season_cid)
-            actions.append(f"建资源目录 {root_name}/{format_season_dir(parsed.season)}/,移入 {name}")
+            actions.append(f"建资源目录 {root_name}/{format_season_dir(media.season)}/,移入 {name}")
         else:
             await self.pan115.fs_move(fid, root_cid)
             actions.append(f"建资源目录 {root_name}/,移入 {name}")
         return NormalizeResult(fid=root_cid, name=root_name, changed=True, actions=actions)
 
-    # ── 媒体信息探测 ────────────────────────────────────────
-    def _detect_media(self, dir_name: str, items: list[dict]):
-        tmdb_id = extract_tmdb_id([dir_name]) or extract_tmdb_id(
+    # ── 媒体信息探测(与推送卡片同一入口:analyze_share) ──
+    def _detect_media(self, dir_name: str, items: list[dict]) -> AggregatedMedia | None:
+        """复用 analyze_share 聚合(标题多数票/类型判定/画质),保证与卡片同规则。"""
+        entries = [
+            ShareFile(name=it["name"], size=it.get("size") or 0, is_dir=it["is_dir"])
+            for it in items
+        ]
+        media = analyze_share(entries)
+        if media is None or not media.title:
+            return None
+        media.tmdb_id = extract_tmdb_id([dir_name]) or extract_tmdb_id(
             [it["name"] for it in items]
         )
-        parsed = parse_filename(dir_name)
-        title, year, media_type = parsed.title, parsed.year, parsed.media_type
+        return media
 
-        if _suspect_title(title):
-            # 目录名疑似分享码/乱码(如 swseiuq3znw_20260910):从子项文件名
-            # 投票取标题(多数票),识别不出就交给 TMDB 匹配失败的拦截分支
-            votes = [
-                p.title for it in items if not it["is_dir"]
-                if (p := parse_filename(it["name"])).title
-                and not _suspect_title(p.title)
-            ]
-            if votes:
-                title = Counter(votes).most_common(1)[0][0]
-
-        if media_type == "movie":
-            for it in items:
-                if parse_filename(it["name"]).season is not None:
-                    media_type = "tv"
-                    break
-            video_count = sum(
-                1 for it in items
-                if not it["is_dir"] and it["name"].lower().endswith(_VIDEO_EXTS)
-            )
-            if video_count > 1:
-                media_type = "tv"
-
-        if not title or title == dir_name:
-            for it in items:
-                p = parse_filename(it["name"])
-                if p.title and p.title != it["name"]:
-                    title, year = p.title, (p.year or year)
-                    if p.media_type == "tv":
-                        media_type = "tv"
-                    break
-
-        return (title, year, media_type, tmdb_id) if title else None
+    async def _match_details(self, media: AggregatedMedia) -> dict | None:
+        """目录名带 {tmdb-} 标注时直连详情;否则走与卡片相同的 match 流程。"""
+        if self.tmdb is None:
+            return None
+        if media.tmdb_id:
+            details = await self.tmdb.get_details(media.tmdb_id, media.media_type)
+            if details:
+                return details
+        return await self.tmdb.match(media)
 
     # ── TMDB ────────────────────────────────────────────────
-    async def _tmdb_match(self, title: str, year: int | None,
-                          media_type: str) -> int | None:
-        if self.tmdb is None:
-            return None
-        try:
-            details = await self.tmdb.match(
-                AggregatedMedia(title=title, year=year, media_type=media_type)
-            )
-            return int(details["tmdb_id"]) if details else None
-        except Exception as exc:  # noqa: BLE001
-            logger.info("TMDB 匹配失败(%s):%s", title, exc)
-            return None
-
-    async def _tmdb_details(self, tmdb_id: int, media_type: str) -> dict | None:
-        if self.tmdb is None:
-            return None
-        try:
-            return await self.tmdb.get_details(tmdb_id, media_type)
-        except Exception:  # noqa: BLE001
-            return None
-
-    # ── 目录创建辅助(fs_mkdir 幂等:先查后建,建后重列取 cid) ──
     async def _makedirs_under(self, parent_cid: int, name: str) -> int:
         items = await self.pan115.list_dir(parent_cid, nf=1)
         for it in items:
