@@ -164,7 +164,13 @@ class ProcessChain:
                 self._record(path, status="failed", error=f"目标名已存在:{target}")
                 await self._notify(f"⚠️ 处理失败「{path.name}」:目标名已存在 {target}")
                 return "failed"
-            path.rename(final)
+            try:
+                path.rename(final)
+            except PermissionError as exc:
+                # 文件仍被写入/被系统占用(Windows 上 CD2 索引、下载器未完全关闭等):
+                # 这是**暂时**状态,不当失败处理——否则几次重试就把配额烧光了
+                logger.info("处理段改名被占用,下轮再试:%s(%s)", path.name, exc)
+                return "未就绪"
             logger.info("处理段重命名:%s → %s", path.name, target)
 
         # ② ed2k 哈希 + 链接

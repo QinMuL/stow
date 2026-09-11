@@ -550,3 +550,17 @@ def test_nested_non_video_files_are_ignored(tmp_path, monkeypatch):
     os.utime(v, (time.time() - 3600, time.time() - 3600))
     asyncio.run(chain.scan_now())
     assert any(p.suffix == ".mkv" for p in Path(bot.cfg.clouddrive_dir).iterdir())
+
+
+def test_rename_permission_error_is_not_failure(tmp_path, monkeypatch):
+    """改名遇到占用(PermissionError)→ 视为"未就绪"重试,不记 failed(不烧重试配额)。"""
+    chain, bot, path = _chain(tmp_path, monkeypatch=monkeypatch)
+
+    def locked(self, target=None):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(processor_mod.Path, "rename", locked, raising=True)
+    report = asyncio.run(chain.scan_now())
+    assert "未就绪 1" in report
+    assert path.exists() and bot.pushed == []
+    assert bot.store.get_local_file(path.name) is None      # 不落 failed 记录
