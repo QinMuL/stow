@@ -22,6 +22,7 @@ from app.openlist import TASK_SUCCEEDED, OpenListClient, OpenListError
 
 logger = logging.getLogger(__name__)
 
+POLL_EVERY_SECONDS = 20    # 任务状态结算间隔(与大轮扫描解耦:搬运通常一两分钟就完)
 MAX_ATTEMPTS = 3           # 单个条目最多重试次数(超过则放弃并提示人工)
 RETRY_BACKOFF_SECONDS = 300  # 失败后至少等这么久再重试(避免同一轮/连续轮空转)
 TASK_LOST_SECONDS = 1800   # 任务在列表里消失且目标文件也不在:判定任务丢失的时间阈值
@@ -38,6 +39,8 @@ class ResourceFetcher:
             if cfg.openlist_base_url and cfg.openlist_token else None
         )
         self._loop_task: asyncio.Task | None = None
+        self._poll_task: asyncio.Task | None = None
+        self._poll_lock = asyncio.Lock()  # 结算串行(扫描与轮询两条路都会结算)
 
     # ── 生命周期 ────────────────────────────────────────────
     def enabled(self) -> bool:
@@ -50,18 +53,31 @@ class ResourceFetcher:
             return
         if self._loop_task is None or self._loop_task.done():
             self._loop_task = asyncio.create_task(self.run_loop())
+        if self._poll_task is None or self._poll_task.done():
+            self._poll_task = asyncio.create_task(self.poll_loop())
 
     async def run_loop(self) -> None:
         interval = max(60, int(self.bot.cfg.fetch_interval_minutes) * 60)
-        logger.info("获取段已启动:监控 %s,并发上限 %d,每 %d 分钟一轮",
+        logger.info("获取段已启动:监控 %s,并发上限 %d,每 %d 分钟扫一轮、每 %d 秒结算任务",
                     self.bot.cfg.openlist_monitor_list(), self.bot.cfg.openlist_max_tasks,
-                    self.bot.cfg.fetch_interval_minutes)
+                    self.bot.cfg.fetch_interval_minutes, POLL_EVERY_SECONDS)
         while True:
             try:
                 await self.scan_now()
             except Exception as exc:  # noqa: BLE001 - 单轮异常不拖垮循环
                 logger.error("获取段本轮异常:%s", exc, exc_info=exc)
             await asyncio.sleep(interval)
+
+    async def poll_loop(self) -> None:
+        """任务结算循环(独立于大轮扫描):搬运完成即刻落账,尽快腾出并发位。"""
+        while True:
+            await asyncio.sleep(POLL_EVERY_SECONDS)
+            try:
+                settled = await self._poll_tasks()
+                if settled["done"] or settled["failed"]:
+                    logger.info("获取段结算:完成 %d,失败 %d", settled["done"], settled["failed"])
+            except Exception as exc:  # noqa: BLE001 - 单轮异常不拖垮循环
+                logger.warning("获取段任务结算异常:%s", exc)
 
     # ── 一轮:先结算在途任务,再发现并提交新资源 ─────────────
     async def scan_now(self) -> str:
@@ -162,6 +178,11 @@ class ResourceFetcher:
 
     # ── 结算在途任务(完成判定看任务状态) ────────────────────
     async def _poll_tasks(self) -> dict:
+        """结算在途任务;两条循环(扫描/轮询)都会调用,加锁串行。"""
+        async with self._poll_lock:
+            return await self._poll_once()
+
+    async def _poll_once(self) -> dict:
         settled = {"done": 0, "failed": 0}
         moving = self.bot.store.list_fetch("moving")
         if not moving or self.client is None:

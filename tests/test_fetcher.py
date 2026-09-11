@@ -227,3 +227,33 @@ def test_restart_keeps_tracking_task(tmp_path):
     asyncio.run(f2.scan_now())
     row = bot.store.get_fetch(f"{_MON}/f.mkv")
     assert row["status"] == "done" and row["task_id"] == tid   # 任务 id 一路保留
+
+
+def test_poll_settles_without_scanning(tmp_path):
+    """结算与扫描解耦:不跑 scan_now 也能把在途任务结掉(否则要等下一轮扫描)。
+
+    旧实现里 _poll_tasks 只在大轮扫描内执行,4.5GB 搬完仍要占 5 分钟并发位。
+    """
+    f, bot, client = _fetcher(tmp_path, files=[{"name": "g.mkv", "size": 10, "is_dir": False}])
+    asyncio.run(f.scan_now())                     # 提交,进入 moving
+    client.undone[0].update({"state": 2})         # 任务完成
+    client.done.append(client.undone.pop(0))
+
+    settled = asyncio.run(f._poll_tasks())        # 只结算,不扫描
+    assert settled == {"done": 1, "failed": 0}
+    assert bot.store.get_fetch(f"{_MON}/g.mkv")["status"] == "done"
+    assert f._active_count() == 0                 # 并发位立刻腾出
+
+
+def test_poll_is_coroutine_safe(tmp_path):
+    """扫描与轮询两条路都会结算:并发调用不重复计数(加锁串行)。"""
+    f, bot, client = _fetcher(tmp_path, files=[{"name": "h.mkv", "size": 10, "is_dir": False}])
+    asyncio.run(f.scan_now())
+    client.undone[0].update({"state": 2})
+    client.done.append(client.undone.pop(0))
+
+    async def two():
+        return await asyncio.gather(f._poll_tasks(), f._poll_tasks())
+
+    a, b = asyncio.run(two())
+    assert a["done"] + b["done"] == 1             # 只结算一次
