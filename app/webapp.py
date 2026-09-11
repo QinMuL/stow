@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from app import __version__, auth
 from app.channel_monitor import channel_rows
 from app.config import (
+    DEFAULT_WEB_PORT,
     MASK,
     SENSITIVE_KEYS,
     ensure_admin,
@@ -138,6 +139,10 @@ class MonitorPassword(BaseModel):
     password: str = ""
 
 
+# 整数键的默认值:缺失时不能回 0 —— 表单会把 0 显示出来再存回去(踩过)
+_INT_DEFAULTS = {"web_port": DEFAULT_WEB_PORT, "openlist_max_tasks": 2,
+                 "fetch_interval_minutes": 5}
+
 # 可经 Web 修改的配置键白名单(类型: s=字符串, i=整数, ids=ID 列表)
 EDITABLE = {
     "tg_bot_token": "s", "tg_admin_ids": "ids",
@@ -223,7 +228,7 @@ def create_app(config_path: str | Path) -> FastAPI:
         raw = read_raw(config_path)
         out: dict[str, object] = {}
         for key, kind in EDITABLE.items():
-            v = raw.get(key, "" if kind != "i" else 0)
+            v = raw.get(key, "" if kind != "i" else _INT_DEFAULTS.get(key, 0))
             if key in SENSITIVE_KEYS:
                 # 与启动加载同口径:非 ASCII(如中文占位符)视为未填写
                 s = str(v or "").strip()

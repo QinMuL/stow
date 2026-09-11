@@ -527,3 +527,11 @@ def test_openlist_dirs_reports_upstream_error(tmp_path):
     token = _login(client)
     r = client.get("/api/openlist/dirs?path=/", headers=_h(token))
     assert r.status_code == 502 and "列目录失败" in r.json()["detail"]
+
+
+def test_integer_keys_have_sane_defaults(tmp_path):
+    """未写入 config.json 的整数键不能回 0(表单会把 0 显示出来再存回去)。"""
+    client = _client(tmp_path)
+    token = _login(client)
+    d = client.get("/api/config", headers=_h(token)).json()
+    assert d["openlist_max_tasks"] == 2 and d["fetch_interval_minutes"] == 5
