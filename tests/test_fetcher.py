@@ -99,22 +99,36 @@ def test_disabled_without_credentials(tmp_path):
 
 # ── 发现与提交 ──────────────────────────────────────────────
 def test_scan_submits_move_for_new_items(tmp_path):
-    f, bot, client = _fetcher(tmp_path)
+    """目录被**展开成逐文件**提交(每个文件一个任务),相对子目录结构保留。"""
+    f, bot, client = _fetcher(tmp_path, max_tasks=3)     # 放高上限,一轮内全部提交
+    client.items[f"{_MON}/何以为家 (2018)"] = [
+        {"name": "何以为家.2018.1080p.mkv", "size": 100, "is_dir": False},
+        {"name": "字幕", "size": 0, "is_dir": True},
+    ]
+    client.items[f"{_MON}/何以为家 (2018)/字幕"] = [
+        {"name": "zh.srt", "size": 10, "is_dir": False},
+    ]
     report = asyncio.run(f.scan_now())
-    assert len(client.moves) == 2                       # 目录项与文件项各提交一个
-    assert client.moves[0] == (_MON, _DEST, ["何以为家 (2018)"])
-    assert "提交 2 个" in report
+    assert len(client.moves) == 3                       # 顶层 1 + 目录内 2 = 3 个任务
+    assert (_MON, _DEST, ["茶啊二中.S06E01.mkv"]) in client.moves
+    assert (_MON + "/何以为家 (2018)", f"{_DEST}/何以为家 (2018)",
+            ["何以为家.2018.1080p.mkv"]) in client.moves
+    assert (_MON + "/何以为家 (2018)/字幕", f"{_DEST}/何以为家 (2018)/字幕",
+            ["zh.srt"]) in client.moves                  # 嵌套子目录也保留
+    assert "提交 3 个" in report
     rows = bot.store.list_fetch("moving")
-    assert {r["src_path"].rsplit("/", 1)[-1] for r in rows} == {"何以为家 (2018)", "茶啊二中.S06E01.mkv"}
-    assert all(r["task_id"] for r in rows)              # 记下了任务 id
+    assert len(rows) == 3 and all(r["task_id"] for r in rows)
 
 
 def test_second_scan_skips_inflight(tmp_path):
     f, bot, client = _fetcher(tmp_path)
+    client.items[f"{_MON}/何以为家 (2018)"] = [
+        {"name": "a.mkv", "size": 100, "is_dir": False}]
     asyncio.run(f.scan_now())
+    n = len(client.moves)
     asyncio.run(f.scan_now())                           # 再扫:在途的不重复提交
-    assert len(client.moves) == 2
-    assert "跳过 2 个" in asyncio.run(f.scan_now())
+    assert len(client.moves) == n
+    assert "跳过" in asyncio.run(f.scan_now())
 
 
 def test_concurrency_gate_limits_to_max(tmp_path):
@@ -509,10 +523,57 @@ def test_folder_landed_by_existence_not_size(tmp_path):
     assert f._landed(row) is True                        # 目录存在即算落地(512≠0 也认)
 
 
-def test_folder_already_local_is_skipped(tmp_path):
-    """本地已有同名目录 → 不再重复提交(否则会反复搬)。"""
-    f, bot, _ = _fetcher(tmp_path, files=[{"name": "某季", "size": 0, "is_dir": True}])
+def test_folder_files_already_local_are_skipped(tmp_path):
+    """目录内文件已本地存在(同大小)→ 跳过该文件;其余文件照常提交。"""
+    f, bot, client = _fetcher(tmp_path, files=[{"name": "某季", "size": 0, "is_dir": True}])
+    client.items[f"{_MON}/某季"] = [
+        {"name": "已搬.mkv", "size": 7, "is_dir": False},
+        {"name": "新片.mkv", "size": 9, "is_dir": False},
+    ]
     (bot.cfg.openlist_dir / "某季").mkdir(parents=True)
+    (bot.cfg.openlist_dir / "某季" / "已搬.mkv").write_bytes(b"1234567")
     asyncio.run(f.scan_now())
-    assert bot.store.get_fetch(f"{_MON}/某季")["status"] == "done"
-    assert f.client.moves == []
+    assert [m[2] for m in client.moves] == [["新片.mkv"]]          # 只提交缺的那个
+    assert bot.store.get_fetch(f"{_MON}/某季/已搬.mkv")["status"] == "done"
+
+
+def test_folder_submits_one_by_one_respecting_limit(tmp_path):
+    """并发粒度=文件:上限 2 时,含 3 文件的目录只先提交 2 个。"""
+    f, bot, client = _fetcher(tmp_path, max_tasks=2,
+                              files=[{"name": "季", "size": 0, "is_dir": True}])
+    client.items[f"{_MON}/季"] = [
+        {"name": f"E{i:02d}.mkv", "size": 10, "is_dir": False} for i in (1, 2, 3)]
+    asyncio.run(f.scan_now())
+    assert len(client.moves) == 2                                   # 占满并发位即停
+    assert len(bot.store.list_fetch("moving")) == 2
+    client.undone[0].update({"state": 2})                           # 放掉一个
+    client.done.append(client.undone.pop(0))
+    asyncio.run(f._poll_tasks())
+    asyncio.run(f._scan_dirs())
+    assert len(client.moves) == 3                                   # 第三个补上
+
+
+def test_empty_source_folder_is_pruned(tmp_path):
+    """目录文件都搬走后空源目录被清理;还有内容则不动。"""
+    f, bot, client = _fetcher(tmp_path, files=[{"name": "季", "size": 0, "is_dir": True}])
+    client.items[f"{_MON}/季"] = [{"name": "E01.mkv", "size": 10, "is_dir": False}]
+
+    async def move(src_dir, dst_dir, names):
+        client.moves.append((src_dir, dst_dir, list(names)))
+        client.items[src_dir] = [i for i in client.items[src_dir] if i["name"] not in set(names)]
+        return [{"id": "T1", "name": "move", "state": 1, "progress": 0}]
+
+    client.move = move
+    asyncio.run(f.scan_now())
+    assert "季" not in {i["name"] for i in client.items[_MON]}       # 空壳已清
+
+    # 目录内还有非视频文件 → 不删
+    client.items[f"{_MON}/留着"] = [
+        {"name": "readme.txt", "size": 1, "is_dir": False},
+        {"name": "video.mkv", "size": 10, "is_dir": False}]
+    client.items[_MON].append({"name": "留着", "size": 0, "is_dir": True})
+    client.items[f"{_MON}/留着/video.mkv"] = []
+    (bot.cfg.openlist_dir / "留着").mkdir(parents=True, exist_ok=True)
+    (bot.cfg.openlist_dir / "留着" / "video.mkv").write_bytes(b"x")   # 视频已本地存在 → 跳过
+    asyncio.run(f.scan_now())
+    assert "留着" in {i["name"] for i in client.items[_MON]}

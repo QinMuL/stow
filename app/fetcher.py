@@ -4,7 +4,15 @@
   ① 轮询配置的 openlist 监控目录(`POST /api/fs/list`)
   ② 发现新条目 → `POST /api/fs/move` 移到 `openlist_dest_path`(实测:跨存储=异步流式任务,
      并把源**移走**——这是"移动"而非复制的语义,用户明确要求)
-  ③ 并发闸门:同时进行中的搬运任务 ≤ `openlist_max_tasks`(默认 2,用户要求)
+  ②b **目录逐文件提交(用户 2026-09-11 定)**:实测把目录整体交给 openlist 时,它内部会按
+     子目录/文件**扇出多个并发任务**(线程数 `move_task_threads_num`,默认 5)——我们数 1 个、
+     它跑 5 路,"并发上限"名存实亡。故改为 **Stow 自己递归展开目录、逐文件提交**:
+     每个文件占一个并发位,并发粒度完全由我们控制(落地仍保持相对子目录结构);
+     搬空后的源目录会清理掉(仅在确认为空时删)
+  ②c **线程数同步**:启动时把 openlist 的 `move_task_threads_num` 设为 `openlist_max_tasks`,
+     与我们的闸门口径一致(会一并影响 openlist 里的手动操作,用户已同意自动同步)
+  ③ 并发闸门:同时在途的搬运任务 ≤ `openlist_max_tasks`(默认 2,用户要求);逐文件提交后
+     该计数与 openlist 的真实任务数一一对应
   ④ 完成判定:**任务出现在 `/api/task/move/done` 且 state==2**(不再自造"文件是否稳定"的启发式)
   ⑤ 完成 → 文件已在 `media/openlist`(=/项目测试 挂载),交给处理段(下一阶段接)
      失败 → 记 error + 私聊通知 + 退避重试(源文件未被移走,可重发)
@@ -17,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 from app.openlist import TASK_SUCCEEDED, OpenListClient, OpenListError
 
@@ -61,8 +70,29 @@ class ResourceFetcher:
         if self._poll_task is None or self._poll_task.done():
             self._poll_task = asyncio.create_task(self.poll_loop())
 
+    async def sync_openlist_threads(self) -> None:
+        """把 openlist 的任务线程数同步成我们的并发上限(否则它会自己扇出多路并发)。"""
+        if self.client is None:
+            return
+        want = str(max(1, int(self.bot.cfg.openlist_max_tasks)))
+        try:
+            cur = await self.client.settings()
+        except OpenListError as exc:
+            logger.warning("读 openlist 设置失败,跳过线程数同步:%s", exc)
+            return
+        for key in ("move_task_threads_num",):
+            old = cur.get(key, "")
+            if not old or old == want:
+                continue
+            try:
+                await self.client.save_setting(key, want)
+                logger.info("获取段:openlist %s 已由 %s 同步为 %s(与并发上限一致)", key, old, want)
+            except OpenListError as exc:
+                logger.warning("同步 openlist %s 失败:%s", key, exc)
+
     async def run_loop(self) -> None:
         interval = max(60, int(self.bot.cfg.fetch_interval_minutes) * 60)
+        await self.sync_openlist_threads()
         logger.info("获取段已启动:监控 %s,并发上限 %d,每 %d 分钟扫一轮、每 %d 秒结算任务",
                     self.bot.cfg.openlist_monitor_list(), self.bot.cfg.openlist_max_tasks,
                     self.bot.cfg.fetch_interval_minutes, POLL_EVERY_SECONDS)
@@ -123,33 +153,116 @@ class ResourceFetcher:
         return submitted, skipped
 
     async def _scan_dir(self, path: str) -> dict:
-        """扫一个监控目录:新条目 → 移动任务(受并发闸门约束)。"""
+        """扫一个监控目录:文件逐个提交;**目录递归展开成逐文件**(并发粒度=文件)。"""
         stat = {"submitted": 0, "skipped": 0}
-        items = await self.client.list_dir(path) if self.client else []
-        for it in items:
+        if self.client is None:
+            return stat
+        for it in await self.client.list_dir(path):
             name = it.get("name")
             if not name:
                 continue
-            src = f"{path.rstrip('/')}/{name}"
-            if not self._should_fetch(src, int(it.get("size") or 0), name):
-                stat["skipped"] += 1
+            if it.get("is_dir"):
+                sub = await self._scan_subtree(path, name)
+                stat["submitted"] += sub["submitted"]
+                stat["skipped"] += sub["skipped"]
+                await self._prune_source_dir(path, name)
                 continue
-            if self._active_count() >= max(1, int(self.bot.cfg.openlist_max_tasks)):
-                stat["skipped"] += 1
-                logger.info("获取段:在途任务已达上限 %d,本轮不再提交", self.bot.cfg.openlist_max_tasks)
+            ok = await self._submit_one_file(path, name, int(it.get("size") or 0),
+                                            dest_dir=self.bot.cfg.openlist_dest_path)
+            stat["submitted" if ok else "skipped"] += 1
+            if ok and self._at_limit():
                 break
-            try:
-                tasks = await self.client.move(path, self.bot.cfg.openlist_dest_path, [name])
-            except OpenListError as exc:
-                logger.warning("获取段提交移动失败(%s):%s", src, exc)
-                continue
-            task_id = str((tasks[0].get("id") if tasks else "") or "")
-            local_size = int(it.get("size") or 0)
-            self._save(src, size=local_size, task_id=task_id, status="moving", error="")
-            stat["submitted"] += 1
-            logger.info("获取段已提交移动:%s → %s(任务 %s)",
-                        src, self.bot.cfg.openlist_dest_path, task_id or "立即完成")
         return stat
+
+    def _at_limit(self) -> bool:
+        limit = max(1, int(self.bot.cfg.openlist_max_tasks))
+        return self._active_count() >= limit
+
+    async def _submit_one_file(self, src_dir: str, name: str, size: int, *, dest_dir: str) -> bool:
+        """提交单个文件的移动(保持相对子目录);已处理/达并发上限则跳过。"""
+        if self.client is None:
+            return False
+        src = f"{src_dir.rstrip('/')}/{name}"
+        if not self._should_fetch(src, size, name):
+            return False
+        if self._at_limit():
+            logger.info("获取段:在途任务已达上限 %d,本轮不再提交", self.bot.cfg.openlist_max_tasks)
+            return False
+        try:
+            tasks = await self.client.move(src_dir, dest_dir, [name])
+        except OpenListError as exc:
+            logger.warning("获取段提交移动失败(%s):%s", src, exc)
+            return False
+        task_id = str((tasks[0].get("id") if tasks else "") or "")
+        self._save(src, size=size, task_id=task_id, status="moving", error="")
+        logger.info("获取段已提交移动:%s → %s(任务 %s)", src, dest_dir, task_id or "立即完成")
+        return True
+
+    async def _scan_subtree(self, base: str, folder: str) -> dict:
+        """递归展开目录:每个文件单独提交(相对子目录结构原样保留)。"""
+        stat = {"submitted": 0, "skipped": 0}
+        if self.client is None:
+            return stat
+        dest_root = self.bot.cfg.openlist_dest_path
+        stack = [(f"{base.rstrip('/')}/{folder}", f"{dest_root.rstrip('/')}/{folder}")]
+        while stack:
+            cur_src, cur_dest = stack.pop(0)
+            for it in await self.client.list_dir(cur_src):
+                name = it.get("name")
+                if not name:
+                    continue
+                if it.get("is_dir"):
+                    stack.append((f"{cur_src}/{name}", f"{cur_dest}/{name}"))
+                    continue
+                ok = await self._submit_one_file(cur_src, name, int(it.get("size") or 0),
+                                                 dest_dir=cur_dest)
+                stat["submitted" if ok else "skipped"] += 1
+                if ok and self._at_limit():
+                    logger.info("获取段:在途任务已达上限 %d,该目录剩余文件下轮继续",
+                                self.bot.cfg.openlist_max_tasks)
+                    return stat
+        return stat
+
+    async def _prune_source_dir(self, base: str, folder: str) -> None:
+        """源目录搬空后删掉空壳(自底向上;仅在**确认为空**时删,留了文件就不动)。"""
+        if self.client is None:
+            return
+        root = f"{base.rstrip('/')}/{folder}"
+        dirs: list[str] = []
+        stack = [root]
+        while stack:
+            cur = stack.pop()
+            dirs.append(cur)
+            try:
+                for it in await self.client.list_dir(cur):
+                    if it.get("is_dir"):
+                        stack.append(f"{cur}/{it['name']}")
+            except OpenListError as exc:
+                logger.debug("列源子目录失败(%s):%s", cur, exc)
+        for d in sorted(set(dirs), key=len, reverse=True):
+            parent, _, name = d.rpartition("/")
+            if not name:
+                continue
+            try:
+                if await self.client.list_dir(d):
+                    continue                      # 仍有内容(如非视频文件):不动
+                await self.client.remove(parent or "/", [name])
+                logger.info("获取段:源目录已搬空并清理:%s", d)
+            except OpenListError as exc:
+                logger.debug("清理空源目录失败(%s):%s", d, exc)
+
+    def _local_path(self, src_path: str) -> Path:
+        """源路径 → 本地落地点路径(**保持相对子目录结构**)。
+
+        逐文件提交时落地结构是 `<落地点>/<目录>/<文件>`,不能只用文件名去找
+        ——否则目录内文件会被误判成"本地不存在"而反复搬(实测踩到)。
+        """
+        base = Path(self.bot.cfg.openlist_dir)
+        for mon in self.bot.cfg.openlist_monitor_list():
+            m = mon.rstrip("/")
+            if src_path.startswith(m + "/"):
+                return base / src_path[len(m) + 1:]
+        return base / src_path.rsplit("/", 1)[-1]
 
     def _should_fetch(self, src: str, size: int, name: str) -> bool:
         """是否该为这个源条目提交搬运。"""
@@ -165,7 +278,7 @@ class ResourceFetcher:
         # 本地已存在 → 说明已经搬进来了(人工搬过、或重启前搬完),直接记账完成。
         # 目录不做大小比对:openlist 报目录 size=0,而本地目录 st_size 随文件系统变
         # (drvfs 512 / ext4 4096),比了必然失配 → 反复提交
-        local = self.bot.cfg.openlist_dir / name
+        local = self._local_path(src)
         try:
             if local.exists() and (local.is_dir() or local.stat().st_size == size):
                 self._save(src, size=size, status="done", error="", task_id="")
@@ -248,8 +361,7 @@ class ResourceFetcher:
         目录只判存在:openlist 报目录 size=0,本地目录 st_size 因文件系统而异
         (drvfs 512 / ext4 4096),按 size 比会对不上。
         """
-        name = row["src_path"].rsplit("/", 1)[-1]
-        local = self.bot.cfg.openlist_dir / name
+        local = self._local_path(row["src_path"])
         try:
             if not local.exists():
                 return False

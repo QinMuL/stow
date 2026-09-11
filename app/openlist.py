@@ -124,3 +124,16 @@ class OpenListClient:
 
     async def mkdir(self, path: str) -> None:
         await self._call("POST", "/api/fs/mkdir", {"path": path})
+
+    # ── 设置(用于同步任务线程数,与我们的并发上限一致) ────────
+    async def settings(self) -> dict[str, str]:
+        """读 openlist 设置列表 → {key: value}。"""
+        data = await self._call("GET", "/api/admin/setting/list")
+        if not isinstance(data, list):
+            return {}
+        return {str(it.get("key")): str(it.get("value")) for it in data if it.get("key")}
+
+    async def save_setting(self, key: str, value: str) -> None:
+        """写单项设置(payload 必须是**数组**,实测单对象会 400)。"""
+        await self._call("POST", "/api/admin/setting/save",
+                         [{"key": key, "value": str(value)}])
