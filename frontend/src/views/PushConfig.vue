@@ -260,7 +260,11 @@ function onPickDir(d) {
   if (pickerSource.value === 'cd2') {
     model.value[pickerTarget.value] = d.cid      // cd2_dest_path / cd2_source_path
   } else if (pickerSource.value === 'openlist') {
-    fetchRows.value[Number(pickerTarget.value)] = d.cid   // openlist 路径串
+    if (pickerTarget.value === 'openlist_dest_path') {
+      model.value.openlist_dest_path = d.cid     // 落地点
+    } else {
+      fetchRows.value[Number(pickerTarget.value)] = d.cid   // 监控目录(一栏一项)
+    }
   } else if (pickerTarget.value === 'pipeline_root_dir') {
     model.value.pipeline_root_dir = d.cid
   } else {
@@ -402,10 +406,14 @@ async function saveChannels() {
 
       <div class="field">
         <label>落地点 <code>openlist_dest_path</code></label>
-        <input v-model="model.openlist_dest_path" placeholder="/项目测试" autocomplete="off">
+        <div style="display:flex;gap:8px">
+          <input v-model="model.openlist_dest_path" placeholder="/项目测试" autocomplete="off">
+          <button class="btn ghost" style="flex:none;padding:8px 12px" title="浏览 openlist 选择目录"
+            @click="openPicker('openlist_dest_path', 'openlist')">📂</button>
+        </div>
         <div class="hint">openlist 侧视图,对应本地 media/openlist;默认 /项目测试(项目自带映射)</div>
       </div>
-      <div class="grid2" style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div class="grid2">
         <div class="field">
           <label>并发上限 <code>openlist_max_tasks</code></label>
           <input v-model="model.openlist_max_tasks" type="number" min="1" max="5">
@@ -419,7 +427,6 @@ async function saveChannels() {
       <div class="actions">
         <button class="btn ghost" @click="fetchRows.push('')">+ 添加监控目录</button>
         <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
-        <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
       </div>
     </div>
 
@@ -429,7 +436,7 @@ async function saveChannels() {
         落地点里的新文件自动:探测(ffprobe)→ 识别(TMDB)→ 重命名 → 算 ed2k → 推卡 → 归档到上传源。
         识别不出的拦下留原地并通知,不会硬走
       </div>
-      <div class="grid2" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+      <div class="grid3">
         <div class="field">
           <label>扫描间隔(分钟)<code>process_interval_minutes</code></label>
           <input v-model="model.process_interval_minutes" type="number" min="1">
@@ -450,11 +457,10 @@ async function saveChannels() {
       <div class="chan-tip">
         💡 体积下限 + 静默年龄是守门:宁等一轮,也不处理还在写入的半截文件。
         清洗发生在重命名之前,只清三类:容器广告标签 / 垃圾章节 / 广告音轨字幕轨;
-        零重编码(-c copy),校验视频轨与时长后再同名替换,失败则原件不动。改完点「保存并重启」。
+        零重编码(-c copy),校验视频轨与时长后再同名替换,失败则原件不动。改完点顶部「保存并重启」。
       </div>
       <div class="actions">
         <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
-        <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
       </div>
     </div>
 
@@ -492,7 +498,7 @@ async function saveChannels() {
         </div>
         <div class="hint">留空则上传段不启动;两个目录都可在 CloudDrive 目录树里逐级选择回填</div>
       </div>
-      <div class="grid2" style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div class="grid2">
         <div class="field">
           <label>上传并发上限 <code>upload_max_tasks</code></label>
           <input v-model="model.upload_max_tasks" type="number" min="1" max="5">
@@ -505,7 +511,6 @@ async function saveChannels() {
       </div>
       <div class="actions">
         <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
-        <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
       </div>
     </div>
 
