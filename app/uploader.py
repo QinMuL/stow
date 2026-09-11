@@ -46,9 +46,14 @@ class Uploader:
                                     username=cfg.cd2_username, password=cfg.cd2_password)
         self._loop_task: asyncio.Task | None = None
         self._poll_task: asyncio.Task | None = None
-        self._lock = asyncio.Lock()      # 串行闸门 + 结算互斥
+        self._lock = asyncio.Lock()      # 并发闸门 + 结算互斥
+        self._progress: dict[str, float] = {}   # 文件名 → 百分比(最近一次任务查询)
 
     # ── 生命周期 ────────────────────────────────────────────
+    def progress_snapshot(self) -> dict[str, float]:
+        """在途上传的进度快照(name → 百分比),供总览页展示(读缓存,不触网)。"""
+        return dict(self._progress)
+
     def enabled(self) -> bool:
         cfg = self.bot.cfg
         return bool(self.client and cfg.cd2_source_path and cfg.cd2_dest_path)
@@ -209,6 +214,10 @@ class Uploader:
             logger.warning("上传段查询任务失败:%s", exc)
             return settled
         src_dir = self.bot.cfg.cd2_source_path.rstrip("/")
+        self._progress = {
+            t["source"].rsplit("/", 1)[-1]: float(t.get("progress") or 0)
+            for t in tasks if t.get("source")
+        }
         for row in rows:
             remote = f"{src_dir}/{row['name']}"
             task = next((t for t in tasks if t["source"].rstrip("/") == remote), None)

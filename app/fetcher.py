@@ -39,10 +39,15 @@ class ResourceFetcher:
             if cfg.openlist_base_url and cfg.openlist_token else None
         )
         self._loop_task: asyncio.Task | None = None
+        self._progress: dict[str, float] = {}   # 文件名 → 百分比(最近一次任务查询)
         self._poll_task: asyncio.Task | None = None
         self._poll_lock = asyncio.Lock()  # 结算串行(扫描与轮询两条路都会结算)
 
     # ── 生命周期 ────────────────────────────────────────────
+    def progress_snapshot(self) -> dict[str, float]:
+        """在途搬运的进度快照(name → 百分比),供总览页展示(不触网,读缓存)。"""
+        return dict(self._progress)
+
     def enabled(self) -> bool:
         cfg = self.bot.cfg
         return bool(self.client and cfg.openlist_monitor_list())
@@ -201,6 +206,15 @@ class ResourceFetcher:
         except OpenListError as exc:
             logger.warning("获取段查询任务状态失败:%s", exc)
             return settled
+
+        # 刷新进度快照(总览页展示用):move 任务没有源路径字段,用文件名包含匹配
+        snap: dict[str, float] = {}
+        for row in moving:
+            base = row["src_path"].rsplit("/", 1)[-1]
+            t = next((x for x in undone if base in str(x.get("name") or "")), None)
+            if t is not None:
+                snap[base] = round(float(t.get("progress") or 0), 1)
+        self._progress = snap
 
         undone_ids = {str(t.get("id")) for t in undone}
         done_by_id = {str(t.get("id")): t for t in done}

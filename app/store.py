@@ -287,5 +287,92 @@ class Store:
             "SELECT status, COUNT(*) FROM upload_tasks GROUP BY status").fetchall()
         return {s: n for s, n in rows}
 
+    # ── 总览聚合(三段链 + 趋势 + 待处理) ────────────────────
+    @staticmethod
+    def _today_start() -> float:
+        import datetime as _dt
+
+        return _dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+    def segment_stats(self) -> dict:
+        """三段今日/在途/失败统计(供总览页)。"""
+        t0 = self._today_start()
+
+        def count(sql: str, *args) -> int:
+            return int(self._conn.execute(sql, args).fetchone()[0] or 0)
+
+        fetch_done_today = count(
+            "SELECT COUNT(*) FROM fetch_state WHERE status='done' AND updated_at>=?", t0)
+        fetch_bytes_today = count(
+            "SELECT COALESCE(SUM(src_size),0) FROM fetch_state WHERE status='done' AND updated_at>=?",
+            t0)
+        upload_done_today = count(
+            "SELECT COUNT(*) FROM upload_tasks WHERE status='done' AND updated_at>=?", t0)
+        process_done_today = count(
+            "SELECT COUNT(*) FROM local_files WHERE status='processed' AND updated_at>=?", t0)
+        # 最后活动时间(每段取全表最大 updated_at,不限于今日——用于判断"是否卡死")
+        def last(tbl: str) -> float:
+            return float(self._conn.execute(
+                f"SELECT COALESCE(MAX(updated_at),0) FROM {tbl}").fetchone()[0] or 0)
+
+        return {
+            "fetch": {"inflight": len(self.list_fetch("moving")), "today": fetch_done_today,
+                      "failed": count("SELECT COUNT(*) FROM fetch_state WHERE status='failed'"),
+                      "bytes_today": fetch_bytes_today, "last_activity": last("fetch_state")},
+            "process": {"today": process_done_today,
+                        "manual": count("SELECT COUNT(*) FROM local_files WHERE status!='processed'"),
+                        "last_activity": last("local_files")},
+            "upload": {"inflight": len(self.list_uploads("uploading")), "today": upload_done_today,
+                       "failed": count("SELECT COUNT(*) FROM upload_tasks WHERE status='failed'"),
+                       "last_activity": last("upload_tasks")},
+        }
+
+    def daily_series(self, days: int = 7) -> dict:
+        """近 N 日按天聚合:推卡条数 + 搬运字节(趋势图用)。"""
+        import datetime as _dt
+
+        today = _dt.date.today()
+        labels = [(today - _dt.timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
+        pushed = dict(self._conn.execute(
+            "SELECT date(pushed_at,'unixepoch','localtime') d, COUNT(*) FROM pushed"
+            " WHERE pushed_at >= ? GROUP BY d", (self._today_start() - (days - 1) * 86400,)).fetchall())
+        moved = dict(self._conn.execute(
+            "SELECT date(updated_at,'unixepoch','localtime') d, COALESCE(SUM(src_size),0)"
+            " FROM fetch_state WHERE status='done' AND updated_at >= ? GROUP BY d",
+            (self._today_start() - (days - 1) * 86400,)).fetchall())
+        return {
+            "labels": labels,
+            "pushed": [int(pushed.get(d, 0) or 0) for d in labels],
+            "moved_gb": [round(int(moved.get(d, 0) or 0) / 1024 ** 3, 2) for d in labels],
+        }
+
+    def attention_items(self, limit: int = 8) -> list[dict]:
+        """待人工处理:未识别 / 失败 / 超时(带原因与可跳日志的查询词)。"""
+        out: list[dict] = []
+        for r in self._conn.execute(
+                "SELECT name, status, error, updated_at FROM local_files"
+                " WHERE status != 'processed' ORDER BY updated_at DESC LIMIT ?", (limit,)):
+            kind = "未识别" if r[1] == "unrecognized" else "处理失败"
+            out.append({"kind": kind, "text": r[0], "reason": r[2] or "", "at": r[3]})
+        for r in self._conn.execute(
+                "SELECT src_path, error, updated_at FROM fetch_state"
+                " WHERE status='failed' ORDER BY updated_at DESC LIMIT ?", (limit,)):
+            out.append({"kind": "获取失败", "text": r[0].rsplit("/", 1)[-1], "reason": r[1] or "",
+                        "at": r[2]})
+        for r in self._conn.execute(
+                "SELECT name, error, updated_at FROM upload_tasks"
+                " WHERE status='failed' ORDER BY updated_at DESC LIMIT ?", (limit,)):
+            out.append({"kind": "上传失败", "text": r[0], "reason": r[1] or "", "at": r[2]})
+        # pipeline_tasks 没有 error 列(只有 attempts),原因是固定文案
+        for r in self._conn.execute(
+                "SELECT name, status, attempts, created_at FROM pipeline_tasks"
+                " WHERE status IN ('timeout','violated') ORDER BY created_at DESC LIMIT ?", (limit,)):
+            kind = "流水线超时" if r[1] == "timeout" else "流水线违规"
+            out.append({"kind": kind, "text": r[0],
+                        "reason": f"等待 {r[2]} 轮未通过" if r[1] == "timeout" else "审核未通过/违规",
+                        "at": r[3]})
+        out.sort(key=lambda x: x["at"] or 0, reverse=True)
+        return out[:limit]
+
     def close(self) -> None:
         self._conn.close()

@@ -111,6 +111,9 @@ class StowBot:
             from app.webapp import STATE
 
             STATE["monitor"] = self.monitor
+            STATE["fetcher"] = self.fetcher
+            STATE["processor"] = self.processor
+            STATE["uploader"] = self.uploader
             STATE["bot_loop"] = asyncio.get_running_loop()
 
         builder = (

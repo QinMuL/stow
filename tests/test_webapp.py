@@ -535,3 +535,49 @@ def test_integer_keys_have_sane_defaults(tmp_path):
     token = _login(client)
     d = client.get("/api/config", headers=_h(token)).json()
     assert d["openlist_max_tasks"] == 2 and d["fetch_interval_minutes"] == 5
+
+
+# ── 总览聚合端点 ────────────────────────────────────────────
+def test_pipeline_endpoint_shape(tmp_path):
+    """总览主数据:三段 + 数字 + 趋势 + 待处理 + 最近,字段齐全。"""
+    client = _client(tmp_path)
+    token = _login(client)
+    d = client.get("/api/pipeline", headers=_h(token)).json()
+    assert [s["key"] for s in d["segments"]] == ["fetch", "process", "upload"]
+    for s in d["segments"]:
+        assert {"name", "from", "to", "items", "today", "last_activity"} <= set(s)
+    assert set(d["numbers"]) == {"pushed_today", "moved_gb_today", "uploaded_today", "disk"}
+    assert len(d["trend"]["labels"]) == 7 and len(d["trend"]["pushed"]) == 7
+    assert isinstance(d["attention"], list) and isinstance(d["recent"], list)
+    # 未配置 CD2 时上传段标记为未启用
+    assert d["segments"][2]["enabled"] is False
+
+
+def test_pipeline_attention_lists_failures(tmp_path):
+    from app.store import Store
+
+    import json as _json
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path)}), encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    s = Store(tmp_path / "stow.db")
+    s.save_local_file(name="某片.mkv", size=1, status="unrecognized", error="TMDB 未命中")
+    s.close()
+    items = client.get("/api/pipeline", headers=_h(token)).json()["attention"]
+    assert items and items[0]["kind"] == "未识别" and "TMDB 未命中" in items[0]["reason"]
+
+
+def test_pipeline_run_rejects_unknown_segment(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    r = client.post("/api/pipeline/run", json={"segment": "bogus"}, headers=_h(token))
+    assert r.status_code == 400
+
+
+def test_pipeline_run_requires_bot(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    r = client.post("/api/pipeline/run", json={"segment": "fetch"}, headers=_h(token))
+    assert r.status_code == 503

@@ -126,6 +126,10 @@ class ChannelsUpdate(BaseModel):
     channels: list[ChannelItem]
 
 
+class PipelineRun(BaseModel):
+    segment: str = ""   # fetch | process | upload
+
+
 class MonitorPhone(BaseModel):
     phone: str = ""
     resend: bool = False  # 显式要求重发验证码(默认复用进行中的会话,不重复发码)
@@ -408,6 +412,139 @@ def create_app(config_path: str | Path) -> FastAPI:
             for it in items if it.get("is_dir")
         ]
         return {"path": target, "items": dirs}
+
+    # ── 总览:三段链聚合 + 趋势 + 待处理 + 就地触发 ──────────
+    def _dir_usage(path: Path) -> tuple[int, int]:
+        """目录 (文件数, 总字节);不存在返回 (0,0)。小目录直接遍历。"""
+        files = total = 0
+        try:
+            with os.scandir(path) as it:
+                for e in it:
+                    if e.is_file(follow_symlinks=False):
+                        files += 1
+                        total += e.stat(follow_symlinks=False).st_size
+        except OSError:
+            pass
+        return files, total
+
+    _disk_cache: dict = {"at": 0.0, "data": {}}
+
+    def _disk_info(cfg) -> dict:
+        """media 两目录占用 + 所在盘剩余(60s 缓存,避免每次刷新都遍历)。"""
+        now = time.monotonic()
+        if now - _disk_cache["at"] < 60 and _disk_cache["data"]:
+            return _disk_cache["data"]
+        used = 0
+        counts = {}
+        for name, d in (("openlist", cfg.openlist_dir), ("clouddrive", cfg.clouddrive_dir)):
+            n, size = _dir_usage(d)
+            counts[name] = n
+            used += size
+        try:
+            import shutil
+
+            du = shutil.disk_usage(str(cfg.openlist_dir))   # 跨平台(Win 无 statvfs)
+            free, total = du.free, du.total
+        except (OSError, FileNotFoundError):
+            free = total = 0
+        data = {
+            "used_bytes": used, "files": counts,
+            "free_bytes": free, "total_bytes": total,
+            "used_percent": round((total - free) / total * 100, 1) if total else 0.0,
+        }
+        _disk_cache.update({"at": now, "data": data})
+        return data
+
+    def _segment_payload(cfg, store: Store) -> dict:
+        """三段链:今日/在途/失败/最后活动 + 在途明细(带进度)。"""
+        stats = store.segment_stats()
+        from app.webapp import STATE  # 同进程,取运行中的三段实例(只读内存字段)
+
+        fetcher, uploader = STATE.get("fetcher"), STATE.get("uploader")
+
+        fetch_items = []
+        prog = fetcher.progress_snapshot() if fetcher is not None else {}
+        for row in store.list_fetch("moving"):
+            base = row["src_path"].rsplit("/", 1)[-1]
+            fetch_items.append({"name": base, "progress": prog.get(base, 0.0),
+                                "size": row["src_size"], "note": "搬运中"})
+
+        queue_files, queue_bytes = _dir_usage(cfg.openlist_dir)
+        process_items = []
+        for p in sorted(Path(cfg.openlist_dir).glob("*")):
+            if p.is_file():
+                process_items.append({"name": p.name, "size": p.stat().st_size, "progress": 0.0,
+                                      "note": "排队中"})
+
+        upload_items = []
+        uprog = uploader.progress_snapshot() if uploader is not None else {}
+        for row in store.list_uploads("uploading"):
+            upload_items.append({"name": row["name"], "size": row["size"],
+                                 "progress": uprog.get(row["name"], 0.0), "note": "上传中"})
+
+        def seg(key: str, name: str, src: str, dst: str, items: list[dict], extra: dict) -> dict:
+            s = stats[key]
+            d = {"key": key, "name": name, "from": src, "to": dst, "items": items,
+                 "last_activity": s.get("last_activity", 0), **extra}
+            return d
+
+        return {
+            "segments": [
+                seg("fetch", "获取", "、".join(cfg.openlist_monitor_list()) or "(未配置监控目录)",
+                    cfg.openlist_dest_path or "/项目测试", fetch_items,
+                    {"inflight": stats["fetch"]["inflight"], "limit": cfg.openlist_max_tasks,
+                     "today": stats["fetch"]["today"], "failed": stats["fetch"]["failed"]}),
+                seg("process", "处理", str(cfg.openlist_dir), str(cfg.clouddrive_dir),
+                    process_items,
+                    {"queued": len(process_items), "queued_bytes": queue_bytes,
+                     "today": stats["process"]["today"], "manual": stats["process"]["manual"]}),
+                seg("upload", "上传", cfg.cd2_source_path or "(未配置上传源)",
+                    cfg.cd2_dest_path or "(未配置上传目标)", upload_items,
+                    {"inflight": stats["upload"]["inflight"], "limit": cfg.upload_max_tasks,
+                     "today": stats["upload"]["today"], "failed": stats["upload"]["failed"],
+                     "enabled": bool(cfg.cd2_dest_path)}),
+            ],
+            "numbers": {
+                "pushed_today": store.stats()["today"],
+                "moved_gb_today": round(stats["fetch"]["bytes_today"] / 1024 ** 3, 2),
+                "uploaded_today": stats["upload"]["today"],
+                "disk": _disk_info(cfg),
+            },
+            "trend": store.daily_series(7),
+            "attention": store.attention_items(),
+            "recent": store.recent(5),
+        }
+
+    @app.get("/api/pipeline")
+    def pipeline(request: Request) -> dict:
+        """总览页主数据:三段链 + 关键数字 + 7 日趋势 + 待处理 + 最近推送。"""
+        _current_user(config_path, _auth_header(request))
+        cfg = load_config(config_path)
+        store = Store(cfg.db_path)
+        try:
+            return _segment_payload(cfg, store)
+        finally:
+            store.close()
+
+    @app.post("/api/pipeline/run")
+    def pipeline_run(body: PipelineRun, request: Request) -> dict:
+        """就地触发某一段(= Bot 的 /fetch /process /upload),在 Bot 事件循环里跑。"""
+        _current_user(config_path, _auth_header(request))
+        seg = (body.segment or "").strip()
+        target = {"fetch": "fetcher", "process": "processor", "upload": "uploader"}.get(seg)
+        if target is None:
+            raise HTTPException(status_code=400, detail="未知的段(限 fetch/process/upload)")
+        obj = STATE.get(target)
+        if obj is None:
+            raise HTTPException(status_code=503, detail="Bot 未运行或该段未装配")
+        loop = STATE.get("bot_loop")
+        if loop is None:
+            raise HTTPException(status_code=503, detail="Bot 事件循环未就绪")
+        fut = asyncio.run_coroutine_threadsafe(obj.scan_now(), loop)
+        try:
+            return {"success": True, "segment": seg, "message": fut.result(timeout=180)}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"执行失败:{str(exc)[:120]}") from exc
 
     # ── CD2 目录浏览(上传目标目录的选择器数据源) ────────────
     @app.get("/api/cd2/dirs")

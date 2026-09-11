@@ -1,7 +1,9 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { api } from '../api'
 
+const route = useRoute()
 const files = ref([])
 const current = ref('stow.log')
 const level = ref('INFO') // 默认 INFO+,DEBUG 噪音需手动放开
@@ -52,7 +54,11 @@ function cls(l) {
   return l === 'DEBUG' ? 'lv-debug' : 'lv-info'
 }
 
-onMounted(() => { load(); schedule() })
+onMounted(() => {
+  if (route.query.q) q.value = String(route.query.q)   // 总览「去日志」带关键字跳转
+  load()
+  schedule()
+})
 onBeforeUnmount(() => clearInterval(timer))
 </script>
 
