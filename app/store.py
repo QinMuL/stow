@@ -4,6 +4,7 @@
 - monitor_state(源频道 → 已处理到的消息 ID):首次接入只记起点、不回补历史,此后重启按游标补扫
 - pipeline_tasks(流水线任务):审核中的任务落库,重启后继续轮询,不再重复建分享
 - fetch_state(获取段):openlist 侧每个源条目的搬运动作与任务 id,防重复提交、支撑重启续跑
+- local_files(处理段):本地文件的处理结果(重命名/ed2k/状态),防重复处理
 """
 
 from __future__ import annotations
@@ -34,6 +35,11 @@ class Store:
             "CREATE TABLE IF NOT EXISTS pipeline_tasks ("
             " share_code TEXT PRIMARY KEY, receive_code TEXT, fid INTEGER, name TEXT,"
             " uid INTEGER, status TEXT, created_at REAL, attempts INTEGER)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS local_files ("
+            " name TEXT PRIMARY KEY, size INTEGER, status TEXT, ed2k TEXT,"
+            " tmdb_id INTEGER, error TEXT, updated_at REAL)"
         )
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS fetch_state ("
@@ -194,6 +200,46 @@ class Store:
     def fetch_stats(self) -> dict:
         rows = self._conn.execute(
             "SELECT status, COUNT(*) FROM fetch_state GROUP BY status").fetchall()
+        return {s: n for s, n in rows}
+
+    # ── 处理段状态(本地文件) ────────────────────────────────
+    def save_local_file(self, *, name: str, size: int, status: str, ed2k: str = "",
+                        tmdb_id: int | None = None, error: str = "") -> None:
+        self._conn.execute(
+            "INSERT INTO local_files(name, size, status, ed2k, tmdb_id, error, updated_at)"
+            " VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET size=excluded.size,"
+            " status=excluded.status, ed2k=excluded.ed2k, tmdb_id=excluded.tmdb_id,"
+            " error=excluded.error, updated_at=excluded.updated_at",
+            (name, int(size or 0), status, ed2k, tmdb_id, error, time.time()),
+        )
+        self._conn.commit()
+
+    def get_local_file(self, name: str, size: int | None = None) -> dict | None:
+        """按文件名取记录;size 给了且不一致 → 视为新文件(同名不同版本)。"""
+        row = self._conn.execute(
+            "SELECT name, size, status, ed2k, tmdb_id, error, updated_at"
+            " FROM local_files WHERE name = ?", (name,)).fetchone()
+        if row is None:
+            return None
+        out = dict(zip(("name", "size", "status", "ed2k", "tmdb_id", "error",
+                        "updated_at"), row, strict=False))
+        if size is not None and int(size) != int(out["size"] or 0):
+            return None
+        return out
+
+    def list_local_files(self, status: str | None = None) -> list[dict]:
+        sql = ("SELECT name, size, status, ed2k, tmdb_id, error, updated_at FROM local_files")
+        args: tuple = ()
+        if status:
+            sql += " WHERE status = ?"
+            args = (status,)
+        rows = self._conn.execute(sql + " ORDER BY updated_at", args).fetchall()
+        return [dict(zip(("name", "size", "status", "ed2k", "tmdb_id", "error",
+                          "updated_at"), r, strict=False)) for r in rows]
+
+    def local_file_stats(self) -> dict:
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) FROM local_files GROUP BY status").fetchall()
         return {s: n for s, n in rows}
 
     def close(self) -> None:

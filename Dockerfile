@@ -9,6 +9,9 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 COPY requirements.txt .
+# 处理段需要 ffprobe/ffmpeg(探测 + 将来清洗重封装)
+RUN apt-get update \n && apt-get install -y --no-install-recommends ffmpeg \n && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/

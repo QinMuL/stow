@@ -136,6 +136,9 @@ onMounted(async () => {
   m.openlist_dest_path = cfg.value.openlist_dest_path || '/项目测试'
   m.openlist_max_tasks = cfg.value.openlist_max_tasks || 2
   m.fetch_interval_minutes = cfg.value.fetch_interval_minutes || 5
+  m.process_interval_minutes = cfg.value.process_interval_minutes || 5
+  m.min_size_mb = cfg.value.min_size_mb ?? 50
+  m.min_age_seconds = cfg.value.min_age_seconds ?? 60
   model.value = m
   monitorRows.value = String(cfg.value.monitor_dirs || '')
     .split(',').map(x => x.trim()).filter(Boolean)
@@ -172,6 +175,9 @@ function formValues() {
   values.openlist_dest_path = model.value.openlist_dest_path
   values.openlist_max_tasks = model.value.openlist_max_tasks
   values.fetch_interval_minutes = model.value.fetch_interval_minutes
+  values.process_interval_minutes = model.value.process_interval_minutes
+  values.min_size_mb = model.value.min_size_mb
+  values.min_age_seconds = model.value.min_age_seconds
   return values
 }
 
@@ -396,6 +402,35 @@ async function saveChannels() {
 
       <div class="actions">
         <button class="btn ghost" @click="fetchRows.push('')">+ 添加监控目录</button>
+        <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
+        <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>处理链</h3>
+      <div class="desc">
+        落地点里的新文件自动:探测(ffprobe)→ 识别(TMDB)→ 重命名 → 算 ed2k → 推卡 → 归档到上传源。
+        识别不出的拦下留原地并通知,不会硬走
+      </div>
+      <div class="grid2" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+        <div class="field">
+          <label>扫描间隔(分钟)<code>process_interval_minutes</code></label>
+          <input v-model="model.process_interval_minutes" type="number" min="1">
+        </div>
+        <div class="field">
+          <label>体积下限(MB)<code>min_size_mb</code></label>
+          <input v-model="model.min_size_mb" type="number" min="0">
+        </div>
+        <div class="field">
+          <label>静默年龄(秒)<code>min_age_seconds</code></label>
+          <input v-model="model.min_age_seconds" type="number" min="0">
+        </div>
+      </div>
+      <div class="chan-tip">
+        💡 体积下限 + 静默年龄是守门:宁等一轮,也不处理还在写入的半截文件。改完点「保存并重启」。
+      </div>
+      <div class="actions">
         <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
         <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
       </div>

@@ -36,6 +36,7 @@ from app.pan115 import (
     ShareSnapshotting,
 )
 from app.pipeline import SavePipeline
+from app.processor import ProcessChain
 from app.saver import Pan115Saver
 from app.store import Store
 from app.tmdb import TmdbClient, image_url
@@ -86,6 +87,7 @@ class StowBot:
         self.pipeline = SavePipeline(self)
         self.monitor = ChannelMonitor(self)  # TG 频道监控(ed2k → 卡片 → ed2k 频道)
         self.fetcher = ResourceFetcher(self)  # 获取段:openlist 监控 → 移动到本地
+        self.processor = ProcessChain(self)   # 处理段:探测/重命名/ed2k/推卡 → clouddrive
         self._push_lock = asyncio.Lock()  # 投递串行,防 flood
         self._pending_channels: dict[str, str] = {}  # 登记选择中:chat_id → 标题(回调取)
         self._bind_wait: dict[int, float] = {}  # /bind 等待期:uid → 截止时间戳
@@ -101,6 +103,7 @@ class StowBot:
             self.pipeline.start_loop()  # /save 流水线审核轮询
             self.monitor.start()        # TG 频道监控(源频道 → ed2k 卡片)
             self.fetcher.start()        # 获取段:openlist 监控目录 → 移动到 media/openlist
+            self.processor.start()      # 处理段:media/openlist → 探测/ed2k/推卡 → clouddrive
             # Web 登录端点需在 Bot 事件循环里驱动 Telethon 客户端(Web 跑在另一线程)
             from app.webapp import STATE
 
@@ -126,6 +129,7 @@ class StowBot:
         app.add_handler(CommandHandler("save", self._cmd_save))
         app.add_handler(CommandHandler("scan", self._cmd_scan))
         app.add_handler(CommandHandler("fetch", self._cmd_fetch))
+        app.add_handler(CommandHandler("process", self._cmd_process))
         app.add_handler(CommandHandler("bind", self._cmd_bind))
         app.add_handler(CommandHandler("bindcancel", self._cmd_bindcancel))
         app.add_handler(CallbackQueryHandler(self._on_channel_preset))
@@ -311,6 +315,20 @@ class StowBot:
         except Exception as exc:  # noqa: BLE001
             logger.error("手动获取扫描失败:%s", exc, exc_info=exc)
             await status.edit_text(f"❌ 扫描失败:{str(exc)[:120]}")
+            return
+        await status.edit_text(report)
+
+    async def _cmd_process(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/process:立即跑一轮处理(探测→重命名→ed2k→推卡→归档)。"""
+        if not self._is_admin(update):
+            await update.effective_message.reply_text("⛔ 仅管理员可用")
+            return
+        status = await update.effective_message.reply_text("📦 正在处理落地点里的文件…")
+        try:
+            report = await self.processor.scan_now()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("手动处理失败:%s", exc, exc_info=exc)
+            await status.edit_text(f"❌ 处理失败:{str(exc)[:120]}")
             return
         await status.edit_text(report)
 

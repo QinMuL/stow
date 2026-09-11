@@ -141,7 +141,8 @@ class MonitorPassword(BaseModel):
 
 # 整数键的默认值:缺失时不能回 0 —— 表单会把 0 显示出来再存回去(踩过)
 _INT_DEFAULTS = {"web_port": DEFAULT_WEB_PORT, "openlist_max_tasks": 2,
-                 "fetch_interval_minutes": 5}
+                 "fetch_interval_minutes": 5, "process_interval_minutes": 5,
+                 "min_size_mb": 50, "min_age_seconds": 60}
 
 # 可经 Web 修改的配置键白名单(类型: s=字符串, i=整数, ids=ID 列表)
 EDITABLE = {
@@ -153,6 +154,7 @@ EDITABLE = {
     "openlist_base_url": "s", "openlist_token": "s", "openlist_path": "s",
     "openlist_monitor_dirs": "s", "openlist_dest_path": "s",
     "openlist_max_tasks": "i", "fetch_interval_minutes": "i",
+    "process_interval_minutes": "i", "min_size_mb": "i", "min_age_seconds": "i",
     "cd2_address": "s", "cd2_token": "s", "cd2_source_path": "s",
 }
 

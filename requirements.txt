@@ -9,3 +9,5 @@ guessit>=3.8
 # 容器内代理不通会表现为"连不上 TG"而看不出真因。
 telethon>=1.36,<2
 python-socks>=2,<3
+# 处理段:ed2k 哈希需要 MD4 的 C 实现(纯 Python 对 GB 级文件不可用)
+pycryptodome>=3.20,<4
