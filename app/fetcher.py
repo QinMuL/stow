@@ -162,10 +162,12 @@ class ResourceFetcher:
                     return False                   # 重试超限:交人工
                 if time.time() - float(row["updated_at"] or 0) < RETRY_BACKOFF_SECONDS:
                     return False                   # 退避中:本轮不重试
-        # 本地已存在同名同大小 → 说明已经搬进来了(人工搬过、或重启前搬完),直接记账完成
+        # 本地已存在 → 说明已经搬进来了(人工搬过、或重启前搬完),直接记账完成。
+        # 目录不做大小比对:openlist 报目录 size=0,而本地目录 st_size 随文件系统变
+        # (drvfs 512 / ext4 4096),比了必然失配 → 反复提交
         local = self.bot.cfg.openlist_dir / name
         try:
-            if local.exists() and local.stat().st_size == size:
+            if local.exists() and (local.is_dir() or local.stat().st_size == size):
                 self._save(src, size=size, status="done", error="", task_id="")
                 logger.info("获取段跳过(本地已存在同大小):%s", src)
                 return False
@@ -241,11 +243,17 @@ class ResourceFetcher:
         return settled
 
     def _landed(self, row: dict) -> bool:
-        """目标文件是否已在落地点且大小相符(完成判定的兜底校验)。"""
+        """目标是否已在落地点(完成判定的兜底)。
+
+        目录只判存在:openlist 报目录 size=0,本地目录 st_size 因文件系统而异
+        (drvfs 512 / ext4 4096),按 size 比会对不上。
+        """
         name = row["src_path"].rsplit("/", 1)[-1]
         local = self.bot.cfg.openlist_dir / name
         try:
-            return local.exists() and local.stat().st_size == int(row["src_size"] or 0)
+            if not local.exists():
+                return False
+            return local.is_dir() or local.stat().st_size == int(row["src_size"] or 0)
         except OSError:
             return False
 

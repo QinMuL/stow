@@ -1,6 +1,8 @@
 """处理段:media/openlist 里的新文件 → 探测 → 重命名 → ed2k → 推卡 → 移入 clouddrive。
 
 链路(用户设计:获取段自动、处理段也自动):
+  ⓪ 展开:落地点里的**目录会被递归展开**——目录里每个视频各自独立走整条链
+     (用户 2026-09-11 定:季包/合集丢进来就自动逐集处理;归档到上传源时**打平**不保留层级)
   ① 守门:体积下限 + mtime 年龄(避免处理还在写入的半截文件)
   ② 探测(ffprobe)取画质标签——分辨率/编码/音频以**探测为准**,不信原始文件名
   ③ 清洗(ffmpeg remux,**只在探测到广告类脏数据时做**,干净文件一个字节都不动):
@@ -69,16 +71,30 @@ class ProcessChain:
         if not src.is_dir():
             return f"处理段:落地点不存在({src})"
         counts: dict[str, int] = {}
-        for entry in sorted(src.iterdir()):
-            if not entry.is_file():
-                continue
-            outcome = await self._handle(entry)
+        targets = [p for p in sorted(src.rglob("*")) if p.is_file()]
+        for path in targets:
+            outcome = await self._handle(path)
             counts[outcome] = counts.get(outcome, 0) + 1
+        pruned = self._prune_empty_dirs(src)
         total = sum(counts.values())
         if not total:
-            return "📦 处理段:落地点没有可处理的文件"
+            return "📦 处理段:落地点没有可处理的文件" + (f"(清理空目录 {pruned} 个)" if pruned else "")
         parts = [f"{k} {v}" for k, v in counts.items() if v]
-        return "📦 处理段:" + "、".join(parts) + f"（共 {total} 个文件）"
+        tail = f"（共 {total} 个文件" + (f";清理空目录 {pruned} 个)" if pruned else "）")
+        return "📦 处理段:" + "、".join(parts) + tail
+
+    def _prune_empty_dirs(self, root: Path) -> int:
+        """清掉展开后留下的空目录(自底向上,不碰根)。"""
+        removed = 0
+        for d in sorted((p for p in root.rglob("*") if p.is_dir()),
+                        key=lambda p: len(p.parts), reverse=True):
+            try:
+                if not any(d.iterdir()):
+                    d.rmdir()
+                    removed += 1
+            except OSError as exc:  # noqa: PERF203
+                logger.debug("清空目录失败(%s):%s", d, exc)
+        return removed
 
     async def _handle(self, path: Path) -> str:
         """单个文件:守门 → 探测 → 识别 → 重命名 → 哈希 → 推卡 → 归档。"""
@@ -196,7 +212,8 @@ class ProcessChain:
         """视频 + 字幕/图片伴行一起移入 clouddrive(CD2 上传源)。
 
         伴行按 **stem 前缀**匹配(而非全等):`...S01E12.zh.srt`、`...-poster.jpg` 这类
-        都带后缀标记,按新名全等匹配会漏(视频改名后 stem 已变)。
+        都带后缀标记,按新名全等匹配会漏(视频改名后 stem 已变);
+        命中后**随视频新名同步改名**(`<新stem>.zh.srt`),否则播放器/Emby 认不出这对字幕。
         """
         dest_dir = Path(self.bot.cfg.clouddrive_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -207,10 +224,13 @@ class ProcessChain:
         for side in siblings:
             if not side.is_file() or side.suffix.lower() not in SIDECAR_EXTS:
                 continue
-            if not side.stem.startswith(prefixes):
+            matched = next((x for x in prefixes if side.name.startswith(x)), None)
+            if matched is None:
                 continue
-            shutil.move(str(side), str(dest_dir / side.name))
-            logger.info("处理段伴行文件一并归档:%s", side.name)
+            extra = side.name[len(matched):]           # 如 ".zh.srt" / ".srt"
+            new_name = f"{path.stem}{extra}"           # 跟随视频新名
+            shutil.move(str(side), str(dest_dir / new_name))
+            logger.info("处理段伴行文件一并归档:%s → %s", side.name, new_name)
         return dest
 
     def _record(self, path: Path, *, status: str, error: str = "",

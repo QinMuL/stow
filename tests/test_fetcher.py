@@ -497,3 +497,22 @@ def test_upload_settle_chains_next_submit(tmp_path):
     assert settled["done"] == 1
     assert len(asyncio.run(up._submit_ready())) == 1  # poll_loop 里就跟着做这一步
     assert len(client.moves) == 2
+
+
+# ── 目录类记录:不做 size 比对(实测 drvfs 512 / ext4 4096 / openlist 报 0) ──
+def test_folder_landed_by_existence_not_size(tmp_path):
+    f, bot, _ = _fetcher(tmp_path, files=[{"name": "某季", "size": 0, "is_dir": True}])
+    row = {"src_path": f"{_MON}/某季", "src_size": 0, "name": "某季"}
+    assert f._landed(row) is False                       # 还没落地
+    d = bot.cfg.openlist_dir / "某季"
+    d.mkdir(parents=True)
+    assert f._landed(row) is True                        # 目录存在即算落地(512≠0 也认)
+
+
+def test_folder_already_local_is_skipped(tmp_path):
+    """本地已有同名目录 → 不再重复提交(否则会反复搬)。"""
+    f, bot, _ = _fetcher(tmp_path, files=[{"name": "某季", "size": 0, "is_dir": True}])
+    (bot.cfg.openlist_dir / "某季").mkdir(parents=True)
+    asyncio.run(f.scan_now())
+    assert bot.store.get_fetch(f"{_MON}/某季")["status"] == "done"
+    assert f.client.moves == []

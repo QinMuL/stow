@@ -275,7 +275,8 @@ def test_chain_moves_sidecar_files_together(tmp_path, monkeypatch):
     (bot.cfg.openlist_dir / "banner.jpg").write_bytes(b"jpg")
     asyncio.run(chain.scan_now())
     names = {p.name for p in Path(bot.cfg.clouddrive_dir).iterdir()}
-    assert "飞到我心上.2026.WEB-DL.S01E12.zh.srt" in names      # 同 stem 字幕跟着走
+    vid = next(n for n in names if n.endswith(".mkv"))
+    assert f"{vid[:-len('.mkv')]}.zh.srt" in names              # 字幕跟着视频走并同步改名
     assert "banner.jpg" not in names                            # 无关图片不动
 
 
@@ -492,3 +493,60 @@ def test_clean_disabled_by_config(tmp_path, monkeypatch):
     monkeypatch.setattr(processor_mod, "clean_file", spy)
     asyncio.run(chain.scan_now())
     assert called == [] and bot.pushed
+
+
+# ── 目录展开(季包/合集丢进来 → 逐文件处理;归档打平) ─────────
+def test_folder_is_expanded_and_flattened(tmp_path, monkeypatch):
+    """目录里多个视频 → 每个各自处理;归档到 clouddrive 打平;空目录清掉。"""
+    chain, bot, placeholder = _chain(tmp_path, name="占位.mkv", monkeypatch=monkeypatch)
+    placeholder.unlink()                                 # 去掉助手自带的占位文件,只留待测目录
+    box = bot.cfg.openlist_dir / "某剧 第一季"
+    (box / "季目录").mkdir(parents=True)
+    names = ["某剧.S01E01.1080p.WEB-DL.mkv", "某剧.S01E02.1080p.WEB-DL.mkv"]
+    for i, n in enumerate(names):
+        target = (box if i == 0 else box / "季目录") / n
+        target.write_bytes(b"A" * 2000)
+        os.utime(target, (time.time() - 3600, time.time() - 3600))
+    (box / "某剧.S01E01.1080p.WEB-DL.zh.srt").write_text("sub", encoding="utf-8")
+
+    report = asyncio.run(chain.scan_now())
+    assert "processed 2" in report                       # 两个视频都被展开处理
+    assert "清理空目录" in report                          # 空目录被清
+    archived = {p.name for p in Path(bot.cfg.clouddrive_dir).iterdir()}
+    vids = {n for n in archived if n.endswith(".mkv")}
+    assert len(vids) == 2 and all(".S01E0" in n for n in vids)   # 打平:同级存放
+    assert "飞到我心上.2026.S01E01.第01集.1080p.WEB-DL.H.264.AAC {tmdb-123456}.zh.srt" in archived
+    assert not box.exists() or not any(box.iterdir())     # 目录已清空/移除
+
+
+def test_folder_sidecar_follows_its_video(tmp_path, monkeypatch):
+    """目录里的同名字幕跟着它那一集走(视频没有字幕时留原地)。"""
+    chain, bot, placeholder = _chain(tmp_path, name="占位.mkv", monkeypatch=monkeypatch)
+    placeholder.unlink()
+    box = bot.cfg.openlist_dir / "合集"
+    box.mkdir()
+    name = "某剧.S01E03.1080p.WEB-DL.mkv"
+    v = box / name
+    v.write_bytes(b"A" * 2000)
+    os.utime(v, (time.time() - 3600, time.time() - 3600))
+    (box / "某剧.S01E03.1080p.WEB-DL.zh.srt").write_text("sub", encoding="utf-8")
+    asyncio.run(chain.scan_now())
+    names = {p.name for p in Path(bot.cfg.clouddrive_dir).iterdir()}
+    vid = next(n for n in names if n.endswith(".mkv"))
+    # 字幕不仅跟着走,还要改名与视频同步(否则 Emby 认不出这对字幕)
+    assert f"{vid[:-len('.mkv')]}.zh.srt" in names
+
+
+def test_nested_non_video_files_are_ignored(tmp_path, monkeypatch):
+    """目录里的非视频文件不处理、也不阻塞视频。"""
+    chain, bot, placeholder = _chain(tmp_path, name="占位.mkv", monkeypatch=monkeypatch)
+    placeholder.unlink()
+    box = bot.cfg.openlist_dir / "混装"
+    box.mkdir()
+    for fn, data in (("readme.txt", b"x"), ("cover.jpg", b"jpg")):
+        (box / fn).write_bytes(data)
+    v = box / "某剧.S01E04.1080p.WEB-DL.mkv"
+    v.write_bytes(b"A" * 2000)
+    os.utime(v, (time.time() - 3600, time.time() - 3600))
+    asyncio.run(chain.scan_now())
+    assert any(p.suffix == ".mkv" for p in Path(bot.cfg.clouddrive_dir).iterdir())
