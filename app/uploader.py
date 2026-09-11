@@ -2,9 +2,11 @@
 
 链路(用户 2026-09-11 定的语义):
   ① 扫 `media/clouddrive` 里的文件
-  ② `MoveFile(["/clouddrive/<文件>"], "<cd2_dest_path>")` —— **移动而非复制**:
-     跨云(本地 → 115)由 CD2 内部完成下载+上传,**本地源随移动消失**(不必再删源),
-     且 115 侧命中秒传时秒级完成
+  ② `MoveFile(["/clouddrive/<文件>"], "<cd2_dest_path>")`(按用户要求走移动操作),
+     115 侧命中秒传则秒级完成
+  ②' **实测补充(2026-09-11)**:CD2 的跨云 MoveFile **实际按复制执行**(任务 taskMode=0=Copy),
+     本地源不会消失 → 因此在"内容确认完成"后**补一次 DeleteFile(源)**;
+     将来 CD2 若真删源,这里的补删会因为文件已不存在而空转(幂等)
   ③ 串行:同一时刻只跟一个上传任务(旧项目"每轮至多提交一个";避免同时多路占带宽/触发风控)
   ④ 完成判定**只看内容**:任务的 `uploadedBytes == totalBytes` 且 `errors` 为空 = 完成;
      `errors` 非空 = 失败;任务消失且本地源也没了 = 完成(移动语义的天然信号)。
@@ -201,12 +203,28 @@ class Uploader:
                 elif task["total_bytes"] and task["uploaded_bytes"] >= task["total_bytes"]:
                     await self._finish(row, "done", settled)
                 continue
-            # 任务已不在列表:移动把源文件带走了 → 视为完成
+            # 任务已不在列表:源文件也没了 → 完成;源还在且久无动静 → 失败
             if not local.exists():
                 await self._finish(row, "done", settled)
             elif time.time() - float(row["updated_at"] or 0) > TASK_LOST_SECONDS:
                 await self._finish(row, "failed", settled, error="任务在 CD2 列表中丢失")
         return settled
+
+    async def _drop_source(self, name: str) -> None:
+        """补删本地源(CD2 的跨云 MoveFile 实测不删源):确保上传完本地不留副本。
+
+        幂等:文件已被移走/删掉时不会再报错;失败仅告警(下轮结算还会再试)。
+        """
+        local = Path(self.bot.cfg.clouddrive_dir) / name
+        if not local.exists() or self.client is None:
+            return
+        remote = f"{self.bot.cfg.cd2_source_path.rstrip('/')}/{name}"
+        try:
+            await asyncio.to_thread(self.client.delete_file, remote)
+        except Cd2Error as exc:
+            logger.warning("上传完成但删源失败(%s):%s", remote, exc)
+            return
+        logger.info("上传段已删本地源(CD2 跨云移动不删源,故补删):%s", name)
 
     async def _finish(self, row: dict, status: str, settled: dict, error: str = "") -> None:
         attempts = int(row["attempts"] or 0) + (1 if status == "failed" else 0)
@@ -215,7 +233,8 @@ class Uploader:
                                    attempts=attempts)
         settled["done" if status == "done" else "failed"] += 1
         if status == "done":
-            logger.info("上传段完成:%s → %s(本地源已随移动消失)", row["name"],
+            await self._drop_source(row["name"])
+            logger.info("上传段完成:%s → %s(115 已入库,本地源已清)", row["name"],
                         self.bot.cfg.cd2_dest_path)
             return
         logger.warning("上传失败(%s,第 %d 次):%s", row["name"], attempts, error)

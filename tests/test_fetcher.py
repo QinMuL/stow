@@ -270,6 +270,7 @@ class FakeCd2:
         self.dirs: dict[str, list[str]] = {}
         self.created: list[tuple[str, str]] = []
         self.move_ok = True
+        self.deleted: list[str] = []
 
     def system_info(self):
         return {"logged_in": True, "user_name": "test", "ready": True, "message": ""}
@@ -291,6 +292,10 @@ class FakeCd2:
 
     def copy_tasks(self):
         return list(self.tasks)
+
+    def delete_file(self, path):
+        self.deleted.append(path)
+        return True
 
     def close(self):
         pass
@@ -347,6 +352,18 @@ def test_upload_completes_when_source_gone(tmp_path):
     settled = asyncio.run(up._poll_tasks())
     assert settled == {"done": 1, "failed": 0}
     assert bot.store.get_upload("c.mkv")["status"] == "done"
+
+
+def test_upload_deletes_source_after_done(tmp_path):
+    """CD2 跨云 MoveFile 实测不删源 → 完成后补删本地源(幂等)。"""
+    up, bot, client = _uploader(tmp_path, files=("h.mkv",))
+    asyncio.run(up.scan_now())
+    client.tasks = [{"mode": 0, "status_raw": 3, "source": "/clouddrive/h.mkv",
+                     "dest": "/115open/目标目录", "total_bytes": 100, "uploaded_bytes": 100,
+                     "progress": 100.0, "files": 1, "uploaded_files": 1, "error": ""}]
+    assert asyncio.run(up._poll_tasks()) == {"done": 1, "failed": 0}
+    assert client.deleted == ["/clouddrive/h.mkv"]        # 补删源
+    assert bot.store.get_upload("h.mkv")["status"] == "done"
 
 
 def test_upload_completion_by_content_not_enum(tmp_path):
