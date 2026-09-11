@@ -3,15 +3,16 @@
 链路(用户设计:获取段自动、处理段也自动):
   ① 守门:体积下限 + mtime 年龄(避免处理还在写入的半截文件)
   ② 探测(ffprobe)取画质标签——分辨率/编码/音频以**探测为准**,不信原始文件名
+  ③ 清洗(ffmpeg remux,**只在探测到广告类脏数据时做**,干净文件一个字节都不动):
+     容器全局 tags / 垃圾章节 / 广告音轨字幕轨;清洗在**重命名之前**
   ③ 识别:analyze_share + tmdb.match(**与推卡/目录标准化同一真源**);
      识别不出 → 拦下不推、登记待人工(不猜、不硬走,用户明确要求)
-  ④ 重命名(本地文件,不走网盘 API):`片名.年份.SxxEyy.第N集.画质 {tmdb-NNN}.mkv`
+  ④ 重命名(本地文件,不走网盘 API):`片名.年份.SxxEyy.第NN集.画质 {tmdb-NNN}.mkv`
   ⑤ ed2k:MD4 分块哈希 → 生成链接(文件名用规范名)
   ⑥ 推卡:bot.push_link(ed2k) → ed2k 归属频道;按文件 hash 去重(与手动推送同一张卡)
   ⑦ 移入 media/clouddrive(含同名字幕/图片伴行),等上传段接手
 
 失败处理:文件留在原地 + 记错误 + 私聊通知;绝不会产生"半成品对外产出"。
-清洗(ffmpeg 重封装)是下一小步,本模块留了 hook(见 `_clean_hook`)。
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import shutil
 import time
 from pathlib import Path
 
+from app.cleaner import CleanError, clean_file
 from app.ed2k import ed2k_hash_file, ed2k_uri
 from app.links import ParsedLink
 from app.media import analyze_share
@@ -105,6 +107,19 @@ class ProcessChain:
             await self._notify(f"❓ 无法处理「{path.name}」:探测不到有效媒体流,已留在落地点待人工。")
             return "unrecognized"
 
+        # ③ 清洗(按需,在重命名之前):只有探到广告类脏数据才 remux;干净则原样通过
+        if self.bot.cfg.clean_enabled:
+            try:
+                cleaned, why = await clean_file(path)
+                if cleaned:
+                    logger.info("处理段清洗:%s(%s)", path.name, why)
+            except CleanError as exc:
+                logger.warning("处理段清洗失败(原件保留,下轮重试):%s:%s", path.name, exc)
+                self._record(path, status="failed", error=f"清洗失败:{exc}"[:200])
+                await self._notify(
+                    f"⚠️ 清洗失败「{path.name}」:{exc}\n原件未动,稍后自动重试。")
+                return "failed"
+
         media = analyze_share([ShareFile(path.name, path.stat().st_size, False)])
         if media is None:
             self._record(path, status="unrecognized", error="文件名无法解析")
@@ -176,10 +191,6 @@ class ProcessChain:
                         age, cfg.min_age_seconds, path.name)
             return False
         return True
-
-    async def _clean_hook(self, path: Path):  # noqa: ANN201 - 清洗阶段(下一小步)接入点
-        """清洗(垃圾元数据检测 + ffmpeg 重封装)预留;当前直接返回原路径。"""
-        return path
 
     def _move_to_clouddrive(self, path: Path, *, stems: list[str] | None = None) -> Path:
         """视频 + 字幕/图片伴行一起移入 clouddrive(CD2 上传源)。

@@ -139,6 +139,7 @@ onMounted(async () => {
   m.process_interval_minutes = cfg.value.process_interval_minutes || 5
   m.min_size_mb = cfg.value.min_size_mb ?? 50
   m.min_age_seconds = cfg.value.min_age_seconds ?? 60
+  m.clean_enabled = cfg.value.clean_enabled !== false && cfg.value.clean_enabled !== 'false'
   model.value = m
   monitorRows.value = String(cfg.value.monitor_dirs || '')
     .split(',').map(x => x.trim()).filter(Boolean)
@@ -178,6 +179,7 @@ function formValues() {
   values.process_interval_minutes = model.value.process_interval_minutes
   values.min_size_mb = model.value.min_size_mb
   values.min_age_seconds = model.value.min_age_seconds
+  values.clean_enabled = model.value.clean_enabled
   return values
 }
 
@@ -427,8 +429,14 @@ async function saveChannels() {
           <input v-model="model.min_age_seconds" type="number" min="0">
         </div>
       </div>
+      <label class="switch-row">
+        <input class="switch" type="checkbox" v-model="model.clean_enabled">
+        <span class="switch-state">元数据清洗(仅当探测到广告类脏数据时才重封装;干净文件不动)</span>
+      </label>
       <div class="chan-tip">
-        💡 体积下限 + 静默年龄是守门:宁等一轮,也不处理还在写入的半截文件。改完点「保存并重启」。
+        💡 体积下限 + 静默年龄是守门:宁等一轮,也不处理还在写入的半截文件。
+        清洗发生在重命名之前,只清三类:容器广告标签 / 垃圾章节 / 广告音轨字幕轨;
+        零重编码(-c copy),校验视频轨与时长后再同名替换,失败则原件不动。改完点「保存并重启」。
       </div>
       <div class="actions">
         <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>

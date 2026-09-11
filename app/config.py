@@ -72,6 +72,7 @@ class Config:
     process_interval_minutes: int = 5     # 处理轮询间隔(分钟)
     min_size_mb: int = 50                 # 体积下限(小于此值不当视频处理)
     min_age_seconds: int = 60             # mtime 静默年龄(避免处理半截文件)
+    clean_enabled: bool = True            # 元数据清洗开关:仅在探到广告类脏数据时才清洗
     cd2_address: str = ""         # CD2 gRPC 地址,如 127.0.0.1:19798
     cd2_token: str = ""           # CD2 API token(敏感)
     cd2_source_path: str = ""     # CD2 侧看到的本地待上传目录,如 /clouddrive
@@ -295,6 +296,7 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         process_interval_minutes=max(1, int(raw.get("process_interval_minutes", 5) or 5)),
         min_size_mb=max(0, int(raw.get("min_size_mb", 50) or 0)),
         min_age_seconds=max(0, int(raw.get("min_age_seconds", 60) or 0)),
+        clean_enabled=str(raw.get("clean_enabled", True)).strip().lower() not in ("0", "false", "off", "关"),
         cd2_address=_clean(raw.get("cd2_address")),
         cd2_token=_clean(raw.get("cd2_token")),
         cd2_source_path=str(raw.get("cd2_source_path", "")).strip(),

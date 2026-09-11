@@ -7,7 +7,10 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 import app.processor as processor_mod
+from app.cleaner import CleanError, filter_ffmetadata, report_from_ffprobe
 from app.config import Config
 from app.ed2k import ED2K_CHUNK, ed2k_hash_file, ed2k_uri, sanitize_ed2k_name
 from app.media import analyze_share
@@ -194,6 +197,7 @@ class FakeBot:
         self.tmdb = FakeTmdb(details)
         self.pushed: list = []
         self.notified: list[str] = []
+        self.clean_calls = False
 
     async def push_link(self, link, **kw):
         from app.bot import PushResult
@@ -203,6 +207,20 @@ class FakeBot:
 
     async def _notify_uid(self, uid, text):
         self.notified.append(text)
+
+
+async def _async(value):
+    """把同步值包成 awaitable(替身用)。"""
+    return value
+
+
+def _fake_clean(did_clean: bool, why: str = ""):
+    """替身清洗:返回是否清洗过(不碰真 ffmpeg)。"""
+
+    async def _clean(path, **kw):
+        return did_clean, why
+
+    return _clean
 
 
 def _fake_probe(tags: ProbeTags | None = None):
@@ -313,3 +331,164 @@ def test_tmdb_annotation_is_not_taken_as_release_group():
     name = render_name(media, {"title": "茶啊二中", "year": 2014, "tmdb_id": 119059},
                        ProbeTags(resolution="2160p"), ".mkv", raw_name=raw)
     assert "-tmdb" not in name and name.endswith(" {tmdb-119059}.mkv")
+
+
+# ── 清洗(按需:只在探到广告类脏数据时才做) ─────────────────
+def _ffprobe_like(*, comment="", chapter_titles=(), audio_titles=()):
+    fmt = {"duration": "60.0"}
+    if comment:
+        fmt["tags"] = {"comment": comment}
+    streams = [{"index": 0, "codec_type": "video", "codec_name": "h264",
+                "width": 1920, "height": 1080, "pix_fmt": "yuv420p"}]
+    for i, t in enumerate(audio_titles, start=1):
+        streams.append({"index": i, "codec_type": "audio", "codec_name": "aac",
+                        "tags": {"title": t}})
+    return {
+        "streams": streams,
+        "format": fmt,
+        "chapters": [{"tags": {"title": t}} for t in chapter_titles],
+    }
+
+
+def test_clean_report_detects_ad_junk():
+    """广告类脏数据(容器标签/章节/音轨标题)都能识别出来。"""
+    rpt = report_from_ffprobe(_ffprobe_like(
+        comment="更多资源访问 http://广告站.com",
+        chapter_titles=["正片", "点击订阅频道推广"],
+        audio_titles=["国语", "广告 群号12345"],
+    ))
+    assert len(rpt.junk_tags) == 1 and rpt.junk_chapters == ["点击订阅频道推广"]
+    assert rpt.junk_tracks and rpt.junk_tracks[0]["kind"] == "音轨"
+    assert rpt.has_junk and "容器标签" in rpt.summary()
+
+
+def test_clean_report_clean_file_has_no_junk():
+    """干净文件:一个脏项都不报 → 调用方直接跳过清洗。"""
+    rpt = report_from_ffprobe(_ffprobe_like(chapter_titles=["正片"], audio_titles=["国语", "粤语"]))
+    assert rpt.has_junk is False and rpt.summary() == ""
+
+
+def test_filter_ffmetadata_drops_junk_keeps_clean():
+    """ffmetadata 过滤:垃圾章节剔除、正常章节保留;有垃圾容器标签则清空全局段。"""
+    rpt = report_from_ffprobe(_ffprobe_like(comment="www.广告.com"))
+    src = "\n".join([
+        ";FFMETADATA1", "title=正常标题", "comment=www.广告.com", "",
+        "[CHAPTER]", "TIMEBASE=1/1000", "START=0", "END=1000", "title=正片", "",
+        "[CHAPTER]", "TIMEBASE=1/1000", "START=1000", "END=2000", "title=点击订阅", "",
+    ])
+    out = filter_ffmetadata(src, rpt)
+    assert "更多资源" not in out and "www.广告.com" not in out      # 垃圾标签被清
+    assert "title=正常标题" not in out                              # 有垃圾标签 → 全局段整体清空
+    assert "title=正片" in out and "点击订阅" not in out            # 正常章节留、垃圾章节丢
+
+
+def test_clean_file_untouched_when_no_junk(tmp_path, monkeypatch):
+    """核心规则:没有广告类脏数据 → **一个字节都不动、也不跑 ffmpeg**。"""
+    import app.cleaner as cleaner_mod
+
+    f = tmp_path / "clean.mkv"
+    f.write_bytes(b"original-bytes")
+    monkeypatch.setattr(cleaner_mod, "_ffprobe_json",
+                        lambda p: _async(_ffprobe_like(chapter_titles=["正片"])))
+    runs: list = []
+    monkeypatch.setattr(cleaner_mod, "_run", lambda cmd, **kw: _async(runs.append(cmd) or True))
+    cleaned, why = asyncio.run(cleaner_mod.clean_file(f))
+    assert (cleaned, why) == (False, "干净")
+    assert f.read_bytes() == b"original-bytes"      # 没动
+    assert runs == []                                # 没跑 ffmpeg
+
+
+def test_clean_file_replaces_in_place_when_junk(tmp_path, monkeypatch):
+    """有脏数据 → remux 后**同名替换**;校验通过才算成功。"""
+    import app.cleaner as cleaner_mod
+
+    f = tmp_path / "junk.mkv"
+    f.write_bytes(b"original-bytes")
+    probe = _ffprobe_like(comment="http://广告站.com", chapter_titles=["点击订阅"])
+    monkeypatch.setattr(cleaner_mod, "_ffprobe_json", lambda p: _async(probe))
+
+    async def fake_run(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"cleaned-bytes")   # 伪造 ffmpeg 产出(含 ffmetadata 导出)
+        return True
+
+    monkeypatch.setattr(cleaner_mod, "_run", fake_run)
+    cleaned, why = asyncio.run(cleaner_mod.clean_file(f))
+    assert cleaned is True and "容器标签" in why
+    assert f.read_bytes() == b"cleaned-bytes"         # 同名替换
+    assert not list(tmp_path.glob("*.cleaned*"))      # 无残留半成品
+
+
+def test_clean_file_validation_failure_keeps_original(tmp_path, monkeypatch):
+    """校验不过(视频轨数变化)→ 抛错、删半成品、原件保留。"""
+    import app.cleaner as cleaner_mod
+
+    f = tmp_path / "bad.mkv"
+    f.write_bytes(b"original-bytes")
+    junk = _ffprobe_like(comment="www.广告.com")
+
+    async def fake_probe(p):
+        if str(p).endswith(".cleaned.mkv"):           # 产物探测结果异常
+            return {"streams": [], "format": {"duration": "10.0"}, "chapters": []}
+        return junk
+
+    async def fake_run(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"half-made")
+        return True
+
+    monkeypatch.setattr(cleaner_mod, "_ffprobe_json", fake_probe)
+    monkeypatch.setattr(cleaner_mod, "_run", fake_run)
+    with pytest.raises(CleanError):
+        asyncio.run(cleaner_mod.clean_file(f))
+    assert f.read_bytes() == b"original-bytes"
+    assert not list(tmp_path.glob("*.cleaned*"))
+
+
+def test_clean_runs_before_rename_and_hash(tmp_path, monkeypatch):
+    """顺序:清洗发生在重命名之前(用户 2026-09-11 指定)。"""
+    order: list[str] = []
+    chain, bot, path = _chain(tmp_path, monkeypatch=monkeypatch)
+
+    async def fake_clean(p, **kw):
+        order.append("clean")
+        return True, "容器标签×1"
+
+    real_hash = processor_mod.ed2k_hash_file
+
+    async def spy_hash(p, **kw):
+        order.append("hash")
+        return await real_hash(p, **kw)
+
+    monkeypatch.setattr(processor_mod, "clean_file", fake_clean)
+    monkeypatch.setattr(processor_mod, "ed2k_hash_file", spy_hash)
+    asyncio.run(chain.scan_now())
+    assert order[:2] == ["clean", "hash"]          # 清洗先于哈希
+
+
+def test_clean_failure_keeps_original_and_reports(tmp_path, monkeypatch):
+    """清洗失败:原件保留、记 failed、通知人工,不推卡不归档。"""
+    chain, bot, path = _chain(tmp_path, monkeypatch=monkeypatch)
+
+    async def boom(p, **kw):
+        raise CleanError("校验不过(视频轨 1→0)")
+
+    monkeypatch.setattr(processor_mod, "clean_file", boom)
+    report = asyncio.run(chain.scan_now())
+    assert "failed 1" in report
+    assert path.exists()                                     # 原件在
+    assert bot.pushed == [] and list(Path(bot.cfg.clouddrive_dir).iterdir()) == []
+    assert bot.notified and "清洗失败" in bot.notified[0]
+
+
+def test_clean_disabled_by_config(tmp_path, monkeypatch):
+    """开关关闭时不清洗(仍然走完识别/推卡)。"""
+    chain, bot, path = _chain(tmp_path, monkeypatch=monkeypatch)
+    bot.cfg.clean_enabled = False
+    called = []
+
+    async def spy(p, **kw):
+        called.append(p)
+        return False, "干净"
+
+    monkeypatch.setattr(processor_mod, "clean_file", spy)
+    asyncio.run(chain.scan_now())
+    assert called == [] and bot.pushed

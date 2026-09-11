@@ -155,6 +155,7 @@ EDITABLE = {
     "openlist_monitor_dirs": "s", "openlist_dest_path": "s",
     "openlist_max_tasks": "i", "fetch_interval_minutes": "i",
     "process_interval_minutes": "i", "min_size_mb": "i", "min_age_seconds": "i",
+    "clean_enabled": "b",
     "cd2_address": "s", "cd2_token": "s", "cd2_source_path": "s",
 }
 
