@@ -554,9 +554,9 @@ def test_pipeline_endpoint_shape(tmp_path):
 
 
 def test_pipeline_attention_lists_failures(tmp_path):
-    from app.store import Store
-
     import json as _json
+
+    from app.store import Store
 
     p = tmp_path / "config.json"
     p.write_text(_json.dumps({"data_dir": str(tmp_path)}), encoding="utf-8")
