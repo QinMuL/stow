@@ -161,8 +161,8 @@ class ProcessChain:
         final = path.with_name(target)
         if final != path:
             if final.exists():
-                self._record(path, status="failed", error=f"目标名已存在:{target}")
-                await self._notify(f"⚠️ 处理失败「{path.name}」:目标名已存在 {target}")
+                await self._report_failure(
+                    path, f"⚠️ 处理失败「{path.name}」:目标名已存在 {target}")
                 return "failed"
             try:
                 path.rename(final)
@@ -247,6 +247,16 @@ class ProcessChain:
                 error=error, ed2k=ed2k, tmdb_id=tmdb_id)
         except Exception as exc:  # noqa: BLE001 - 记账失败不影响主流程
             logger.warning("处理段记账失败(%s):%s", path.name, exc)
+
+    async def _report_failure(self, path: Path, text: str) -> None:
+        """记 failed 并通知;通知**仅首次转为失败**时发(反复失败不刷屏,日志照记)。
+
+        必须先读旧状态再落库,否则读到的永远是刚写进去的 failed。
+        """
+        prev = (self.bot.store.get_local_file(path.name) or {}).get("status")
+        self._record(path, status="failed", error=text[:200])
+        if prev != "failed":
+            await self._notify(text)
 
     async def _notify(self, text: str) -> None:
         if self.bot.cfg.tg_admin_ids:

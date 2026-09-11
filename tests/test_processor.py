@@ -564,3 +564,17 @@ def test_rename_permission_error_is_not_failure(tmp_path, monkeypatch):
     assert "未就绪 1" in report
     assert path.exists() and bot.pushed == []
     assert bot.store.get_local_file(path.name) is None      # 不落 failed 记录
+
+
+def test_failure_notification_only_on_first_transition(tmp_path, monkeypatch):
+    """同一个文件反复失败:只通知一次(避免每 5 分钟刷屏),日志照记。"""
+    chain, bot, path = _chain(tmp_path, monkeypatch=monkeypatch)
+    # 用"非空目录"占住该文件将要改成的目标名:不会被当视频处理掉,也不会被当空目录清掉
+    target = "飞到我心上.2026.S01E12.第12集.1080p.WEB-DL.H.264.AAC {tmdb-123456}.mkv"
+    blocker = bot.cfg.openlist_dir / target
+    blocker.mkdir()
+    (blocker / "keep.txt").write_text("x", encoding="utf-8")
+    for _ in range(3):
+        asyncio.run(chain.scan_now())
+    assert len([n for n in bot.notified if "目标名已存在" in n]) == 1
+    assert bot.store.get_local_file(path.name)["status"] == "failed"
