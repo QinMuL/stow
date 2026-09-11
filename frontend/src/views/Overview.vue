@@ -268,7 +268,7 @@ onUnmounted(() => timer && window.clearInterval(timer))
           </div>
           <div v-if="expanded[s.key] && s.items.length" class="ov-items">
             <div v-for="it in s.items" :key="it.name" class="ov-item">
-              <span class="ov-item-name">{{ it.name }}</span>
+              <span class="ov-item-name" :title="it.name">{{ it.name }}</span>
               <span class="ov-item-note">{{ it.note }}</span>
               <span class="ov-bar-mini">
                 <i :style="{ width: (it.progress || 0) + '%' }"></i>
@@ -335,7 +335,7 @@ onUnmounted(() => timer && window.clearInterval(timer))
       <div v-if="pipe?.recent?.length" class="feed">
         <div v-for="it in pipe.recent" :key="it.code" class="feed-item">
           <span class="dot ok" style="width:7px;height:7px"></span>
-          <span class="t">{{ it.title }}</span>
+          <span class="t" :title="it.title">{{ it.title }}</span>
           <span class="c">{{ it.code }}</span>
           <span class="when">{{ timeAgo(it.pushed_at) }}</span>
         </div>
