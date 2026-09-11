@@ -40,6 +40,7 @@ from app.processor import ProcessChain
 from app.saver import Pan115Saver
 from app.store import Store
 from app.tmdb import TmdbClient, image_url
+from app.uploader import Uploader
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class StowBot:
         self.monitor = ChannelMonitor(self)  # TG 频道监控(ed2k → 卡片 → ed2k 频道)
         self.fetcher = ResourceFetcher(self)  # 获取段:openlist 监控 → 移动到本地
         self.processor = ProcessChain(self)   # 处理段:探测/重命名/ed2k/推卡 → clouddrive
+        self.uploader = Uploader(self)         # 上传段:clouddrive → 115(CD2 移动)
         self._push_lock = asyncio.Lock()  # 投递串行,防 flood
         self._pending_channels: dict[str, str] = {}  # 登记选择中:chat_id → 标题(回调取)
         self._bind_wait: dict[int, float] = {}  # /bind 等待期:uid → 截止时间戳
@@ -104,6 +106,7 @@ class StowBot:
             self.monitor.start()        # TG 频道监控(源频道 → ed2k 卡片)
             self.fetcher.start()        # 获取段:openlist 监控目录 → 移动到 media/openlist
             self.processor.start()      # 处理段:media/openlist → 探测/ed2k/推卡 → clouddrive
+            self.uploader.start()       # 上传段:clouddrive → 115(CD2 移动,串行)
             # Web 登录端点需在 Bot 事件循环里驱动 Telethon 客户端(Web 跑在另一线程)
             from app.webapp import STATE
 
@@ -130,6 +133,7 @@ class StowBot:
         app.add_handler(CommandHandler("scan", self._cmd_scan))
         app.add_handler(CommandHandler("fetch", self._cmd_fetch))
         app.add_handler(CommandHandler("process", self._cmd_process))
+        app.add_handler(CommandHandler("upload", self._cmd_upload))
         app.add_handler(CommandHandler("bind", self._cmd_bind))
         app.add_handler(CommandHandler("bindcancel", self._cmd_bindcancel))
         app.add_handler(CallbackQueryHandler(self._on_channel_preset))
@@ -329,6 +333,20 @@ class StowBot:
         except Exception as exc:  # noqa: BLE001
             logger.error("手动处理失败:%s", exc, exc_info=exc)
             await status.edit_text(f"❌ 处理失败:{str(exc)[:120]}")
+            return
+        await status.edit_text(report)
+
+    async def _cmd_upload(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/upload:立即跑一轮上传(把 clouddrive 里的成品移动到 115)。"""
+        if not self._is_admin(update):
+            await update.effective_message.reply_text("⛔ 仅管理员可用")
+            return
+        status = await update.effective_message.reply_text("📤 正在检查待上传文件…")
+        try:
+            report = await self.uploader.scan_now()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("手动上传失败:%s", exc, exc_info=exc)
+            await status.edit_text(f"❌ 上传失败:{str(exc)[:120]}")
             return
         await status.edit_text(report)
 

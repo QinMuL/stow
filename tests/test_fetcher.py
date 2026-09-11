@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 from app.config import Config
 from app.fetcher import ResourceFetcher
@@ -257,3 +258,136 @@ def test_poll_is_coroutine_safe(tmp_path):
 
     a, b = asyncio.run(two())
     assert a["done"] + b["done"] == 1             # 只结算一次
+
+
+# ── 上传段(CD2 移动语义) ────────────────────────────────────
+class FakeCd2:
+    """替身 CD2:记录 move 调用,任务列表可编排。"""
+
+    def __init__(self) -> None:
+        self.moves: list[tuple[list[str], str]] = []
+        self.tasks: list[dict] = []
+        self.dirs: dict[str, list[str]] = {}
+        self.created: list[tuple[str, str]] = []
+        self.move_ok = True
+
+    def system_info(self):
+        return {"logged_in": True, "user_name": "test", "ready": True, "message": ""}
+
+    def sub_files(self, path, **kw):
+        class F:
+            def __init__(self, n): self.name, self.is_dir, self.size = n, True, 0
+        return [F(n) for n in self.dirs.get(path, [])]
+
+    def create_folder(self, parent, name):
+        self.created.append((parent, name))
+        return True
+
+    def move_file(self, src_paths, dest_path):
+        if not self.move_ok:
+            return {"success": False, "error": "目标不可写", "raw": ""}
+        self.moves.append((list(src_paths), dest_path))
+        return {"success": True, "error": "", "raw": ""}
+
+    def copy_tasks(self):
+        return list(self.tasks)
+
+    def close(self):
+        pass
+
+
+def _uploader(tmp_path, *, files=("a.mkv",), dest="/115open/目标目录", source="/clouddrive"):
+    from app.config import Config as _C
+    from app.uploader import Uploader
+
+    cfg = _C(data_dir=str(tmp_path), media_root=str(tmp_path / "media"),
+             cd2_address="127.0.0.1:19798", cd2_token="tok",
+             cd2_source_path=source, cd2_dest_path=dest, tg_admin_ids=[1],
+             min_size_mb=0, min_age_seconds=0)
+    cfg.ensure_media_dirs()
+    bot = FakeBot(cfg, Store(tmp_path / "t.db"))
+    up = Uploader(bot)
+    up.client = FakeCd2()
+    for name in files:
+        (Path(cfg.clouddrive_dir) / name).write_bytes(b"x" * 100)
+    return up, bot, up.client
+
+
+def test_upload_disabled_without_dest(tmp_path):
+    up, bot, _ = _uploader(tmp_path, dest="")
+    assert up.enabled() is False
+    assert "未启用上传段" in asyncio.run(up.scan_now())
+
+
+def test_upload_uses_move_and_records_state(tmp_path):
+    """上传走 MoveFile(不是复制);提交后本地源在,完成由"源消失"确认。"""
+    up, bot, client = _uploader(tmp_path, files=("剧名.S01E01.mkv",))
+    report = asyncio.run(up.scan_now())
+    assert "已提交" in report
+    assert client.moves == [(["/clouddrive/剧名.S01E01.mkv"], "/115open/目标目录")]
+    row = bot.store.get_upload("剧名.S01E01.mkv")
+    assert row["status"] == "uploading" and row["dest"] == "/115open/目标目录"
+
+
+def test_upload_serial_only_one_in_flight(tmp_path):
+    """串行:已有在途任务时不再提交第二个。"""
+    up, bot, client = _uploader(tmp_path, files=("a.mkv", "b.mkv"))
+    asyncio.run(up.scan_now())
+    asyncio.run(up.scan_now())
+    assert len(client.moves) == 1
+    assert "在途" in asyncio.run(up.scan_now())
+
+
+def test_upload_completes_when_source_gone(tmp_path):
+    """移动完成 = CD2 里没有该任务 且 本地源已消失 → 记 done。"""
+    up, bot, client = _uploader(tmp_path, files=("c.mkv",))
+    asyncio.run(up.scan_now())
+    (bot.cfg.clouddrive_dir / "c.mkv").unlink()        # 移动语义:源被带走
+    client.tasks = []
+    settled = asyncio.run(up._poll_tasks())
+    assert settled == {"done": 1, "failed": 0}
+    assert bot.store.get_upload("c.mkv")["status"] == "done"
+
+
+def test_upload_completion_by_content_not_enum(tmp_path):
+    """完成判定只看内容(bytes 到齐 + 无 error),不认枚举名(版本口径会变)。"""
+    up, bot, client = _uploader(tmp_path, files=("d.mkv",))
+    asyncio.run(up.scan_now())
+    client.tasks = [{"mode": 1, "status_raw": 3, "source": "/clouddrive/d.mkv",
+                     "dest": "/115open/目标目录", "total_bytes": 100, "uploaded_bytes": 100,
+                     "progress": 100.0, "files": 1, "uploaded_files": 1, "error": ""}]
+    assert asyncio.run(up._poll_tasks()) == {"done": 1, "failed": 0}
+
+
+def test_upload_failure_notifies_and_keeps_local(tmp_path):
+    up, bot, client = _uploader(tmp_path, files=("e.mkv",))
+    asyncio.run(up.scan_now())
+    client.tasks = [{"mode": 1, "status_raw": 4, "source": "/clouddrive/e.mkv",
+                     "dest": "/115open/目标目录", "total_bytes": 100, "uploaded_bytes": 30,
+                     "progress": 30.0, "files": 1, "uploaded_files": 0, "error": "网络中断"}]
+    settled = asyncio.run(up._poll_tasks())
+    assert settled == {"done": 0, "failed": 1}
+    assert (bot.cfg.clouddrive_dir / "e.mkv").exists()      # 本地仍在
+    assert bot.notified and "上传失败" in bot.notified[0]
+
+
+def test_upload_creates_missing_dest_dir(tmp_path):
+    up, bot, client = _uploader(tmp_path, files=("f.mkv",), dest="/115open/新目标")
+    client.dirs = {"/115open": []}                          # 目标不存在
+    asyncio.run(up.scan_now())
+    assert client.created == [("/115open", "新目标")]
+
+
+def test_upload_resumes_after_restart(tmp_path):
+    """重启安全:库里的在途任务由新实例继续结算,不重复提交。"""
+    from app.uploader import Uploader
+
+    up, bot, client = _uploader(tmp_path, files=("g.mkv",))
+    asyncio.run(up.scan_now())
+    up2 = Uploader(bot)
+    up2.client = client
+    asyncio.run(up2.scan_now())                             # 重启后一轮
+    assert len(client.moves) == 1                            # 不重复提交
+    (bot.cfg.clouddrive_dir / "g.mkv").unlink()
+    client.tasks = []
+    assert asyncio.run(up2._poll_tasks()) == {"done": 1, "failed": 0}

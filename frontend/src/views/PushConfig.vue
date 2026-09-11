@@ -140,6 +140,11 @@ onMounted(async () => {
   m.min_size_mb = cfg.value.min_size_mb ?? 50
   m.min_age_seconds = cfg.value.min_age_seconds ?? 60
   m.clean_enabled = cfg.value.clean_enabled !== false && cfg.value.clean_enabled !== 'false'
+  m.cd2_address = cfg.value.cd2_address ?? ''
+  m.cd2_token = cfg.value.cd2_token ?? ''
+  m.cd2_source_path = cfg.value.cd2_source_path || '/clouddrive'
+  m.cd2_dest_path = cfg.value.cd2_dest_path ?? ''
+  m.upload_interval_minutes = cfg.value.upload_interval_minutes || 5
   model.value = m
   monitorRows.value = String(cfg.value.monitor_dirs || '')
     .split(',').map(x => x.trim()).filter(Boolean)
@@ -180,6 +185,11 @@ function formValues() {
   values.min_size_mb = model.value.min_size_mb
   values.min_age_seconds = model.value.min_age_seconds
   values.clean_enabled = model.value.clean_enabled
+  values.cd2_address = model.value.cd2_address
+  values.cd2_token = model.value.cd2_token
+  values.cd2_source_path = model.value.cd2_source_path
+  values.cd2_dest_path = model.value.cd2_dest_path
+  values.upload_interval_minutes = model.value.upload_interval_minutes
   return values
 }
 
@@ -245,7 +255,9 @@ function openPicker(target, source = '115') {
 }
 
 function onPickDir(d) {
-  if (pickerSource.value === 'openlist') {
+  if (pickerSource.value === 'cd2') {
+    model.value[pickerTarget.value] = d.cid      // cd2_dest_path / cd2_source_path
+  } else if (pickerSource.value === 'openlist') {
     fetchRows.value[Number(pickerTarget.value)] = d.cid   // openlist 路径串
   } else if (pickerTarget.value === 'pipeline_root_dir') {
     model.value.pipeline_root_dir = d.cid
@@ -437,6 +449,50 @@ async function saveChannels() {
         💡 体积下限 + 静默年龄是守门:宁等一轮,也不处理还在写入的半截文件。
         清洗发生在重命名之前,只清三类:容器广告标签 / 垃圾章节 / 广告音轨字幕轨;
         零重编码(-c copy),校验视频轨与时长后再同名替换,失败则原件不动。改完点「保存并重启」。
+      </div>
+      <div class="actions">
+        <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>
+        <button class="btn ghost" :disabled="busy" @click="save(true)">保存并重启</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>上传链(CD2 → 115)</h3>
+      <div class="desc">
+        把上传源里的成品<strong>移动</strong>到 115 网盘(走 CD2,移动=本地源随之消失);
+        串行上传,115 命中秒传则秒级完成
+      </div>
+      <div class="field">
+        <label>CD2 地址 <code>cd2_address</code></label>
+        <input v-model="model.cd2_address" placeholder="127.0.0.1:19798" autocomplete="off">
+      </div>
+      <div class="field">
+        <label>
+          CD2 令牌 <code>cd2_token</code>
+          <span v-if="cfg?.cd2_token === '••••••••'" class="saved-tag">✓ 已保存</span>
+        </label>
+        <input v-model="model.cd2_token" placeholder="CloudDrive2 界面里创建的 API 令牌" autocomplete="off">
+      </div>
+      <div class="field">
+        <label>待上传目录(CD2 侧本地视图)<code>cd2_source_path</code></label>
+        <div style="display:flex;gap:8px">
+          <input v-model="model.cd2_source_path" placeholder="/clouddrive" autocomplete="off">
+          <button class="btn ghost" style="flex:none;padding:8px 12px" title="浏览 CloudDrive 选择目录"
+            @click="openPicker('cd2_source_path', 'cd2')">📂</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>上传目标目录(115 侧)<code>cd2_dest_path</code></label>
+        <div style="display:flex;gap:8px">
+          <input v-model="model.cd2_dest_path" placeholder="点 📂 选择(如 /115open/目标目录)" autocomplete="off">
+          <button class="btn ghost" style="flex:none;padding:8px 12px" title="浏览 CloudDrive 选择目录"
+            @click="openPicker('cd2_dest_path', 'cd2')">📂</button>
+        </div>
+        <div class="hint">留空则上传段不启动;两个目录都可在 CloudDrive 目录树里逐级选择回填</div>
+      </div>
+      <div class="field">
+        <label>上传轮询间隔(分钟)<code>upload_interval_minutes</code></label>
+        <input v-model="model.upload_interval_minutes" type="number" min="1">
       </div>
       <div class="actions">
         <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>

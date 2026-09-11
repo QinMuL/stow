@@ -11,14 +11,16 @@ const emit = defineEmits(['pick', 'close'])
 const ROOT = {
   '115': { value: 0, name: '网盘根目录' },
   openlist: { value: '/', name: 'openlist 根' },
+  cd2: { value: '/', name: 'CloudDrive 根' },
 }
-const TITLE = { '115': '选择网盘目录', openlist: '选择 openlist 目录' }
+const TITLE = { '115': '选择网盘目录', openlist: '选择 openlist 目录', cd2: '选择 CloudDrive 目录' }
 
 const stack = ref([{ ...(ROOT[props.source] || ROOT['115']) }])
 const items = ref([])
 const loading = ref(false)
 const err = ref('')
 const isOpenList = props.source === 'openlist'
+const isCd2 = props.source === 'cd2'
 
 const current = () => stack.value[stack.value.length - 1]
 
@@ -26,7 +28,10 @@ async function open(value) {
   loading.value = true
   err.value = ''
   try {
-    if (isOpenList) {
+    if (isCd2) {
+      const d = await api('cd2/dirs?path=' + encodeURIComponent(value))
+      items.value = d.items.map(it => ({ value: it.path, name: it.name }))
+    } else if (isOpenList) {
       const d = await api('openlist/dirs?path=' + encodeURIComponent(value))
       items.value = d.items.map(it => ({ value: it.path, name: it.name }))
     } else {

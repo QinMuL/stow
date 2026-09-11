@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # ConflictPolicy / TaskStatus(proto 枚举实测值)
 CONFLICT_OVERWRITE, CONFLICT_RENAME, CONFLICT_SKIP = 0, 1, 2
 TASK_PENDING, TASK_RUNNING, TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED = 0, 1, 2, 3, 4
+TASK_MODE_COPY, TASK_MODE_MOVE = 0, 1   # 实测:本机服务器 1.0.13 上 move 任务 taskMode=1
 
 
 @dataclass
@@ -184,6 +185,18 @@ class Cd2Client:
                 "error": getattr(r, "errorMessage", ""),
                 "raw": str(r)[:300]}
 
+    def move_file(self, src_paths: list[str], dest_path: str) -> dict:
+        """**移动**(跨云=CD2 内部下载+上传;本地源随之消失 → 上传后无需再删源)。
+
+        与 CopyFile 的区别正是"移走源":用户 2026-09-11 明确要求上传走移动。
+        """
+        pb2 = self._pb2()
+        r = self._call("MoveFile", pb2.MoveFileRequest(
+            theFilePaths=src_paths, destPath=dest_path))
+        return {"success": bool(getattr(r, "success", False)),
+                "error": getattr(r, "errorMessage", "") or "",
+                "raw": str(r)[:300]}
+
     def copy_tasks(self) -> list[dict]:
         """进行中/已完成的复制(上传)任务(CopyTask 无 id,按源/目标路径识别)。"""
         r = self._call("GetCopyTasks", self._empty())
@@ -192,7 +205,8 @@ class Cd2Client:
             total = int(getattr(t, "totalBytes", 0) or 0)
             done = int(getattr(t, "uploadedBytes", 0) or 0)
             out.append({
-                "status": int(t.status),          # 0 待处理 1 进行中 2 完成 3 失败 4 取消
+                "mode": int(getattr(t, "taskMode", 0) or 0),   # 0 Copy / 1 Move
+                "status_raw": int(t.status),      # 枚举口径随服务器版本变,勿按名字判
                 "source": getattr(t, "sourcePath", "") or "",
                 "dest": getattr(t, "destPath", "") or "",
                 "total_bytes": total, "uploaded_bytes": done,

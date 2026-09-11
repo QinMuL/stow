@@ -142,7 +142,8 @@ class MonitorPassword(BaseModel):
 # 整数键的默认值:缺失时不能回 0 —— 表单会把 0 显示出来再存回去(踩过)
 _INT_DEFAULTS = {"web_port": DEFAULT_WEB_PORT, "openlist_max_tasks": 2,
                  "fetch_interval_minutes": 5, "process_interval_minutes": 5,
-                 "min_size_mb": 50, "min_age_seconds": 60}
+                 "min_size_mb": 50, "min_age_seconds": 60,
+                 "upload_interval_minutes": 5}
 
 # 可经 Web 修改的配置键白名单(类型: s=字符串, i=整数, ids=ID 列表)
 EDITABLE = {
@@ -155,8 +156,9 @@ EDITABLE = {
     "openlist_monitor_dirs": "s", "openlist_dest_path": "s",
     "openlist_max_tasks": "i", "fetch_interval_minutes": "i",
     "process_interval_minutes": "i", "min_size_mb": "i", "min_age_seconds": "i",
-    "clean_enabled": "b",
-    "cd2_address": "s", "cd2_token": "s", "cd2_source_path": "s",
+    "clean_enabled": "b", "upload_interval_minutes": "i",
+    "cd2_address": "s", "cd2_token": "s", "cd2_source_path": "s", "cd2_dest_path": "s",
+    "cd2_username": "s", "cd2_password": "s",
 }
 
 
@@ -406,6 +408,52 @@ def create_app(config_path: str | Path) -> FastAPI:
             for it in items if it.get("is_dir")
         ]
         return {"path": target, "items": dirs}
+
+    # ── CD2 目录浏览(上传目标目录的选择器数据源) ────────────
+    @app.get("/api/cd2/dirs")
+    async def list_cd2_dirs(request: Request, path: str = "/") -> dict:
+        """列出 CD2 某路径下的**子目录**(目录选择器用);只列目录。"""
+        _current_user(config_path, _auth_header(request))
+        cfg = load_config(config_path)
+        if not (cfg.cd2_address and (cfg.cd2_token or (cfg.cd2_username and cfg.cd2_password))):
+            raise HTTPException(status_code=503, detail="未配置 CD2 地址/令牌,无法浏览")
+        from app.cd2.client import Cd2Client, Cd2Error
+
+        client = Cd2Client(cfg.cd2_address, cfg.cd2_token,
+                           username=cfg.cd2_username, password=cfg.cd2_password)
+        target = (path or "/").strip() or "/"
+        try:
+            files = await asyncio.to_thread(client.sub_files, target)
+        except Cd2Error as exc:
+            raise HTTPException(status_code=502, detail=f"列目录失败:{str(exc)[:120]}") from exc
+        finally:
+            client.close()
+        dirs = [
+            {"path": f"{target.rstrip('/')}/{f.name}" if target != "/" else f"/{f.name}",
+             "name": f.name}
+            for f in files if f.is_dir
+        ]
+        return {"path": target, "items": dirs}
+
+    # ── CD2 连通状态(总览/配置页展示用) ─────────────────────
+    @app.get("/api/cd2/status")
+    async def cd2_status(request: Request) -> dict:
+        _current_user(config_path, _auth_header(request))
+        cfg = load_config(config_path)
+        if not cfg.cd2_address:
+            return {"configured": False, "ok": False, "error": "未配置 CD2 地址"}
+        from app.cd2.client import Cd2Client, Cd2Error
+
+        client = Cd2Client(cfg.cd2_address, cfg.cd2_token,
+                           username=cfg.cd2_username, password=cfg.cd2_password)
+        try:
+            info = await asyncio.to_thread(client.system_info)
+            return {"configured": True, "ok": True, **info,
+                    "dest": cfg.cd2_dest_path, "source": cfg.cd2_source_path}
+        except Cd2Error as exc:
+            return {"configured": True, "ok": False, "error": str(exc)[:160]}
+        finally:
+            client.close()
 
     # ── 频道监控(源频道 ed2k → 本项目卡片) ──────────────────
     def _monitor_or_503():
