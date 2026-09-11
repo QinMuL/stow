@@ -8,7 +8,8 @@
      子目录/文件**扇出多个并发任务**(线程数 `move_task_threads_num`,默认 5)——我们数 1 个、
      它跑 5 路,"并发上限"名存实亡。故改为 **Stow 自己递归展开目录、逐文件提交**:
      每个文件占一个并发位,并发粒度完全由我们控制(落地仍保持相对子目录结构);
-     搬空后的源目录会清理掉(仅在确认为空时删)
+     **源目录清理(2026-09-12 用户定):没有视频也没有字幕的目录连同杂物一起删**
+     (判据与处理段共用同一份扩展名;自底向上级联,只在监控目录内部动手,读不到就不删)
   ②c **线程数同步**:启动时把 openlist 的 `move_task_threads_num` 设为 `openlist_max_tasks`,
      与我们的闸门口径一致(会一并影响 openlist 里的手动操作,用户已同意自动同步)
   ③ 并发闸门:同时在途的搬运任务 ≤ `openlist_max_tasks`(默认 2,用户要求);逐文件提交后
@@ -28,6 +29,7 @@ import time
 from pathlib import Path
 
 from app.openlist import TASK_SUCCEEDED, OpenListClient, OpenListError
+from app.processor import SUBTITLE_EXTS, VIDEO_EXTS
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,12 @@ POLL_EVERY_SECONDS = 20    # 任务状态结算间隔(与大轮扫描解耦:搬�
 MAX_ATTEMPTS = 3           # 单个条目最多重试次数(超过则放弃并提示人工)
 RETRY_BACKOFF_SECONDS = 300  # 失败后至少等这么久再重试(避免同一轮/连续轮空转)
 TASK_LOST_SECONDS = 1800   # 任务在列表里消失且目标文件也不在:判定任务丢失的时间阈值
+CLEANUP_MAX_ATTEMPTS = 3   # "移动成功但源没删掉"最多自动重试几轮,之后才交人工
+
+# 清理源目录时"这目录还有价值吗"的判据:**有视频或字幕就留**。
+# 只认这两类:只剩 .nfo/.jpg/sample 之类的目录会被清掉(用户 2026-09-12 明确要求)。
+# 与处理段共用同一份扩展名(单一真源,否则会出现"取件段删掉处理段本来能处理的文件")。
+KEEP_EXTS = VIDEO_EXTS | SUBTITLE_EXTS
 
 
 class ResourceFetcher:
@@ -223,11 +231,40 @@ class ResourceFetcher:
                     return stat
         return stat
 
-    async def _prune_source_dir(self, base: str, folder: str) -> None:
-        """源目录搬空后删掉空壳(自底向上;仅在**确认为空**时删,留了文件就不动)。"""
+    async def _subtree_has_media(self, path: str) -> bool:
+        """这个目录(含子目录)里还有视频或字幕吗?
+
+        读不到就当"有"→ 宁可留着也不误删(fail-closed)。
+        """
         if self.client is None:
+            return True
+        try:
+            items = await self.client.list_dir(path)
+        except OpenListError as exc:
+            logger.debug("列目录失败(按「有内容」处理,不删):%s:%s", path, exc)
+            return True
+        for it in items:
+            name = str(it.get("name") or "")
+            if not name:
+                continue
+            if it.get("is_dir"):
+                if await self._subtree_has_media(f"{path.rstrip('/')}/{name}"):
+                    return True
+            elif Path(name).suffix.lower() in KEEP_EXTS:
+                return True
+        return False
+
+    async def _prune_source_dir(self, base: str, folder: str) -> None:
+        """清理源目录:**没有视频也没有字幕**的目录连同里面的杂物一起删掉(自底向上)。
+
+        判据是"这一支还有没有视频/字幕"(用户 2026-09-12 要求),不再是"是否为空"——
+        只剩 .nfo/.jpg/sample 的空壳同样会清掉。只在**监控目录内部**动手,
+        自底向上删所以父目录会跟着一起干净;读不到一律不删(fail-closed)。
+        """
+        if self.client is None or not folder:
             return
         root = f"{base.rstrip('/')}/{folder}"
+        base_norm = base.rstrip("/")
         dirs: list[str] = []
         stack = [root]
         while stack:
@@ -240,16 +277,32 @@ class ResourceFetcher:
             except OpenListError as exc:
                 logger.debug("列源子目录失败(%s):%s", cur, exc)
         for d in sorted(set(dirs), key=len, reverse=True):
+            if d.rstrip("/") == base_norm:
+                continue                          # 绝不删监控目录本身
             parent, _, name = d.rpartition("/")
             if not name:
                 continue
             try:
-                if await self.client.list_dir(d):
-                    continue                      # 仍有内容(如非视频文件):不动
+                if await self._subtree_has_media(d):
+                    continue                      # 还有视频/字幕 → 保留
                 await self.client.remove(parent or "/", [name])
-                logger.info("获取段:源目录已搬空并清理:%s", d)
+                logger.info("获取段:源目录已无视频/字幕,清理:%s", d)
             except OpenListError as exc:
-                logger.debug("清理空源目录失败(%s):%s", d, exc)
+                logger.debug("清理源目录失败(%s):%s", d, exc)
+
+    async def _prune_for_file(self, src_path: str) -> None:
+        """源文件删掉后,顺手看看它所在的目录是不是已经"没视频没字幕"了。
+
+        路径必须落在**配置的监控目录**里才算数(绝不越界删别处)。
+        """
+        parent = src_path.rpartition("/")[0]
+        for mon in self.bot.cfg.openlist_monitor_list():
+            mon = mon.rstrip("/")
+            if parent == mon or parent.startswith(mon + "/"):
+                folder = parent[len(mon):].strip("/")
+                if folder:
+                    await self._prune_source_dir(mon, folder)
+                return
 
     def _local_path(self, src_path: str) -> Path:
         """源路径 → 本地落地点路径(**保持相对子目录结构**)。
@@ -268,8 +321,11 @@ class ResourceFetcher:
         """是否该为这个源条目提交搬运。"""
         row = self.bot.store.get_fetch(src)
         if row:
-            if row["status"] in ("moving", "done"):
-                return False                       # 在途 / 已完成:跳过
+            # ⚠️ cleanup 必须在这里一起跳过:它表示"内容已经搬走了、只是源文件没删掉"。
+            # 本地文件此时多半已被处理段移走(落地点是空的),`_local_path` 兜底救不了,
+            # 漏了这行就会把同一个文件**再搬一次**(重复下载 + 重复处理 + 115 重复入库)。
+            if row["status"] in ("moving", "done", "cleanup"):
+                return False                       # 在途 / 已完成 / 待清理源:跳过
             if row["status"] == "failed":
                 if row["attempts"] >= MAX_ATTEMPTS:
                     return False                   # 重试超限:交人工
@@ -312,6 +368,8 @@ class ResourceFetcher:
 
     async def _poll_once(self) -> dict:
         settled = {"done": 0, "failed": 0}
+        # 待清理源与在途任务无关,先单独走一轮(否则下面的 early-return 会把它跳过)
+        await self._retry_cleanup(settled)
         moving = self.bot.store.list_fetch("moving")
         if not moving or self.client is None:
             return settled
@@ -390,7 +448,10 @@ class ResourceFetcher:
         """校验"移动"是否真的删掉了源。
 
         实测(2026-09-11):openlist 偶发**任务报成功但源文件仍在**(夸克侧删源那步没做成),
-        留个残影在源目录里。这里补删一次并告警;补删也失败则通知人工(不会反复重试)。
+        留个残影在源目录里。这里立刻补删一次;**补删失败不再直接交人工**(2026-09-12 改):
+        实测这种偶发并不罕见(6 集里 4 集命中),一次不成推给人代价太大 →
+        记成 `cleanup` 状态,交给后续扫描轮各重试一次(见 `_retry_cleanup`),
+        重试到头才通知人工。
         """
         if self.client is None:
             return
@@ -407,10 +468,47 @@ class ResourceFetcher:
             await self.client.remove(parent or "/", [name])
             logger.info("获取段已补删源:%s", row["src_path"])
         except OpenListError as exc:
-            logger.error("获取段补删源失败(%s):%s", row["src_path"], exc)
-            await self._notify(
-                f"⚠️ 源文件删不掉(openlist 报移动成功但源仍在):{row['src_path']}\n"
-                f"原因:{str(exc)[:120]}\n可到 openlist 里手动删除。")
+            logger.error("获取段补删源失败,转为待清理(后续扫描轮再试):%s:%s",
+                         row["src_path"], exc)
+            self._save(row["src_path"], size=int(row["src_size"] or 0), status="cleanup",
+                       error=str(exc)[:120], attempts=1)
+            return
+        await self._prune_for_file(row["src_path"])
+
+    async def _retry_cleanup(self, settled: dict) -> None:
+        """重试"移动成功但源没删掉"的残留:每轮一次、最多 CLEANUP_MAX_ATTEMPTS 轮。
+
+        内容此刻已经在本地(并已交处理段),所以**清不掉也不影响业务**,只是源盘留个副本;
+        因此这里的重试是"顺手多做几次",成不成都不能拖累搬运动作本身。
+        """
+        if self.client is None:
+            return
+        for row in self.bot.store.list_fetch("cleanup"):
+            parent, _, name = row["src_path"].rpartition("/")
+            attempts = int(row["attempts"] or 0)
+            size = int(row["src_size"] or 0)
+            try:
+                await self.client.remove(parent or "/", [name])
+            except OpenListError as exc:
+                attempts += 1
+                if attempts >= CLEANUP_MAX_ATTEMPTS:
+                    self._save(row["src_path"], size=size, status="done",
+                               error=f"源删除放弃:{str(exc)[:100]}", attempts=attempts)
+                    logger.error("获取段:源仍删不掉,已放弃并交人工(%s):%s", row["src_path"], exc)
+                    await self._notify(
+                        f"⚠️ 源文件删不掉(内容已在本地/115,不影响业务):{row['src_path']}\n"
+                        f"已自动重试 {attempts} 轮仍失败:{str(exc)[:120]}\n可在 openlist 里手动删除。")
+                else:
+                    self._save(row["src_path"], size=size, status="cleanup",
+                               error=str(exc)[:120], attempts=attempts)
+                    logger.warning("获取段:源仍删不掉,下轮再试(第 %d/%d 次):%s",
+                                   attempts, CLEANUP_MAX_ATTEMPTS, row["src_path"])
+                continue
+            attempts += 1
+            self._save(row["src_path"], size=size, status="done", error="", attempts=attempts)
+            settled["done"] = settled.get("done", 0) + 1
+            logger.info("获取段已补删源(第 %d 次重试成功):%s", attempts, row["src_path"])
+            await self._prune_for_file(row["src_path"])
 
     async def _notify(self, text: str) -> None:
         if self.bot.cfg.tg_admin_ids:

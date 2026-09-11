@@ -473,15 +473,21 @@ def test_stray_source_is_deleted_after_done(tmp_path):
     assert len(client.moves) == 1                 # 不会因为源还在而重复提交
 
 
-def test_stray_source_delete_failure_notifies(tmp_path):
-    """补删也失败 → 私聊通知人工,不静默。"""
+def test_stray_source_delete_failure_defers_to_retry(tmp_path):
+    """补删也失败 → **不当场打扰人**(2026-09-12 改):记成待清理,交给后续轮次重试;
+    重试到头才通知。实测这种偶发不罕见(6 集里 4 集命中),一次不成推给人代价太大。"""
     f, bot, client = _fetcher_with_remain(tmp_path)
     asyncio.run(f.scan_now())
     client.undone[0].update({"state": 2})
     client.done.append(client.undone.pop(0))
     client.remove_fails = True
     asyncio.run(f.scan_now())
-    assert bot.notified and "源文件删不掉" in bot.notified[-1]
+
+    assert bot.notified == []                       # 第一次失败不惊动人
+    rows = bot.store.list_fetch("cleanup")
+    assert len(rows) == 1 and rows[0]["attempts"] == 1
+    # 且不会因为状态变了就重复提交(源文件还在监控目录里)
+    assert len(client.moves) == 1
 
 
 def test_settle_frees_slot_and_chains_next_submit(tmp_path):
@@ -577,3 +583,107 @@ def test_empty_source_folder_is_pruned(tmp_path):
     (bot.cfg.openlist_dir / "留着" / "video.mkv").write_bytes(b"x")   # 视频已本地存在 → 跳过
     asyncio.run(f.scan_now())
     assert "留着" in {i["name"] for i in client.items[_MON]}
+
+
+# ── 补删重试 + 源目录清理(2026-09-12) ────────────────────────
+def test_should_fetch_skips_cleanup_status(tmp_path):
+    """`cleanup` 状态必须与 moving/done 一起跳过。
+
+    回归锁:只跳 moving/done 时,处于 cleanup 的源文件(**仍在监控目录里**)会被再搬一次
+    —— 本地文件这时已被处理段移走,`_local_path` 兜底救不了 → 重复下载 + 重复处理 + 115 重复入库。
+    """
+    f, bot, _ = _fetcher(tmp_path)
+    src = f"{_MON}/a.mkv"
+    bot.store.save_fetch(src, 1000, status="cleanup", attempts=1, error="remove 500")
+    assert f._should_fetch(src, 1000, "a.mkv") is False
+
+
+def test_verify_source_gone_failure_marks_cleanup_without_notify(tmp_path):
+    """补删第一次失败:记成 cleanup 待后续重试,**不当场打扰人**。"""
+    f, bot, client = _fetcher(tmp_path)
+    src = f"{_MON}/S01/a.mkv"
+    client.items[f"{_MON}/S01"] = [{"name": "a.mkv", "size": 1000, "is_dir": False}]
+
+    async def boom(dir_path, names):
+        raise OpenListError("/api/fs/remove 返回 code=500:inner error")
+
+    client.remove = boom
+    asyncio.run(f._verify_source_gone({"src_path": src, "src_size": 1000, "attempts": 0}))
+
+    saved = bot.store.get_fetch(src)
+    assert saved["status"] == "cleanup" and saved["attempts"] == 1
+    assert bot.notified == []
+
+
+def test_cleanup_retry_succeeds_and_prunes_dir(tmp_path):
+    """重试成功 → 状态回到 done,并顺手把"没视频没字幕"的源目录清掉。"""
+    f, bot, client = _fetcher(tmp_path, files=[{"name": "S01", "size": 0, "is_dir": True}])
+    src = f"{_MON}/S01/a.mkv"
+    client.items[f"{_MON}/S01"] = [
+        {"name": "a.mkv", "size": 1000, "is_dir": False},     # 残留的源文件
+        {"name": "a.nfo", "size": 10, "is_dir": False},       # 杂物(不算媒体)
+    ]
+    bot.store.save_fetch(src, 1000, status="cleanup", attempts=1, error="500")
+
+    asyncio.run(f._retry_cleanup({"done": 0, "failed": 0}))
+
+    assert bot.store.get_fetch(src)["status"] == "done"
+    assert client.items[_MON] == []        # S01 整个被清掉(只剩 .nfo,无视频/字幕)
+    assert bot.notified == []              # 自己清干净了,不用惊动人
+
+
+def test_cleanup_gives_up_after_max_attempts_then_notifies(tmp_path):
+    """重试到头仍失败:放弃(置 done)+ 通知人工一次,不再空转。"""
+    from app.fetcher import CLEANUP_MAX_ATTEMPTS
+
+    f, bot, client = _fetcher(tmp_path)
+    src = f"{_MON}/S01/a.mkv"
+
+    async def boom(dir_path, names):
+        raise OpenListError("code=500:inner error")
+
+    client.remove = boom
+    bot.store.save_fetch(src, 1000, status="cleanup",
+                         attempts=CLEANUP_MAX_ATTEMPTS - 1, error="500")
+
+    asyncio.run(f._retry_cleanup({"done": 0, "failed": 0}))
+
+    assert bot.store.get_fetch(src)["status"] == "done"      # 收尾,不再挂着
+    assert len(bot.notified) == 1 and "删不掉" in bot.notified[0]
+
+
+def test_prune_keeps_dirs_with_video_or_subtitle(tmp_path):
+    """判据:**子树里还有视频或字幕就保留**;只剩 .nfo/.jpg 的删掉(自底向上级联)。"""
+    f, bot, client = _fetcher(tmp_path, files=[
+        {"name": "有视频", "size": 0, "is_dir": True},
+        {"name": "有字幕", "size": 0, "is_dir": True},
+        {"name": "只有图", "size": 0, "is_dir": True},
+        {"name": "父", "size": 0, "is_dir": True},
+    ])
+    client.items[f"{_MON}/有视频"] = [{"name": "a.mkv", "size": 1, "is_dir": False}]
+    client.items[f"{_MON}/有字幕"] = [{"name": "b.srt", "size": 1, "is_dir": False}]
+    client.items[f"{_MON}/只有图"] = [{"name": "c.jpg", "size": 1, "is_dir": False}]
+    client.items[f"{_MON}/父/子"] = [{"name": "d.nfo", "size": 1, "is_dir": False}]
+    client.items[f"{_MON}/父"] = [{"name": "子", "size": 0, "is_dir": True}]
+
+    for folder in ("有视频", "有字幕", "只有图", "父"):
+        asyncio.run(f._prune_source_dir(_MON, folder))
+
+    names = {i["name"] for i in client.items[_MON]}
+    assert "有视频" in names        # 有视频 → 留
+    assert "有字幕" in names        # 有字幕 → 留
+    assert "只有图" not in names    # 只剩图 → 删
+    assert "父" not in names        # 子目录被删后父也空了 → 级联删掉
+
+
+def test_prune_never_touches_paths_outside_monitor(tmp_path):
+    """不在监控目录里的路径:一律不动(绝不越界删别处的目录)。"""
+    f, bot, client = _fetcher(tmp_path)
+    other = "/别的目录"
+    client.items[other] = [{"name": "x", "size": 0, "is_dir": True}]
+    client.items[f"{other}/x"] = [{"name": "a.nfo", "size": 1, "is_dir": False}]
+
+    asyncio.run(f._prune_for_file(f"{other}/x/a.mkv"))
+
+    assert client.items[other]                 # 监控目录之外原样保留
+    assert f"{other}/x" in client.items

@@ -37,7 +37,10 @@ logger = logging.getLogger(__name__)
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".ts", ".m2ts", ".mov", ".wmv", ".flv",
               ".rmvb", ".webm", ".mpg", ".mpeg", ".iso", ".m4v"}
-SIDECAR_EXTS = {".srt", ".ass", ".ssa", ".sub", ".nfo", ".jpg", ".jpeg", ".png"}
+# 字幕单独拎出来:取件段清理源目录时按「有没有视频/字幕」判定要不要删,
+# 它只认这个子集(不含 .nfo/.jpg 这类伴行美术与元数据)
+SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub"}
+SIDECAR_EXTS = SUBTITLE_EXTS | {".nfo", ".jpg", ".jpeg", ".png"}
 
 
 class ProcessChain:
