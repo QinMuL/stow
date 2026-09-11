@@ -7,11 +7,12 @@
   ②' **实测补充(2026-09-11)**:CD2 的跨云 MoveFile **实际按复制执行**(任务 taskMode=0=Copy),
      本地源不会消失 → 因此在"内容确认完成"后**补一次 DeleteFile(源)**;
      将来 CD2 若真删源,这里的补删会因为文件已不存在而空转(幂等)
-  ③ 串行:同一时刻只跟一个上传任务(旧项目"每轮至多提交一个";避免同时多路占带宽/触发风控)
+  ③ 并发:同时最多 `upload_max_tasks` 个上传任务(默认 2;用户 2026-09-11 指出 CD2 可同时跑两个)
   ④ 完成判定**只看内容**:任务的 `uploadedBytes == totalBytes` 且 `errors` 为空 = 完成;
      `errors` 非空 = 失败;任务消失且本地源也没了 = 完成(移动语义的天然信号)。
      ⚠️ 不按 TaskStatus 枚举名判定——本机服务器 1.0.13 与官方 proto 1.0.14 的口径不一致
   ⑤ 失败:本地源仍在(移动未成立)→ 退避重试,上限后通知人工
+  ⑥ 节奏:结算出一个完成就立刻补提交(不等下一轮扫描)——否则"传输 20 秒、等轮 5 分钟"
 
 重启安全:`upload_tasks` 表按文件名记状态,重启后继续追踪在途任务。
 """
@@ -70,9 +71,10 @@ class Uploader:
 
     async def run_loop(self) -> None:
         interval = max(60, int(self.bot.cfg.upload_interval_minutes) * 60)
-        logger.info("上传段已启动:%s → %s,每 %d 分钟一轮、每 %d 秒结算任务",
+        logger.info("上传段已启动:%s → %s,并发上限 %d,每 %d 分钟一轮、每 %d 秒结算任务",
                     self.bot.cfg.cd2_source_path, self.bot.cfg.cd2_dest_path,
-                    self.bot.cfg.upload_interval_minutes, POLL_EVERY_SECONDS)
+                    self.bot.cfg.upload_max_tasks, self.bot.cfg.upload_interval_minutes,
+                    POLL_EVERY_SECONDS)
         while True:
             try:
                 await self.scan_now()
@@ -87,9 +89,9 @@ class Uploader:
                 settled = await self._poll_tasks()
                 if settled["done"] or settled["failed"]:
                     logger.info("上传段结算:完成 %d,失败 %d", settled["done"], settled["failed"])
-                    # 串行位腾出后立刻接下一个(实测:单个上传仅 ~19s 命中秒传,
+                    # 并发位腾出后立刻补提交(实测:单个上传仅 ~19s 命中秒传,
                     # 但等下一轮 5 分钟扫描会让吞吐白等 —— 一批文件从 2 分钟变半小时)
-                    await self._submit_next()
+                    await self._submit_ready()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("上传段结算异常:%s", exc)
 
@@ -98,10 +100,12 @@ class Uploader:
         if not self.enabled():
             return "未启用上传段:请先在全局配置页填 CD2 待上传目录与上传目标目录。"
         settled = await self._poll_tasks()
-        submitted = await self._submit_next()
+        submitted = await self._submit_ready()
         head = "📤 上传段"
-        if submitted:
-            head += f":已提交「{submitted}」"
+        if len(submitted) == 1:
+            head += f":已提交「{submitted[0]}」"
+        elif submitted:
+            head += f":已提交 {len(submitted)} 个"
         elif settled["done"] or settled["failed"]:
             head += f":完成 {settled['done']},失败 {settled['failed']}"
         else:
@@ -114,37 +118,46 @@ class Uploader:
     def _pending_names(self) -> list[str]:
         return [r["name"] for r in self.bot.store.list_uploads("uploading")]
 
-    async def _submit_next(self) -> str:
-        """串行:已有在途任务则不提交;否则挑一个未处理的文件提交移动。"""
+    async def _submit_ready(self) -> list[str]:
+        """按并发上限补提交:在途数 < upload_max_tasks 就继续挑下一个。"""
+        submitted: list[str] = []
         async with self._lock:
-            if self._pending_names():
-                return ""
-            src_dir = Path(self.bot.cfg.cd2_source_path)
-            local_dir = Path(self.bot.cfg.clouddrive_dir)
-            candidates = sorted(
-                (p for p in local_dir.iterdir() if p.is_file()),
-                key=lambda p: p.stat().st_size,
-            )
-            for path in candidates:
-                row = self.bot.store.get_upload(path.name, path.stat().st_size)
-                if self._skip(row):
-                    continue
-                await self._ensure_dest_dir()
-                remote_src = f"{src_dir.as_posix().rstrip('/')}/{path.name}"
-                try:
-                    res = await asyncio.to_thread(
-                        self.client.move_file, [remote_src], self.bot.cfg.cd2_dest_path)
-                except Cd2Error as exc:
-                    logger.warning("上传提交失败(%s):%s", path.name, exc)
-                    continue
-                if not res["success"]:
-                    logger.warning("上传提交被拒(%s):%s", path.name, res["error"])
-                    self._record(path, status="failed", error=res["error"] or "提交被拒")
-                    continue
-                self._record(path, status="uploading", error="")
-                logger.info("上传段已提交移动:%s → %s", remote_src, self.bot.cfg.cd2_dest_path)
-                return path.name
-            return ""
+            limit = max(1, int(self.bot.cfg.upload_max_tasks))
+            while len(self._pending_names()) < limit:
+                name = await self._submit_one()
+                if not name:
+                    break
+                submitted.append(name)
+        return submitted
+
+    async def _submit_one(self) -> str:
+        """挑一个未处理的文件提交移动;无可提交返回空串(调用方持锁)。"""
+        src_dir = Path(self.bot.cfg.cd2_source_path)
+        local_dir = Path(self.bot.cfg.clouddrive_dir)
+        candidates = sorted(
+            (p for p in local_dir.iterdir() if p.is_file()),
+            key=lambda p: p.stat().st_size,
+        )
+        for path in candidates:
+            row = self.bot.store.get_upload(path.name, path.stat().st_size)
+            if self._skip(row):
+                continue
+            await self._ensure_dest_dir()
+            remote_src = f"{src_dir.as_posix().rstrip('/')}/{path.name}"
+            try:
+                res = await asyncio.to_thread(
+                    self.client.move_file, [remote_src], self.bot.cfg.cd2_dest_path)
+            except Cd2Error as exc:
+                logger.warning("上传提交失败(%s):%s", path.name, exc)
+                continue
+            if not res["success"]:
+                logger.warning("上传提交被拒(%s):%s", path.name, res["error"])
+                self._record(path, status="failed", error=res["error"] or "提交被拒")
+                continue
+            self._record(path, status="uploading", error="")
+            logger.info("上传段已提交移动:%s → %s", remote_src, self.bot.cfg.cd2_dest_path)
+            return path.name
+        return ""
 
     def _skip(self, row: dict | None) -> bool:
         if row is None:

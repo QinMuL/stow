@@ -143,7 +143,7 @@ class MonitorPassword(BaseModel):
 _INT_DEFAULTS = {"web_port": DEFAULT_WEB_PORT, "openlist_max_tasks": 2,
                  "fetch_interval_minutes": 5, "process_interval_minutes": 5,
                  "min_size_mb": 50, "min_age_seconds": 60,
-                 "upload_interval_minutes": 5}
+                 "upload_interval_minutes": 5, "upload_max_tasks": 2}
 
 # 可经 Web 修改的配置键白名单(类型: s=字符串, i=整数, ids=ID 列表)
 EDITABLE = {
@@ -156,7 +156,7 @@ EDITABLE = {
     "openlist_monitor_dirs": "s", "openlist_dest_path": "s",
     "openlist_max_tasks": "i", "fetch_interval_minutes": "i",
     "process_interval_minutes": "i", "min_size_mb": "i", "min_age_seconds": "i",
-    "clean_enabled": "b", "upload_interval_minutes": "i",
+    "clean_enabled": "b", "upload_interval_minutes": "i", "upload_max_tasks": "i",
     "cd2_address": "s", "cd2_token": "s", "cd2_source_path": "s", "cd2_dest_path": "s",
     "cd2_username": "s", "cd2_password": "s",
 }

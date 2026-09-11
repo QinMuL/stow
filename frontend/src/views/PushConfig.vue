@@ -145,6 +145,7 @@ onMounted(async () => {
   m.cd2_source_path = cfg.value.cd2_source_path || '/clouddrive'
   m.cd2_dest_path = cfg.value.cd2_dest_path ?? ''
   m.upload_interval_minutes = cfg.value.upload_interval_minutes || 5
+  m.upload_max_tasks = cfg.value.upload_max_tasks || 2
   model.value = m
   monitorRows.value = String(cfg.value.monitor_dirs || '')
     .split(',').map(x => x.trim()).filter(Boolean)
@@ -190,6 +191,7 @@ function formValues() {
   values.cd2_source_path = model.value.cd2_source_path
   values.cd2_dest_path = model.value.cd2_dest_path
   values.upload_interval_minutes = model.value.upload_interval_minutes
+  values.upload_max_tasks = model.value.upload_max_tasks
   return values
 }
 
@@ -460,7 +462,7 @@ async function saveChannels() {
       <h3>上传链(CD2 → 115)</h3>
       <div class="desc">
         把上传源里的成品<strong>移动</strong>到 115 网盘(走 CD2,移动=本地源随之消失);
-        串行上传,115 命中秒传则秒级完成
+        默认同时 2 个任务,115 命中秒传则秒级完成
       </div>
       <div class="field">
         <label>CD2 地址 <code>cd2_address</code></label>
@@ -490,9 +492,16 @@ async function saveChannels() {
         </div>
         <div class="hint">留空则上传段不启动;两个目录都可在 CloudDrive 目录树里逐级选择回填</div>
       </div>
-      <div class="field">
-        <label>上传轮询间隔(分钟)<code>upload_interval_minutes</code></label>
-        <input v-model="model.upload_interval_minutes" type="number" min="1">
+      <div class="grid2" style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="field">
+          <label>上传并发上限 <code>upload_max_tasks</code></label>
+          <input v-model="model.upload_max_tasks" type="number" min="1" max="5">
+          <div class="hint">CD2 可同时跑多个任务;默认 2</div>
+        </div>
+        <div class="field">
+          <label>上传轮询间隔(分钟)<code>upload_interval_minutes</code></label>
+          <input v-model="model.upload_interval_minutes" type="number" min="1">
+        </div>
       </div>
       <div class="actions">
         <button class="btn primary" :disabled="busy" @click="save(false)">保存</button>

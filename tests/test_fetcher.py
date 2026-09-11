@@ -339,13 +339,22 @@ def test_upload_uses_move_and_records_state(tmp_path):
     assert row["status"] == "uploading" and row["dest"] == "/115open/目标目录"
 
 
-def test_upload_serial_only_one_in_flight(tmp_path):
-    """串行:已有在途任务时不再提交第二个。"""
-    up, bot, client = _uploader(tmp_path, files=("a.mkv", "b.mkv"))
+def test_upload_concurrency_limit(tmp_path):
+    """并发上限:默认 2 —— 一轮内提交两个,第三个等在途腾位(用户 2026-09-11 指出 CD2 可同时跑两个)。"""
+    up, bot, client = _uploader(tmp_path, files=("a.mkv", "b.mkv", "c.mkv"))
     asyncio.run(up.scan_now())
+    assert len(client.moves) == 2                      # 并发 2
+    asyncio.run(up.scan_now())                          # 已有 2 个在途 → 不再提交
+    assert len(client.moves) == 2
+    assert "在途 2 个" in asyncio.run(up.scan_now())
+
+
+def test_upload_concurrency_configurable(tmp_path):
+    """并发上限可配:设为 1 即回到串行。"""
+    up, bot, client = _uploader(tmp_path, files=("a.mkv", "b.mkv"))
+    bot.cfg.upload_max_tasks = 1
     asyncio.run(up.scan_now())
     assert len(client.moves) == 1
-    assert "在途" in asyncio.run(up.scan_now())
 
 
 def test_upload_completes_when_source_gone(tmp_path):
@@ -477,13 +486,14 @@ def test_settle_frees_slot_and_chains_next_submit(tmp_path):
 
 
 def test_upload_settle_chains_next_submit(tmp_path):
-    """上传段:一个完成后立刻接下一个(实测单个仅 ~19s,等轮会白等 5 分钟)。"""
-    up, bot, client = _uploader(tmp_path, files=("a.mkv", "b.mkv"))
+    """上传段:腾出位后立刻补提交(实测单个仅 ~19s,等轮会白等 5 分钟)。"""
+    up, bot, client = _uploader(tmp_path, files=("a.mkv", "b.mkv", "c.mkv"))
+    bot.cfg.upload_max_tasks = 1                     # 用串行凸显"腾位即补"
     asyncio.run(up.scan_now())
     assert len(client.moves) == 1
     (bot.cfg.clouddrive_dir / "a.mkv").unlink()      # 第一个传完(源消失)
     client.tasks = []
     settled = asyncio.run(up._poll_tasks())
     assert settled["done"] == 1
-    asyncio.run(up._submit_next())                   # poll_loop 里就跟着做这一步
+    assert len(asyncio.run(up._submit_ready())) == 1  # poll_loop 里就跟着做这一步
     assert len(client.moves) == 2
