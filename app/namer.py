@@ -1,30 +1,39 @@
-"""目标文件名生成(处理段):用**探测到的画质事实** + TMDB 元数据拼规范名。
+"""目标文件名生成(处理段):**沿用原项目(mediapush)的命名规则**。
 
-模板沿用旧项目(用户的既有习惯):
-- 剧集:`{title}.{year}.SxxEyy.第N集.{quality} {tmdb-ID}{ext}`
-- 电影:`{title} ({year}) - {quality} {tmdb-ID}{ext}`
+模板(刮削向,变量缺失时连同分隔点一起折叠):
+- 电影:`{title} ({year}) - {quality}{-team} {tmdb-NNN}{ext}`
+- 剧集:`{title}.{year}.SxxEyy.第NN集.{quality}{-team} {tmdb-NNN}{ext}`(集号两位补零)
 
-quality 由探测标签 + 原文件名里的平台/来源 token 组成(缺失项连同分隔点一起折叠),
-**分辨率/编码/音频一律以探测为准**——这正是"探测"存在的意义:不信原始文件名。
+画质段顺序(原项目原样):
+`分辨率 · UHD · 播放平台 · WEB来源 · REMUX · HDR效果 · 视频编码 · 色深 · 帧率 · 音频`
 
-`{tmdb-NNN}` 写进文件名,Emby/飞牛可 100% 刮削;净化规则保证跨平台可用。
+变量来源分工(原项目语义):
+- 文件名(guessit):title/year/SxxExx/WEB来源/发布组/播放平台/UHD/REMUX
+- ffprobe 实测:分辨率/HDR 效果/视频编码/色深/帧率/音频编码
+- TMDB(zh-CN):规范 title/year/tmdb_id
+
+- `UHD` 仅在原文件名有独立 `uhd` token 时补
+- 原文件名含 `remux` → 来源写 `BluRay` 且加 `REMUX` 段(WEB 无 remux)
+- `{tmdb-NNN}` 写进文件名:Emby/飞牛 100% 刮削
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_MAX_STEM = 180          # stem 上限(留出扩展名与目录余量,规避 NTFS 260 限制)
+_MAX_STEM = 180          # stem 上限(给扩展名与目录留余量,规避 NTFS 260 限制)
 _BAD_CHARS = re.compile(r'[<>"/\\|?*\x00-\x1f]')
+_UHD_RE = re.compile(r"(?<![a-z0-9])uhd(?![a-z0-9])", re.IGNORECASE)
 
 
 def sanitize_name(name: str) -> str:
     """文件名净化:冒号→全角、去掉非法字符、剥尾部点空格、超长截断保扩展名。"""
     stem, dot, ext = name.rpartition(".")
-    if not dot:                      # 没有扩展名
+    if not dot:
         stem, ext = name, ""
     stem = stem.replace(":", "：")
     stem = _BAD_CHARS.sub("", stem).rstrip(" .")
@@ -33,49 +42,75 @@ def sanitize_name(name: str) -> str:
     return f"{stem}.{ext}" if ext else stem
 
 
-def _dedup(parts: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for p in parts:
-        key = p.lower()
-        if p and key not in seen:
-            seen.add(key)
-            out.append(p)
-    return out
+def _uhd_tag(raw_name: str) -> str:
+    """原名有独立 uhd token 才补 UHD(与旧项目一致)。"""
+    return "UHD" if _UHD_RE.search(raw_name or "") else ""
 
 
-def quality_label(probe, media=None) -> str:
-    """画质标签:探测标签打头(权威),再补原文件名里的平台/来源 token(不重复)。"""
-    parts: list[str] = list(getattr(probe, "quality_parts", []) or [])
-    if media is not None:
-        for tok in list(getattr(media, "quality_info", []) or []):
-            parts.append(tok)
-    return ".".join(_dedup([p.strip() for p in parts if p and p.strip()]))
+def _web_source(parsed_source: str, raw_name: str) -> str:
+    """来源标签:原名含 remux 一律判 BluRay(REMUX 必来自原盘)。"""
+    if "remux" in (raw_name or "").lower():
+        return "BluRay"
+    return parsed_source or ""
 
 
-def render_name(media, details: dict | None, probe, ext: str = ".mkv") -> str:
-    """生成目标文件名(不含目录)。识别不出标题时返回空串,由调用方拦下。"""
+def _resource_type(raw_name: str) -> str:
+    return "REMUX" if "remux" in (raw_name or "").lower() else ""
+
+
+def quality_label(probe, media=None, raw_name: str = "") -> str:
+    """画质标签:严格按原项目的顺序与来源拼装,缺失项自动折叠。"""
+    from app.media import extract_platform
+
+    probe = probe or ProbeTagsLike()
+    parts = [
+        getattr(probe, "resolution", ""),
+        _uhd_tag(raw_name),
+        extract_platform(raw_name) if raw_name else "",
+        _web_source(getattr(media, "source", "") if media else "", raw_name),
+        _resource_type(raw_name),
+        getattr(probe, "effect", ""),
+        getattr(probe, "video_codec", ""),
+        getattr(probe, "bit_depth", ""),
+        getattr(probe, "frame_rate", ""),
+        getattr(probe, "audio_codec", ""),
+    ]
+    return ".".join(p for p in parts if p)
+
+
+class ProbeTagsLike:
+    """给 quality_label 的兜底空对象(避免导入循环与 None 判断)。"""
+
+    resolution = effect = video_codec = bit_depth = frame_rate = audio_codec = ""
+
+
+def render_name(media, details: dict | None, probe, ext: str = "", raw_name: str = "") -> str:
+    """渲染目标文件名(不含目录);标题或季集号缺失时返回空串交调用方拦下。"""
+    raw_name = raw_name or getattr(media, "title", "") or ""
+    extension = ext or (Path(raw_name).suffix if "." in raw_name else ".mkv")
+    probe = probe or ProbeTagsLike()
     title = (details or {}).get("title") or getattr(media, "title", "") or ""
     title = sanitize_name(str(title).strip())
     if not title:
         return ""
     year = (details or {}).get("year") or getattr(media, "year", None)
-    quality = quality_label(probe, media)
-    tmdb_id = (details or {}).get("tmdb_id") or getattr(media, "tmdb_id", None)
-    tmdb_tag = f" {{tmdb-{tmdb_id}}}" if tmdb_id else ""
+    quality = quality_label(probe, media, raw_name)
+    team = getattr(media, "release_group", "") or ""
+    tail = f"-{team}" if team else ""
 
-    is_tv = getattr(media, "media_type", "movie") == "tv" or getattr(media, "season", None)
-    if is_tv:
-        season = getattr(media, "season", None) or (getattr(media, "seasons", None) or [None])[0]
+    if getattr(media, "media_type", "movie") == "movie":
+        head = f"{title} ({year})" if year else title
+        name = f"{head} - {quality}" if quality else head
+    else:
+        season = getattr(media, "season", None)
         episode = getattr(media, "episode_start", None)
         if season is None or episode is None:
-            return ""                       # 剧集缺季集号:不猜(交人工)
-        bits = [f"{title}.{year}" if year else title, f"S{int(season):02d}E{int(episode):02d}",
-                f"第{int(episode)}集"]
-        if quality:
-            bits.append(quality)
-        return sanitize_name(".".join(bits) + tmdb_tag + ext)
+            return ""                     # 剧集缺季集号:不猜(交人工)
+        se = f"S{int(season):02d}E{int(episode):02d}"
+        parts = [title] + ([str(year)] if year else []) + [se, f"第{int(episode):02d}集"]
+        head = ".".join(parts)
+        name = f"{head}.{quality}" if quality else head
 
-    head = f"{title} ({year})" if year else title
-    tail = f" - {quality}" if quality else ""
-    return sanitize_name(f"{head}{tail}{tmdb_tag}" + ext)
+    tmdb_id = (details or {}).get("tmdb_id") or getattr(media, "tmdb_id", None)
+    tmdb_tag = f" {{tmdb-{tmdb_id}}}" if tmdb_id else ""
+    return sanitize_name(f"{name}{tail}{tmdb_tag}{extension}")

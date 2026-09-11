@@ -38,6 +38,7 @@ class ProbeTags:
     bit_depth: str = ""
     video_codec: str = ""
     audio_codec: str = ""
+    frame_rate: str = ""      # 如 "25fps"(命名模板用)
     video_tracks: int = 0
     audio_tracks: int = 0
     duration: float = 0.0
@@ -45,8 +46,8 @@ class ProbeTags:
 
     @property
     def quality_parts(self) -> list[str]:
-        return [p for p in (self.resolution, self.effect, self.bit_depth,
-                            self.video_codec, self.audio_codec) if p]
+        return [p for p in (self.resolution, self.effect, self.video_codec,
+                            self.bit_depth, self.frame_rate, self.audio_codec) if p]
 
     def ok(self) -> bool:
         """探测是否拿到了可用信息(至少认出分辨率或编码)。"""
@@ -108,6 +109,17 @@ def tags_from_ffprobe(data: dict) -> ProbeTags:
             t.bit_depth = f"{int(m.group(1))}bit"
         elif pix_fmt.startswith(("p10", "yuv420p10", "yuv422p10", "yuv444p10")):
             t.bit_depth = "10bit"
+
+    # 帧率:r_frame_rate 形如 "25/1" / "24000/1001"
+    fr = str(v.get("r_frame_rate") or v.get("avg_frame_rate") or "")
+    if "/" in fr:
+        num, _, den = fr.partition("/")
+        try:
+            fps = float(num) / float(den or 1)
+            if fps > 0:
+                t.frame_rate = f"{fps:.3f}".rstrip("0").rstrip(".") + "fps"
+        except (ValueError, ZeroDivisionError):
+            pass
 
     t.video_codec = _VIDEO_CODEC.get(str(v.get("codec_name") or "").lower(), "")
     if audios:

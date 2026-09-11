@@ -42,6 +42,7 @@ class AggregatedMedia:
     quality: str = ""
     source: str = ""
     hdr: str = ""
+    release_group: str = ""   # 发布组(命名模板 -{team} 用;已过 clean_release_group)
     quality_info: list[str] = field(default_factory=list)
     file_count: int = 0
     total_size: int = 0
@@ -452,6 +453,7 @@ def analyze_share(files: list[ShareFile]) -> AggregatedMedia | None:
         quality=best.quality,
         source=best.source,
         hdr=best.hdr,
+        release_group=best.release_group,
         quality_info=best.quality_info,
         file_count=len(videos),
         total_size=sum(f.size for f in files if not f.is_dir and f.size),

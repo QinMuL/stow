@@ -118,7 +118,7 @@ class ProcessChain:
             await self._notify(
                 f"❓ 无法处理「{path.name}」:TMDB 未命中(识别不出是哪部作品),已留在落地点待人工。")
             return "unrecognized"
-        target = render_name(media, details, probe, path.suffix.lower())
+        target = render_name(media, details, probe, path.suffix.lower(), raw_name=path.name)
         if not target:
             logger.warning("识别不完整(TMDB=%s),拦下:%s", bool(details), path.name)
             self._record(path, status="unrecognized", error="TMDB 未命中或缺季集号")

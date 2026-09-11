@@ -244,3 +244,59 @@ async def test_match_no_result_returns_none(monkeypatch):
 
     monkeypatch.setattr(TmdbClient, "_get", fake_get)
     assert await client.match(_media(title="不存在的片名")) is None
+
+
+# ── 剧集多候选消歧(实测案例:茶啊二中 vs 茶啊二中叭叭叭) ──────
+def _client_with_seasons(seasons_by_id: dict[int, list[int]]):
+    """构造不发请求的客户端:get_details 用假数据替换。"""
+    client = TmdbClient("dummy-key")
+
+    async def fake_details(tid, media_type):
+        if tid not in seasons_by_id:
+            return None
+        return {"title": f"t{tid}", "seasons": [{"season": s} for s in seasons_by_id[tid]]}
+
+    client.get_details = fake_details  # type: ignore[method-assign]
+    return client
+
+
+def test_tv_disambiguation_prefers_season_coverage():
+    """资源 S06E01:只有 6 季的《茶啊二中》覆盖第 6 季 → 选它(而非首播最晚的衍生剧)。"""
+    import asyncio
+
+    client = _client_with_seasons({
+        119059: [0, 1, 2, 3, 4, 5, 6],     # 正主(2014,6 季)
+        195224: [1],                        # 茶啊二中叭叭叭(2017,1 季)
+        237306: [1],                        # 泡面番(2016,1 季)
+    })
+    media = _media(title="茶啊二中", year=2025, season=6, episode_start=1)
+    matched = [_cand(119059, "茶啊二中", 2014), _cand(195224, "茶啊二中叭叭叭", 2017),
+               _cand(237306, "茶啊二中泡面番", 2016)]
+    picked = asyncio.run(client._pick_by_season(matched, media))
+    assert picked is not None and picked["id"] == 119059
+    asyncio.run(client.aclose())
+
+
+def test_tv_disambiguation_probes_beyond_newest_when_needed():
+    """覆盖该季的候选可能排在后面:排序要优先"标题完全相等"的(否则探不到)。"""
+    import asyncio
+
+    client = _client_with_seasons({1: [1], 2: [1], 3: [1], 4: [1], 5: [1],
+                                   9: [0, 1, 2, 3, 4, 5, 6]})
+    media = _media(title="正主剧", year=2025, season=6, episode_start=1)
+    matched = [_cand(i, f"正主剧衍生{i}", 2015 + i) for i in range(1, 6)]
+    matched.append(_cand(9, "正主剧", 2011))          # 标题全等但年份最老
+    picked = asyncio.run(client._pick_by_season(matched, media))
+    assert picked is not None and picked["id"] == 9
+    asyncio.run(client.aclose())
+
+
+def test_tv_disambiguation_falls_back_when_none_covers():
+    """候选都不覆盖该季 → 返回 None,交回原规则(取首播最晚),不阻断匹配。"""
+    import asyncio
+
+    client = _client_with_seasons({1: [1], 2: [1, 2]})
+    media = _media(title="某剧", year=2025, season=9, episode_start=1)
+    matched = [_cand(1, "某剧", 2014), _cand(2, "某剧第二季", 2016)]
+    assert asyncio.run(client._pick_by_season(matched, media)) is None
+    asyncio.run(client.aclose())

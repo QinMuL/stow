@@ -18,6 +18,7 @@ _POSTER = "https://image.tmdb.org/t/p/w500"
 _BACKDROP = "https://image.tmdb.org/t/p/w780"
 
 # 别名兜底最多查几条详情(防候选多打爆 TMDB 限流)
+_SEASON_PROBE_LIMIT = 6   # 剧集消歧最多拉几个候选详情
 _NEAR_MISS_LIMIT = 5
 
 
@@ -134,7 +135,42 @@ class TmdbClient:
                     matched.append(c)
         if not matched:
             return None
+        if mtype == "tv" and media.season is not None and len(matched) > 1:
+            picked = await self._pick_by_season(matched, media)
+            if picked is not None:
+                return picked
         return _pick_best(matched, media, mtype)
+
+    async def _pick_by_season(self, matched: list[dict], media) -> dict | None:
+        """剧集多候选消歧:选"季列表覆盖资源季号"的条目。
+
+        动机(实测):`茶啊二中.2025.S06E01` 有 4 个同名/同系列候选,原规则"取首播最晚"
+        选中了只有 1 季的《茶啊二中叭叭叭》(2017),而《茶啊二中》(2014) 才是 6 季的正主。
+        按季号覆盖判定后才选对;候选都不覆盖时返回 None,交回原规则。
+        """
+        target_season = int(media.season)
+        # 排序:标题与查询词**完全相等**的优先(正主通常是它,如《茶啊二中》vs《茶啊二中叭叭叭》),
+        # 其余退化为"首播年从新到旧"(与旧规则同序)——实测若不优先,正主会排在探测范围之外
+        queries = {str(getattr(media, "title", "") or "").strip()}
+        queries |= {str(x).strip() for x in getattr(media, "alt_queries", []) or []}
+
+        def _rank(c: dict) -> tuple[int, int]:
+            name = str(c.get("name") or c.get("title") or "").strip()
+            return (1 if name in queries else 0, _cand_year(c) or 0)
+
+        ordered = sorted(matched, key=_rank, reverse=True)
+        for c in ordered[:_SEASON_PROBE_LIMIT]:
+            try:
+                d = await self.get_details(int(c["id"]), "tv")
+            except Exception as exc:  # noqa: BLE001 - 详情失败不影响其余候选
+                logger.warning("取候选详情失败(id=%s):%s", c.get("id"), exc)
+                continue
+            seasons = {int(s.get("season") or 0) for s in (d or {}).get("seasons", [])}
+            if target_season in seasons:
+                logger.info("剧集消歧:季 %d 命中 id=%s %r(候选 %d 个)",
+                            target_season, c.get("id"), (d or {}).get("title"), len(matched))
+                return c
+        return None
 
     # ── 详情(归一化) ─────────────────────────────────────
     async def get_details(self, tmdb_id: int, media_type: str) -> dict | None:

@@ -76,27 +76,47 @@ def _media(name: str):
 
 
 def test_render_episode_name():
+    """剧集模板(原项目规则):SxxEyy + 第NN集(两位补零),来源在效果之前。"""
     tags = ProbeTags(resolution="2160p", effect="HDR10", bit_depth="10bit",
-                     video_codec="H.265", audio_codec="DDP")
-    name = render_name(_media("飞到我心上.2026.WEB-DL.S01E12.mkv"),
-                       {"title": "飞到我心上", "year": 2026, "tmdb_id": 123456}, tags, ".mkv")
-    assert name == "飞到我心上.2026.S01E12.第12集.2160p.HDR10.10bit.H.265.DDP.WEB-DL {tmdb-123456}.mkv"
+                     video_codec="H.265", audio_codec="DDP", frame_rate="25fps")
+    raw = "飞到我心上.2026.WEB-DL.S01E12.mkv"
+    name = render_name(_media(raw), {"title": "飞到我心上", "year": 2026, "tmdb_id": 123456},
+                       tags, ".mkv", raw_name=raw)
+    assert name == ("飞到我心上.2026.S01E12.第12集."
+                    "2160p.WEB-DL.HDR10.H.265.10bit.25fps.DDP {tmdb-123456}.mkv")
+
+
+def test_render_episode_pads_episode_number():
+    """第 8 集 → 第08集(原项目两位补零)。"""
+    raw = "某剧.2026.S01E08.mkv"
+    name = render_name(_media(raw), {"title": "某剧", "year": 2026}, ProbeTags(), ".mkv", raw_name=raw)
+    assert "第08集" in name
+
+
+def test_render_keeps_platform_uhd_remux_from_raw_name():
+    """平台/UHD/REMUX/BluRay 这些"只有原文件名才有"的线索按旧规则带进名字。"""
+    raw = "某剧.2026.2160p.UHD.BluRay.REMUX.Viu.WEB-DL.H.265.mkv"
+    tags = ProbeTags(resolution="2160p", video_codec="H.265")
+    name = render_name(_media(raw), {"title": "某剧", "year": 2026}, tags, ".mkv", raw_name=raw)
+    assert ".UHD." in name and "BluRay.REMUX" in name and "Viu" in name
 
 
 def test_render_movie_name():
+    raw = "何以为家 (2018).mkv"
     tags = ProbeTags(resolution="1080p", video_codec="H.264", audio_codec="AAC")
-    name = render_name(_media("何以为家 (2018).mkv"),
-                       {"title": "何以为家", "year": 2018, "tmdb_id": 517148}, tags, ".mkv")
+    name = render_name(_media(raw), {"title": "何以为家", "year": 2018, "tmdb_id": 517148},
+                       tags, ".mkv", raw_name=raw)
     assert name == "何以为家 (2018) - 1080p.H.264.AAC {tmdb-517148}.mkv"
 
 
 def test_render_tv_without_episode_is_blocked():
     """剧集(有季无集) → 返回空串交人工;无 SxxEyy 的按电影处理。"""
     tags = ProbeTags(resolution="1080p")
-    assert render_name(_media("某剧.2026.S01.mkv"),
-                       {"title": "某剧", "year": 2026}, tags, ".mkv") == ""
-    assert render_name(_media("某剧.2026.WEB-DL.mkv"),
-                       {"title": "某剧", "year": 2026}, tags, ".mkv") == "某剧 (2026) - 1080p.WEB-DL.mkv"
+    raw = "某剧.2026.S01.mkv"
+    assert render_name(_media(raw), {"title": "某剧", "year": 2026}, tags, ".mkv", raw_name=raw) == ""
+    raw2 = "某剧.2026.WEB-DL.mkv"
+    assert render_name(_media(raw2), {"title": "某剧", "year": 2026}, tags, ".mkv",
+                       raw_name=raw2) == "某剧 (2026) - 1080p.WEB-DL.mkv"
 
 
 def test_render_requires_title():
@@ -112,11 +132,12 @@ def test_sanitize_name_rules():
     assert len(long) <= 185 and long.endswith(".mkv")
 
 
-def test_quality_label_dedups_and_prefers_probe():
-    tags = ProbeTags(resolution="1080p", video_codec="H.265")
-    media = _media("片名.2026.1080p.WEB-DL.mkv")             # 原文件名里也有 1080p
-    label = quality_label(tags, media)
-    assert label.split(".").count("1080p") == 1 and "WEB-DL" in label
+def test_quality_label_order_and_no_duplicates():
+    """画质段顺序固定为"分辨率.平台.来源.效果.编码…",探测值优先且不重复。"""
+    raw = "片名.2026.1080p.WEB-DL.mkv"
+    tags = ProbeTags(resolution="1080p", video_codec="H.265", effect="HDR10")
+    label = quality_label(tags, _media(raw), raw)
+    assert label == "1080p.WEB-DL.HDR10.H.265"      # 顺序固定,且 1080p 不重复
 
 
 # ── 探测映射(纯函数) ───────────────────────────────────────
@@ -221,7 +242,7 @@ def test_chain_happy_path_renames_hashes_pushes_and_archives(tmp_path, monkeypat
     archived = list(Path(bot.cfg.clouddrive_dir).iterdir())
     assert len(archived) == 1
     assert archived[0].name == (
-        "飞到我心上.2026.S01E12.第12集.1080p.H.264.AAC.WEB-DL {tmdb-123456}.mkv")
+        "飞到我心上.2026.S01E12.第12集.1080p.WEB-DL.H.264.AAC {tmdb-123456}.mkv")
     # 推的是 ed2k 卡,链接里的文件名就是规范名,hash 非空
     assert len(bot.pushed) == 1
     uri = bot.pushed[0].url
