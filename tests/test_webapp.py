@@ -498,13 +498,18 @@ def test_media_root_from_config_file(tmp_path):
 
 
 def test_status_reports_version(tmp_path):
-    """侧栏版本号取自后端单一真源(app.__version__)。"""
+    """侧栏版本号取自后端单一真源(app.__version__),且形如 x.y.z。
+
+    别断言具体版本号(发版一改就红)——只锁"格式对 + 与真源一致"。
+    """
+    import re
+
     from app import __version__
 
     client = _client(tmp_path)
     token = _login(client)
     assert client.get("/api/status", headers=_h(token)).json()["version"] == __version__
-    assert __version__.startswith("0.2")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__), __version__
 
 
 # ── openlist 目录选择器数据源 ───────────────────────────────
@@ -546,11 +551,40 @@ def test_pipeline_endpoint_shape(tmp_path):
     assert [s["key"] for s in d["segments"]] == ["fetch", "process", "upload"]
     for s in d["segments"]:
         assert {"name", "from", "to", "items", "today", "last_activity"} <= set(s)
-    assert set(d["numbers"]) == {"pushed_today", "moved_gb_today", "uploaded_today", "disk"}
+    # 只留磁盘卡(今日三数已删,读数看 7 日趋势图例)
+    assert set(d["numbers"]) == {"disk"}
+    # 本机实时资源(CPU/内存/网络)—— 读不到 /proc 时全是 None,字段必须在
+    assert set(d["sys"]) >= {"cpu_percent", "mem_percent", "net_rx_bps", "net_tx_bps",
+                             "cpu_count", "load1"}
     assert len(d["trend"]["labels"]) == 7 and len(d["trend"]["pushed"]) == 7
+    assert len(d["trend"]["moved_gb"]) == 7 and len(d["trend"]["uploaded"]) == 7
     assert isinstance(d["attention"], list) and isinstance(d["recent"], list)
     # 未配置 CD2 时上传段标记为未启用
     assert d["segments"][2]["enabled"] is False
+
+
+def test_daily_series_uploaded_counts(tmp_path):
+    """趋势第三序列(上传条数):按天聚合、只算 status=done(失败不计),跟随 7 日窗口。"""
+    import time as _time
+
+    from app.store import Store
+
+    s = Store(tmp_path / "stow.db")
+    s.save_upload("a.mkv", 1, status="done")
+    s.save_upload("b.mkv", 1, status="done")
+    s.save_upload("c.mkv", 1, status="failed", error="目标不可写")   # 同一天但失败 → 不该计入
+    s.save_upload("old.mkv", 1, status="done")
+    # 把 old.mkv 拨到 3 天前(测试里直接拨 updated_at 是既有惯例,见 test_fetcher._age_backoff)
+    s._conn.execute("UPDATE upload_tasks SET updated_at=? WHERE name=?",
+                    (_time.time() - 3 * 86400, "old.mkv"))
+    s._conn.commit()
+
+    tr = s.daily_series(7)
+    assert set(tr) == {"labels", "pushed", "moved_gb", "uploaded"}
+    assert len(tr["uploaded"]) == len(tr["labels"]) == 7
+    assert tr["uploaded"][-1] == 2        # 今天:两条成功(失败那条不算)
+    assert tr["uploaded"][3] == 1         # 3 天前:一条
+    assert sum(tr["uploaded"]) == 3       # 7 日窗口外的更早数据不进来
 
 
 def test_pipeline_attention_lists_failures(tmp_path):
@@ -623,3 +657,210 @@ def test_attention_keeps_fetch_and_upload_failures(tmp_path):
     s.close()
     kinds = {a["kind"] for a in client.get("/api/pipeline", headers=_h(token)).json()["attention"]}
     assert {"获取失败", "上传失败"} <= kinds
+
+
+# ── 健康判据(_health_block:按段列条目,四档 ok/warn/bad/off) ──────
+# 2026-09-11 重构:旧判据只覆盖 Bot/代理/115/频道监控(推卡+转存那半套),
+# 三段链(openlist/ffmpeg/CD2)完全没查过;而且旧文案还谎报"三段链 全部正常"。
+def _health_cfg(tmp_path, **over):
+    """造一份能"全绿"的配置:媒体目录真实存在,探针结果由 _probes 桩掉。"""
+    import json as _json
+
+    from app.config import load_config
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path),
+                              "media_root": str(tmp_path / "media"), **over}), encoding="utf-8")
+    cfg = load_config(p)
+    cfg.ensure_media_dirs()
+    return cfg
+
+
+def _probes(web, *, proxy=True, pan115=True, openlist=None, cd2=None):
+    """把四个探针的缓存直接写成指定结果(不触网)。"""
+    import time as _time
+
+    off_ol = {"configured": False, "enabled": False, "ok": False,
+              "missing_dirs": [], "error": ""}
+    off_cd2 = {"configured": False, "enabled": False, "ok": False, "error": ""}
+    web._health_cache.update({
+        "proxy": (_time.monotonic(),
+                  {"configured": True, "ok": proxy, "error": "" if proxy else "连不上"}),
+        "pan115": (_time.monotonic(),
+                   {"cookie_set": True, "ok": pan115, "uid": 1, "error": "" if pan115 else "失效"}),
+        "openlist": (_time.monotonic(), openlist or off_ol),
+        "cd2": (_time.monotonic(), cd2 or off_cd2),
+    })
+
+
+_STATS_OK = {"fetch": {"failed": 0}, "upload": {"failed": 0}, "process": {"manual": 0}}
+
+
+def _disk(pct: float = 33.6) -> dict:
+    total = 476 * 1024 ** 3
+    return {"used_percent": pct, "total_bytes": total, "free_bytes": total * (1 - pct / 100)}
+
+
+def _levels(block) -> dict:
+    return {r["key"]: r["level"] for r in block["rows"]}
+
+
+def _green(web, monkeypatch, tmp_path, **over):
+    """全绿基线:代理/115 通、Bot 在跑、编码工具就绪。"""
+    monkeypatch.setattr(web, "_tools_status", lambda: {"ffmpeg": True, "ffprobe": True})
+    _probes(web)
+    monkeypatch.setitem(web.STATE, "bot_running", True)
+    monkeypatch.setitem(web.STATE, "bot_error", "")
+    return _health_cfg(tmp_path, **over)
+
+
+def test_health_all_green_and_off_segments_excluded(tmp_path, monkeypatch):
+    """全绿;且**未配置的段只标 off、不参与总判**(否则只用推卡的人天天看黄)。"""
+    import app.webapp as web
+
+    cfg = _green(web, monkeypatch, tmp_path)
+    block = web._health_block(cfg, _STATS_OK, _disk())
+    assert block["level"] == "ok" and block["text"] == "系统运行中"
+    lv = _levels(block)
+    assert lv["openlist"] == "off" and lv["cd2"] == "off" and lv["monitor"] == "off"
+    assert lv["bot"] == "ok" and lv["disk"] == "ok"
+    # 已配但"未启用"(缺监控目录/缺上传目标)同样只是 off
+    _probes(web, openlist={"configured": True, "enabled": False, "ok": False,
+                           "missing_dirs": [], "error": ""})
+    assert web._health_block(cfg, _STATS_OK, _disk())["level"] == "ok"
+
+
+def test_health_bot_down_carries_reason(tmp_path, monkeypatch):
+    """Bot 未运行 → 异常,且**带上原因**(旧判据只说"未运行",不说为什么)。"""
+    import app.webapp as web
+
+    cfg = _green(web, monkeypatch, tmp_path)
+    monkeypatch.setitem(web.STATE, "bot_running", False)
+    monkeypatch.setitem(web.STATE, "bot_error", "Conflict: terminated by other getUpdates")
+    block = web._health_block(cfg, _STATS_OK, _disk())
+    assert block["level"] == "bad" and block["text"] == "系统异常"
+    bot = next(r for r in block["rows"] if r["key"] == "bot")
+    assert "未运行" in bot["text"] and "Conflict" in bot["text"]
+
+
+def test_health_disk_thresholds(tmp_path, monkeypatch):
+    """磁盘:79→正常、85→降级、95→异常。"""
+    import app.webapp as web
+
+    cfg = _green(web, monkeypatch, tmp_path)
+    assert web._health_block(cfg, _STATS_OK, _disk(79.0))["level"] == "ok"
+    assert web._health_block(cfg, _STATS_OK, _disk(85.0))["level"] == "warn"
+    assert web._health_block(cfg, _STATS_OK, _disk(95.0))["level"] == "bad"
+    # 读不到磁盘信息(挂载丢了)= 异常
+    assert web._health_block(cfg, _STATS_OK, {"used_percent": 0, "total_bytes": 0})["level"] == "bad"
+
+
+def test_health_segment_failures_graded(tmp_path, monkeypatch):
+    """段失败积压:1 个→降级,5 个→异常。"""
+    import app.webapp as web
+
+    cfg = _green(web, monkeypatch, tmp_path)
+    one = {"fetch": {"failed": 1}, "upload": {"failed": 0}, "process": {"manual": 0}}
+    assert web._health_block(cfg, one, _disk())["level"] == "warn"
+    many = {"fetch": {"failed": 5}, "upload": {"failed": 0}, "process": {"manual": 0}}
+    blk = web._health_block(cfg, many, _disk())
+    assert blk["level"] == "bad" and _levels(blk)["fetch_fail"] == "bad"
+    # 处理待人工 → 降级(它是"有待办",不是"坏了")
+    manual = {"fetch": {"failed": 0}, "upload": {"failed": 0}, "process": {"manual": 3}}
+    assert web._health_block(cfg, manual, _disk())["level"] == "warn"
+
+
+def test_health_bot_heartbeat_detects_hang(tmp_path, monkeypatch):
+    """心跳:连丢 3 拍 → 异常。这是"进程在、事件循环卡住"的唯一信号——
+    bot_running 是启动标志,卡死期间照样 true,所以必须有这一条。"""
+    import time as _time
+
+    import app.webapp as web
+
+    cfg = _green(web, monkeypatch, tmp_path)
+    # 还没打点过 → 不算异常(刚启动)
+    assert _row(web._health_block(cfg, _STATS_OK, _disk()), "heartbeat")["level"] == "ok"
+    monkeypatch.setitem(web.STATE, "bot_heartbeat", _time.time())
+    assert _row(web._health_block(cfg, _STATS_OK, _disk()), "heartbeat")["level"] == "ok"
+    # 超时未跳 → 异常
+    monkeypatch.setitem(web.STATE, "bot_heartbeat",
+                        _time.time() - (web._HEARTBEAT_STALE + 30))
+    blk = web._health_block(cfg, _STATS_OK, _disk())
+    assert blk["level"] == "bad" and "无进展" in _row(blk, "heartbeat")["text"]
+    # Bot 没跑时不该出现这一条(免得和 Bot 那条重复)
+    monkeypatch.setitem(web.STATE, "bot_running", False)
+    assert not any(r["key"] == "heartbeat"
+                   for r in web._health_block(cfg, _STATS_OK, _disk())["rows"])
+
+
+def test_health_openlist_unreachable_vs_missing_dir(tmp_path, monkeypatch):
+    """获取段:已配却连不上 = 异常;连得上但监控目录没了 = 异常(两种文案要分清)。"""
+    import app.webapp as web
+
+    cfg = _green(web, monkeypatch, tmp_path, openlist_base_url="http://127.0.0.1:5244",
+                 openlist_token="t", openlist_monitor_dirs="/夸克云盘/影库")
+    _probes(web, openlist={"configured": True, "enabled": True, "ok": False,
+                           "missing_dirs": [], "error": "ConnectError: 拒绝连接"})
+    blk = web._health_block(cfg, _STATS_OK, _disk())
+    assert blk["level"] == "bad" and "连不上" in _row(blk, "openlist")["text"]
+
+    _probes(web, openlist={"configured": True, "enabled": True, "ok": False,
+                           "missing_dirs": ["/夸克云盘/影库(not found)"], "error": ""})
+    blk = web._health_block(cfg, _STATS_OK, _disk())
+    assert blk["level"] == "bad" and "监控目录不存在" in _row(blk, "openlist")["text"]
+
+
+def _row(block, key: str) -> dict:
+    return next(r for r in block["rows"] if r["key"] == key)
+
+
+def test_health_cd2_and_tools_and_media(tmp_path, monkeypatch):
+    """上传段连不上=异常;编码工具缺失=降级;落地目录没了=异常。"""
+    import shutil
+
+    import app.webapp as web
+
+    cfg = _green(web, monkeypatch, tmp_path, cd2_address="127.0.0.1:19798",
+                 cd2_dest_path="/115open/工具测试目录")
+    _probes(web, cd2={"configured": True, "enabled": True, "ok": False, "error": "CD2 未登录 cloudfs"})
+    blk = web._health_block(cfg, _STATS_OK, _disk())
+    assert blk["level"] == "bad" and "连不上" in _row(blk, "cd2")["text"]
+
+    _probes(web)                                   # CD2 未配置 → off,不参与
+    monkeypatch.setattr(web, "_tools_status", lambda: {"ffmpeg": False, "ffprobe": True})
+    blk = web._health_block(cfg, _STATS_OK, _disk())
+    assert blk["level"] == "warn" and "ffmpeg" in _row(blk, "tools")["text"]
+
+    shutil.rmtree(tmp_path / "media/openlist")
+    blk = web._health_block(cfg, _STATS_OK, _disk())
+    assert blk["level"] == "bad" and "不存在" in _row(blk, "media_a")["text"]
+
+
+def test_pipeline_payload_includes_health(tmp_path, monkeypatch):
+    """健康判据随 /api/pipeline 一起下发(前端只渲染,不再自己算判据)。"""
+    import app.webapp as web
+
+    async def fake_proxy(url):
+        return {"configured": bool(url), "url": url, "ok": True, "latency_ms": 1, "error": ""}
+
+    monkeypatch.setattr(web, "_check_proxy", fake_proxy)
+    monkeypatch.setattr(web, "_check_openlist", lambda cfg: _async({
+        "configured": False, "enabled": False, "ok": False, "missing_dirs": [], "error": ""}))
+    monkeypatch.setattr(web, "_check_cd2",
+                        lambda cfg: {"configured": False, "enabled": False, "ok": False, "error": ""})
+    web._health_cache.update({k: (0.0, None) for k in web._health_cache})
+
+    client = _client(tmp_path)
+    token = _login(client)
+    d = client.get("/api/pipeline", headers=_h(token)).json()
+    assert set(d["health"]) == {"level", "text", "detail", "rows"}
+    assert d["health"]["level"] in ("ok", "warn", "bad")
+    keys = {r["key"] for r in d["health"]["rows"]}
+    assert {"bot", "proxy", "pan115", "monitor", "openlist",
+            "tools", "cd2", "media_a", "media_b", "disk"} <= keys
+
+
+def _async(value):
+    async def _coro():
+        return value
+    return _coro()

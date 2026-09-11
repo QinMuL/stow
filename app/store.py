@@ -309,9 +309,6 @@ class Store:
 
         fetch_done_today = count(
             "SELECT COUNT(*) FROM fetch_state WHERE status='done' AND updated_at>=?", t0)
-        fetch_bytes_today = count(
-            "SELECT COALESCE(SUM(src_size),0) FROM fetch_state WHERE status='done' AND updated_at>=?",
-            t0)
         upload_done_today = count(
             "SELECT COUNT(*) FROM upload_tasks WHERE status='done' AND updated_at>=?", t0)
         process_done_today = count(
@@ -324,7 +321,7 @@ class Store:
         return {
             "fetch": {"inflight": len(self.list_fetch("moving")), "today": fetch_done_today,
                       "failed": count("SELECT COUNT(*) FROM fetch_state WHERE status='failed'"),
-                      "bytes_today": fetch_bytes_today, "last_activity": last("fetch_state")},
+                      "last_activity": last("fetch_state")},
             "process": {"today": process_done_today,
                         "manual": count("SELECT COUNT(*) FROM local_files WHERE status!='processed'"),
                         "last_activity": last("local_files")},
@@ -334,22 +331,27 @@ class Store:
         }
 
     def daily_series(self, days: int = 7) -> dict:
-        """近 N 日按天聚合:推卡条数 + 搬运字节(趋势图用)。"""
+        """近 N 日按天聚合:推卡条数 + 搬运字节 + 上传条数(趋势图用)。"""
         import datetime as _dt
 
         today = _dt.date.today()
         labels = [(today - _dt.timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
+        since = self._today_start() - (days - 1) * 86400
         pushed = dict(self._conn.execute(
             "SELECT date(pushed_at,'unixepoch','localtime') d, COUNT(*) FROM pushed"
-            " WHERE pushed_at >= ? GROUP BY d", (self._today_start() - (days - 1) * 86400,)).fetchall())
+            " WHERE pushed_at >= ? GROUP BY d", (since,)).fetchall())
         moved = dict(self._conn.execute(
             "SELECT date(updated_at,'unixepoch','localtime') d, COALESCE(SUM(src_size),0)"
             " FROM fetch_state WHERE status='done' AND updated_at >= ? GROUP BY d",
-            (self._today_start() - (days - 1) * 86400,)).fetchall())
+            (since,)).fetchall())
+        uploaded = dict(self._conn.execute(
+            "SELECT date(updated_at,'unixepoch','localtime') d, COUNT(*) FROM upload_tasks"
+            " WHERE status='done' AND updated_at >= ? GROUP BY d", (since,)).fetchall())
         return {
             "labels": labels,
             "pushed": [int(pushed.get(d, 0) or 0) for d in labels],
             "moved_gb": [round(int(moved.get(d, 0) or 0) / 1024 ** 3, 2) for d in labels],
+            "uploaded": [int(uploaded.get(d, 0) or 0) for d in labels],
         }
 
     def attention_items(self, limit: int = 8) -> list[dict]:

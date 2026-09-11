@@ -23,6 +23,7 @@ from app.store import Store
 
 _ED2K_A = "ed2k://|file|Movie.A.2023.1080p.mkv|1234567890|0123456789ABCDEF0123456789ABCDEF|/"
 _ED2K_B = "ed2k://|file|Movie.B.2024.720p.mkv|987654321|FEDCBA9876543210FEDCBA9876543210|/"
+_115 = "https://115.com/s/swabcd1234"   # 源频道里的 115 链接(该分支已搁置,只计数)
 _CHAT = -1001234567890  # 假频道 marked id(假 get_entity 返回 Channel(id=1234567890))
 _HASH_A = "0123456789ABCDEF0123456789ABCDEF"
 _HASH_B = "FEDCBA9876543210FEDCBA9876543210"
@@ -305,6 +306,14 @@ def test_dedup_skips_pushed(tmp_path):
     mon.bot.store.mark_pushed(_HASH_A, "旧卡")
     asyncio.run(mon.push_text_links(f"{_ED2K_A} {_ED2K_B}", source="频道"))
     assert [lk.key for lk in bot.sent] == [_HASH_B]
+
+
+def test_non_ed2k_counted_not_pushed(tmp_path):
+    """115 分支已搁置:源频道里的 115 链接不推送,但要计数留痕(不再静默丢弃)。"""
+    mon, bot, _ = _monitor(tmp_path)
+    assert asyncio.run(mon.push_text_links(f"{_115} {_ED2K_A}", source="频道")) == 1
+    assert [lk.key for lk in bot.sent] == [_HASH_A]
+    assert mon.runtime_status()["ignored_links"] == {"115": 1}
 
 
 def test_retry_once_on_failure(tmp_path):

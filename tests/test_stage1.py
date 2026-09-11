@@ -88,10 +88,109 @@ def test_channel_routing_preset():
     from app.config import ChannelConfig, Config
 
     cfg = Config()
-    assert cfg.channel_for("115") is None  # 未登记归属:None(不推送,提示登记)
+    assert cfg.channels_for("115") == []          # 未登记归属:空表(不推送,提示登记)
     cfg.channels = [ChannelConfig(chat_id="-100A", preset="ed2k")]
-    assert cfg.channel_for("ed2k") == "-100A"
-    assert cfg.channel_for("115") is None
+    assert cfg.channels_for("ed2k") == ["-100A"]
+    assert cfg.channels_for("115") == []
+
+
+def test_channels_for_returns_all_same_preset():
+    """同一归属登记多个频道时**全部**返回。
+
+    此前 channel_for 只返回第一个、且静默忽略其余 —— 用户配了两条 115 频道,
+    只有第一条收到卡片(实测反馈),故改成列表语义。
+    """
+    from app.config import ChannelConfig, Config
+
+    cfg = Config()
+    cfg.channels = [
+        ChannelConfig(chat_id="-100A", preset="115"),
+        ChannelConfig(chat_id="-100B", preset="ed2k"),
+        ChannelConfig(chat_id="-100C", preset="115"),
+    ]
+    assert cfg.channels_for("115") == ["-100A", "-100C"]
+    assert cfg.channels_for("ed2k") == ["-100B"]
+    assert cfg.channels_for("quark") == []
+
+
+def _fanout_bot(tmp_path, cfg, delivered, said, fail_targets=()):
+    """搭个最小对象,只借用 StowBot.push_link 的实现(不碰网络/PTB)。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.bot import StowBot
+    from app.media import AggregatedMedia
+    from app.store import Store
+
+    async def fake_load(link, status=None, prefix=""):
+        return [], AggregatedMedia(title="某片", file_count=1, total_size=1)
+
+    async def fake_deliver(media, details, link, files, target):
+        if target in fail_targets:
+            raise RuntimeError("投递炸了")
+        delivered.append(target)
+
+    async def fake_say(status, text):
+        said.append(text)
+
+    obj = SimpleNamespace(cfg=cfg, store=Store(tmp_path / "t.db"), tmdb=None,
+                          _push_lock=asyncio.Lock(),
+                          _load_media=fake_load, _deliver=fake_deliver, _say=fake_say)
+    obj.push_link = StowBot.push_link.__get__(obj)
+    return obj
+
+
+@pytest.mark.asyncio
+async def test_push_link_fans_out_to_all_same_preset(tmp_path):
+    """两条同归属频道 → 两条都收到卡片(修掉的正是"第二条静默收不到")。"""
+    from app.config import ChannelConfig, Config
+
+    cfg = Config()
+    cfg.channels = [ChannelConfig(chat_id="-100A", preset="115"),
+                    ChannelConfig(chat_id="-100C", preset="115")]
+    delivered, said = [], []
+    bot = _fanout_bot(tmp_path, cfg, delivered, said)
+    link = ParsedLink("115", "swabc123", "https://115.com/s/swabc123")
+
+    res = await bot.push_link(link)
+    assert delivered == ["-100A", "-100C"]
+    assert res.ok and "2/2" in res.text
+    assert bot.store.is_pushed(link.key)      # 至少一个成功 → 标记已推送
+
+
+@pytest.mark.asyncio
+async def test_push_link_partial_failure_still_marks_pushed(tmp_path):
+    """一个频道失败、另一个成功:仍标记已推送(否则重推会骚扰已收到的那条),并在回执里点名。"""
+    from app.config import ChannelConfig, Config
+
+    cfg = Config()
+    cfg.channels = [ChannelConfig(chat_id="-100A", preset="115"),
+                    ChannelConfig(chat_id="-100C", preset="115")]
+    delivered, said = [], []
+    bot = _fanout_bot(tmp_path, cfg, delivered, said, fail_targets={"-100C"})
+    link = ParsedLink("115", "swabc999", "https://115.com/s/swabc999")
+
+    res = await bot.push_link(link)
+    assert delivered == ["-100A"]             # 好的那条投了
+    assert res.ok and "1/2" in res.text and "失败" in res.text
+    assert bot.store.is_pushed(link.key)
+
+
+@pytest.mark.asyncio
+async def test_push_link_all_failed_not_marked(tmp_path):
+    """全部失败:不标记已推送,链接再出现可重推。"""
+    from app.config import ChannelConfig, Config
+
+    cfg = Config()
+    cfg.channels = [ChannelConfig(chat_id="-100A", preset="115")]
+    delivered, said = [], []
+    bot = _fanout_bot(tmp_path, cfg, delivered, said, fail_targets={"-100A"})
+    link = ParsedLink("115", "swabc000", "https://115.com/s/swabc000")
+
+    res = await bot.push_link(link)
+    assert delivered == [] and not res.ok
+    assert "投递失败" in res.text
+    assert not bot.store.is_pushed(link.key)
 
 
 @pytest.mark.asyncio

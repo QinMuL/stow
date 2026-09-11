@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app import __version__, auth
+from app import __version__, auth, sysinfo
 from app.channel_monitor import channel_rows
 from app.config import (
     DEFAULT_WEB_PORT,
@@ -42,8 +42,16 @@ _bearer_lock = threading.Lock()
 # ── 链路健康探测(带 TTL 缓存,避免页面刷新打爆外部服务) ────
 _PROXY_TTL = 60.0    # 代理探测:60s
 _PAN115_TTL = 300.0  # cookie 校验:5min(真实请求 115)
-_health_cache: dict = {"proxy": (0.0, None), "pan115": (0.0, None)}
+_OPENLIST_TTL = 60.0  # 获取段连通:本机服务,60s
+_CD2_TTL = 60.0       # 上传段连通:本机服务,60s
+_health_cache: dict = {"proxy": (0.0, None), "pan115": (0.0, None),
+                       "openlist": (0.0, None), "cd2": (0.0, None)}
 _UID_RE = re.compile(r"UID=(\d+)")
+
+# 健康判据阈值(2026-09-11 与用户确认的口径)
+_DISK_WARN, _DISK_BAD = 80.0, 90.0   # 磁盘已用率
+_SEG_FAIL_BAD = 5                    # 单段失败件数达到这里算异常,之下算降级
+_HEARTBEAT_STALE = 180.0             # Bot 心跳超过这么久没跳 = 连丢 3 拍,判"可能卡死"
 
 
 async def _check_proxy(proxy_url: str) -> dict:
@@ -85,6 +93,222 @@ def _check_pan115(cookie: str) -> dict:
         }
     except Exception as exc:  # noqa: BLE001
         return {"cookie_set": True, "uid": uid, "ok": False, "error": str(exc)[:80]}
+
+
+def _tools_status() -> dict:
+    """处理段依赖的外部命令(本地查找,毫秒级,不需要缓存)。"""
+    import shutil
+
+    return {"ffmpeg": bool(shutil.which("ffmpeg")), "ffprobe": bool(shutil.which("ffprobe"))}
+
+
+async def _check_openlist(cfg) -> dict:
+    """获取段探针:令牌可用(先探根目录)+ 每个监控目录都还在。
+
+    分两步是有意的:先打根目录判"连不上/令牌废",再逐个判"目录没了"——
+    否则令牌失效会被误报成"所有监控目录都不存在"。
+    """
+    out = {"configured": bool(cfg.openlist_base_url and cfg.openlist_token),
+           "enabled": cfg.openlist_ready(), "ok": False, "missing_dirs": [], "error": ""}
+    if not out["enabled"]:
+        return out
+    from app.openlist import OpenListClient, OpenListError
+
+    client = OpenListClient(cfg.openlist_base_url, cfg.openlist_token, timeout=8.0)
+    try:
+        try:
+            await client.list_dir("/", per_page=1)      # 连通 + 令牌
+        except OpenListError as exc:
+            out["error"] = str(exc)[:120]
+            return out
+        for d in cfg.openlist_monitor_list():
+            try:
+                await client.list_dir(d, per_page=1)
+            except OpenListError as exc:
+                out["missing_dirs"].append(f"{d}({str(exc)[:60]})")
+        out["ok"] = not out["missing_dirs"]
+    except Exception as exc:  # noqa: BLE001 - 探针绝不抛出
+        out["error"] = str(exc)[:120]
+    finally:
+        await client.aclose()
+    return out
+
+
+def _check_cd2(cfg) -> dict:
+    """上传段探针:gRPC 连得上 + CD2 已登录 cloudfs(没登录就传不了)。"""
+    out = {"configured": bool(cfg.cd2_address),
+           "enabled": bool(cfg.cd2_address and cfg.cd2_dest_path), "ok": False, "error": ""}
+    if not out["enabled"]:
+        return out
+    from app.cd2.client import Cd2Client
+
+    client = Cd2Client(cfg.cd2_address, cfg.cd2_token,
+                       username=cfg.cd2_username, password=cfg.cd2_password, timeout=8.0)
+    try:
+        client.ensure_conn()
+        if not client.system_info().get("logged_in"):
+            out["error"] = "CD2 未登录 cloudfs(115 侧不可达)"
+            return out
+        if cfg.cd2_token:
+            client.token_info()      # 令牌失效会在这里抛
+        out["ok"] = True
+    except Exception as exc:  # noqa: BLE001 - 探针绝不抛出
+        out["error"] = str(exc)[:120]
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+async def _ensure_health(cfg) -> None:
+    """按 TTL 刷新探针缓存。页首每 10 秒轮询一次,探针绝不能每轮都打出去。"""
+    now = time.monotonic()
+    if now - _health_cache["proxy"][0] > _PROXY_TTL:
+        _health_cache["proxy"] = (now, await _check_proxy(cfg.proxy_url))
+    if now - _health_cache["pan115"][0] > _PAN115_TTL:
+        _health_cache["pan115"] = (now, await asyncio.to_thread(_check_pan115, cfg.pan115_cookie))
+    if now - _health_cache["openlist"][0] > _OPENLIST_TTL:
+        _health_cache["openlist"] = (now, await _check_openlist(cfg))
+    if now - _health_cache["cd2"][0] > _CD2_TTL:
+        _health_cache["cd2"] = (now, await asyncio.to_thread(_check_cd2, cfg))
+
+
+def _monitor_status(cfg) -> dict:
+    """频道监控状态(Web 线程读只读内存字段;Bot 未运行时给"未运行")。"""
+    mon = STATE.get("monitor")
+    if mon is not None:
+        rs = mon.runtime_status()
+        return {"configured": len(cfg.monitor_channel_list()), "ready": cfg.monitor_ready(),
+                "state": rs["state"], "state_text": rs["state_text"],
+                "account": rs["account"], "connected": rs["connected"]}
+    return {"configured": len(cfg.monitor_channel_list()), "ready": cfg.monitor_ready(),
+            "state": "stopped", "state_text": "Bot 未运行", "account": "", "connected": False}
+
+
+def _health_block(cfg, stats: dict, disk: dict) -> dict:
+    """健康判据(2026-09-11 重构):按"段"列条目,四档 ok / warn / bad / off。
+
+    - **off = 该功能未配置或未启用 → 不参与总判**。只用推卡、不跑流水线的人
+      不该天天看到黄色;这与"115 未配 Cookie 只算降级"是同一条口径。
+    - 判据放在后端是**故意的**:分级逻辑要能被 pytest 覆盖,前端只负责渲染。
+    """
+    rows: list[dict] = []
+
+    def add(key: str, name: str, level: str, text: str) -> None:
+        rows.append({"key": key, "name": name, "level": level, "text": text})
+
+    # ── 推卡链 ──
+    if STATE["bot_running"]:
+        add("bot", "Bot 进程", "ok", "运行中")
+    else:
+        probs = cfg.problems()
+        why = STATE.get("bot_error") or ("、".join(probs) if probs else "未启动或已退出(见系统日志)")
+        add("bot", "Bot 进程", "bad", f"未运行 — {why[:110]}")
+
+    p = _health_cache["proxy"][1] or {}
+    if not p.get("configured"):
+        add("proxy", "代理", "off", "未配置(直连)")
+    else:
+        add("proxy", "代理", "ok" if p.get("ok") else "bad",
+            "可达" if p.get("ok") else f"不可达 — {(p.get('error') or '')[:90]}")
+
+    c = _health_cache["pan115"][1] or {}
+    if not c.get("cookie_set"):
+        add("pan115", "115 读通道", "warn", "未配 Cookie(匿名通道易限流)")
+    else:
+        add("pan115", "115 读通道", "ok" if c.get("ok") else "bad",
+            "Cookie 有效" if c.get("ok") else f"Cookie 失效 — {(c.get('error') or '')[:90]}")
+
+    m = _monitor_status(cfg)
+    if not m.get("configured"):
+        add("monitor", "频道监控", "off", "未配置源频道")
+    elif not STATE["bot_running"]:
+        add("monitor", "频道监控", "off", "随 Bot 未运行")
+    elif m.get("state") != "running":
+        add("monitor", "频道监控", "bad", m.get("state_text") or "未运行")
+    elif not m.get("connected"):
+        add("monitor", "频道监控", "bad", "连接断开(重连中)")
+    else:
+        add("monitor", "频道监控", "ok", f"监听中({m.get('account') or '-'})")
+
+    # ── Bot 心跳(卡死检测)──
+    # bot_running 只是"run() 还没返回";事件循环卡住时它照样是 true。
+    # 心跳由 Bot 侧的 asyncio 任务打点,循环停摆就不跳 → 这里才发现得了。
+    if STATE["bot_running"]:
+        beat = float(STATE.get("bot_heartbeat") or 0)
+        if not beat:
+            add("heartbeat", "Bot 心跳", "ok", "等待首次打点")
+        else:
+            age = time.time() - beat
+            if age > _HEARTBEAT_STALE:
+                add("heartbeat", "Bot 心跳", "bad",
+                    f"{int(age)} 秒无进展(可能卡死,见系统日志)")
+            else:
+                add("heartbeat", "Bot 心跳", "ok", f"{int(age)} 秒前有进展")
+
+    # ── 三段链 ──
+    ol = _health_cache["openlist"][1] or {}
+    if not ol.get("enabled"):
+        add("openlist", "获取段 openlist", "off",
+            "未启用" if not ol.get("configured") else "未配置监控目录")
+    elif ol.get("error"):
+        add("openlist", "获取段 openlist", "bad", f"连不上 — {ol['error'][:90]}")
+    elif ol.get("missing_dirs"):
+        add("openlist", "获取段 openlist", "bad",
+            "监控目录不存在:" + "、".join(ol["missing_dirs"])[:90])
+    else:
+        add("openlist", "获取段 openlist", "ok", "可达,监控目录正常")
+
+    t = _tools_status()
+    if not (t["ffmpeg"] and t["ffprobe"]):
+        miss = "、".join(k for k, ok in t.items() if not ok)
+        add("tools", "处理段工具链", "warn", f"缺 {miss}(画质标签缺失、清洗不可用)")
+    else:
+        add("tools", "处理段工具链", "ok", "ffmpeg / ffprobe 就绪")
+
+    cd2 = _health_cache["cd2"][1] or {}
+    if not cd2.get("enabled"):
+        add("cd2", "上传段 CD2", "off",
+            "未启用" if not cd2.get("configured") else "未配置上传目标目录")
+    else:
+        add("cd2", "上传段 CD2", "ok" if cd2.get("ok") else "bad",
+            "可达" if cd2.get("ok") else f"连不上 — {(cd2.get('error') or '')[:90]}")
+
+    for key, name, path in (("media_a", "落地目录", cfg.openlist_dir),
+                            ("media_b", "上传源目录", cfg.clouddrive_dir)):
+        ok = Path(path).is_dir()
+        add(key, name, "ok" if ok else "bad",
+            str(path) if ok else f"{path} 不存在(挂载丢了?)")
+
+    pct = float(disk.get("used_percent") or 0.0)
+    if not disk.get("total_bytes"):
+        add("disk", "磁盘", "bad", "读不到磁盘信息(挂载丢了?)")
+    else:
+        lvl = "bad" if pct >= _DISK_BAD else "warn" if pct >= _DISK_WARN else "ok"
+        free_gb = float(disk.get("free_bytes") or 0) / 1024 ** 3
+        add("disk", "磁盘", lvl, f"已用 {pct}%(剩 {free_gb:.0f}GB)")
+
+    for key, label in (("fetch", "获取"), ("upload", "上传")):
+        n = int(stats.get(key, {}).get("failed") or 0)
+        if n:
+            add(f"{key}_fail", f"{label}失败件", "bad" if n >= _SEG_FAIL_BAD else "warn",
+                f"{n} 个待处理(见下方「需要你处理」)")
+    pm = int(stats.get("process", {}).get("manual") or 0)
+    if pm:
+        add("process_manual", "处理待人工", "warn", f"{pm} 个待处理(见下方「需要你处理」)")
+
+    # 总判取最差;off 不参与
+    levels = [r["level"] for r in rows if r["level"] != "off"]
+    if "bad" in levels:
+        agg, text = "bad", "系统异常"
+    elif "warn" in levels:
+        agg, text = "warn", "系统运行中(降级)"
+    else:
+        agg, text = "ok", "系统运行中"
+    issues = [f"{r['name']} {r['text']}" for r in rows if r["level"] in ("bad", "warn")]
+    return {"level": agg, "text": text, "detail": " · ".join(issues), "rows": rows}
 
 
 def get_store_path(request: Request) -> Path:
@@ -468,6 +692,7 @@ def create_app(config_path: str | Path) -> FastAPI:
     def _segment_payload(cfg, store: Store) -> dict:
         """三段链:今日/在途/失败/最后活动 + 在途明细(带进度)。"""
         stats = store.segment_stats()
+        disk = _disk_info(cfg)         # 磁盘卡与健康判据共用(内部 60s 缓存)
         from app.webapp import STATE  # 同进程,取运行中的三段实例(只读内存字段)
 
         fetcher, uploader = STATE.get("fetcher"), STATE.get("uploader")
@@ -515,21 +740,22 @@ def create_app(config_path: str | Path) -> FastAPI:
                      "enabled": bool(cfg.cd2_dest_path)}),
             ],
             "numbers": {
-                "pushed_today": store.stats()["today"],
-                "moved_gb_today": round(stats["fetch"]["bytes_today"] / 1024 ** 3, 2),
-                "uploaded_today": stats["upload"]["today"],
-                "disk": _disk_info(cfg),
+                # 今日推卡/搬运/上传三个数已删(2026-09-11):7 日趋势的图例里已有,重复且前端无人读
+                "disk": disk,
             },
             "trend": store.daily_series(7),
+            "health": _health_block(cfg, stats, disk),
+            "sys": sysinfo.snapshot(),      # 本机 CPU/内存/网络(磁盘在 numbers.disk)
             "attention": _attention(cfg, store),
             "recent": store.recent(5),
         }
 
     @app.get("/api/pipeline")
-    def pipeline(request: Request) -> dict:
-        """总览页主数据:三段链 + 关键数字 + 7 日趋势 + 待处理 + 最近推送。"""
+    async def pipeline(request: Request) -> dict:
+        """总览页主数据:三段链 + 关键数字 + 7 日趋势 + 健康判据 + 待处理 + 最近推送。"""
         _current_user(config_path, _auth_header(request))
         cfg = load_config(config_path)
+        await _ensure_health(cfg)      # 健康判据要用探针结果(带 TTL,不会每轮打出去)
         store = Store(cfg.db_path)
         try:
             return _segment_payload(cfg, store)
@@ -708,28 +934,7 @@ def create_app(config_path: str | Path) -> FastAPI:
     async def status(request: Request) -> dict:
         _current_user(config_path, _auth_header(request))
         cfg = load_config(config_path)
-        now = time.monotonic()
-        if now - _health_cache["proxy"][0] > _PROXY_TTL:
-            _health_cache["proxy"] = (now, await _check_proxy(cfg.proxy_url))
-        if now - _health_cache["pan115"][0] > _PAN115_TTL:
-            _health_cache["pan115"] = (
-                now, await asyncio.to_thread(_check_pan115, cfg.pan115_cookie)
-            )
-        # 频道监控:未配置源频道时不参与健康判定(configured=0)
-        mon = STATE.get("monitor")
-        if mon is not None:
-            rs = mon.runtime_status()
-            monitor = {
-                "configured": len(cfg.monitor_channel_list()), "ready": cfg.monitor_ready(),
-                "state": rs["state"], "state_text": rs["state_text"],
-                "account": rs["account"], "connected": rs["connected"],
-            }
-        else:
-            monitor = {
-                "configured": len(cfg.monitor_channel_list()), "ready": cfg.monitor_ready(),
-                "state": "stopped", "state_text": "Bot 未运行",
-                "account": "", "connected": False,
-            }
+        await _ensure_health(cfg)
         return {
             "version": __version__,
             "bot_running": STATE["bot_running"],
@@ -738,7 +943,11 @@ def create_app(config_path: str | Path) -> FastAPI:
             "missing": cfg.problems(),
             "proxy": _health_cache["proxy"][1],
             "pan115": _health_cache["pan115"][1],
-            "monitor": monitor,
+            "openlist": _health_cache["openlist"][1],
+            "cd2": _health_cache["cd2"][1],
+            "tools": _tools_status(),
+            # 频道监控:未配置源频道时不参与健康判定(configured=0)
+            "monitor": _monitor_status(cfg),
         }
 
     @app.get("/api/history")

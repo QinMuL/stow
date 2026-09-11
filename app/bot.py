@@ -59,6 +59,7 @@ class PushResult:
 
 
 _PRESET_LABEL = {"115": "115链接推送频道", "ed2k": "ed2k链接推送频道"}
+_HEARTBEAT_INTERVAL = 60.0   # 心跳打点间隔(秒);健康判据按"连丢 3 拍"判定卡死
 
 _HELP = (
     "📦 Stow · 媒体推送\n\n"
@@ -115,6 +116,8 @@ class StowBot:
             STATE["processor"] = self.processor
             STATE["uploader"] = self.uploader
             STATE["bot_loop"] = asyncio.get_running_loop()
+            # 心跳打点:健康判据用它识别"进程在、事件循环却卡住不进展"
+            self._beat_task = asyncio.create_task(self._heartbeat_loop())
 
         builder = (
             Application.builder()
@@ -148,6 +151,19 @@ class StowBot:
         app.add_handler(MessageHandler(filters.FORWARDED, self._on_forward))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
         return app
+
+    async def _heartbeat_loop(self) -> None:
+        """每 60 秒打一次点(STATE["bot_heartbeat"])。
+
+        **只在事件循环活着时才会跳**:循环被同步调用卡住、或整个线程僵住时这里停跳,
+        健康判据据此报"无进展(可能卡死)"。`STATE["bot_running"]` 做不到这件事——
+        它是启动时置 true、run() 返回才置 false,卡死期间照样是 true。
+        """
+        from app.webapp import STATE
+
+        while True:
+            STATE["bot_heartbeat"] = time.time()
+            await asyncio.sleep(_HEARTBEAT_INTERVAL)
 
     # ── 频道登记(/bind 引导 + 转发触发) ──────────────────────
     async def _cmd_bind(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -403,8 +419,8 @@ class StowBot:
         status 为可编辑的进度消息(可选);失败原因一律落日志。
         """
         label = _PRESET_LABEL[link.provider]
-        target = self.cfg.channel_for(link.provider)
-        if target is None:
+        targets = self.cfg.channels_for(link.provider)
+        if not targets:
             # 未登记该归属:不推送,给出明确原因与登记指引(不静默兜底)
             logger.warning("未配置%s,链接 %s 不推送", label, link.dedup_display)
             text = (
@@ -420,24 +436,42 @@ class StowBot:
         details = await self.tmdb.match(media) if self.tmdb else None
         logger.info("TMDB 匹配:%s → %s", media.title[:40], details["title"] if details else "未命中")
 
-        try:
-            await self._deliver(media, details, link, files, target)
-        except DeliveryUncertain as exc:
-            # 不标记已推送:若实际没送达,链接再次出现即可重推
-            logger.warning("投递超时(结果不确定):%s", exc)
-            await self._say(status, f"{prefix}⚠️ {exc}")
-            return PushResult(False, str(exc), uncertain=True)
-        except Exception as exc:  # noqa: BLE001 - 投递失败保留状态可重试
-            logger.error("卡片投递失败:%s", exc, exc_info=exc)
-            text = f"❌ 投递失败:{str(exc)[:120]}"
+        # 同一归属可能登记了多个频道 → **逐个都投**(2026-09-12 用户要求;此前只投第一个且静默)
+        # 卡片只渲染一次、海报也只取一次,重复的仅是发送动作
+        sent: list[str] = []
+        failed: list[str] = []
+        uncertain: list[str] = []
+        for target in targets:
+            try:
+                await self._deliver(media, details, link, files, target)
+                sent.append(target)
+            except DeliveryUncertain as exc:
+                # 超时≠失败:消息可能已送达,重试会重复投递
+                logger.warning("投递超时(结果不确定)%s:%s", target, exc)
+                uncertain.append(str(exc))
+            except Exception as exc:  # noqa: BLE001 - 投递失败保留状态可重试
+                logger.error("卡片投递失败 %s:%s", target, exc, exc_info=exc)
+                failed.append(str(exc)[:80])
+
+        if not sent:
+            # 一个都没送出去:不标记已推送,链接再次出现即可重推
+            if uncertain and not failed:
+                return PushResult(False, uncertain[0], uncertain=True)
+            text = f"❌ 投递失败:{failed[0] if failed else '未知原因'}"
             await self._say(status, prefix + text)
             return PushResult(False, text)
 
+        # **只要有一个成功就标记已推送**:否则下次重推会骚扰已经收到的那几个频道
         title = (details["title"] if details else media.title) or link.dedup_display
         self.store.mark_pushed(link.key, title)
         n = media.file_count or len(files)
-        label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
-        text = f"✅ 已推送 · {n} 文件 · {label}"
+        head = "✅ 已推送" + (f"({len(sent)}/{len(targets)} 个频道)" if len(targets) > 1 else "")
+        text = f"{head} · {n} 文件 · 🎬 {title}" + (
+            f" ({details['year']})" if details and details["year"] else "")
+        if uncertain or failed:
+            text += f"\n⚠️ {len(uncertain)} 个投递超时(结果不确定)、{len(failed)} 个失败,详见日志"
+            logger.warning("投递部分失败:%s → sent=%d failed=%d uncertain=%d",
+                           link.dedup_display, len(sent), len(failed), len(uncertain))
         await self._say(status, prefix + text)
         return PushResult(True, text)
 

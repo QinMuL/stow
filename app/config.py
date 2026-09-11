@@ -143,12 +143,13 @@ class Config:
         fatal = (p for p in self.problems() if "tmdb" not in p)
         return not next(fatal, None)
 
-    def channel_for(self, provider: str) -> str | None:
-        """按链接类型选归属频道;未登记该归属返回 None(调用方提示,不推送)。"""
-        for ch in self.channels:
-            if ch.preset == provider:
-                return ch.chat_id
-        return None
+    def channels_for(self, provider: str) -> list[str]:
+        """按链接类型取归属频道**列表**;未登记返回空表(调用方提示,不推送)。
+
+        同一归属允许登记多个频道(2026-09-12 起投递会**逐个都推**——此前只取第一个、
+        静默忽略其余,用户配了第二条却收不到,是个缺陷)。
+        """
+        return [ch.chat_id for ch in self.channels if ch.preset == provider]
 
     def pipeline_dirs(self) -> tuple[str, str, str]:
         """流水线三目录:(暂存, 已发布, 违规),由根目录派生。"""

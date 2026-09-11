@@ -130,7 +130,7 @@ class SavePipeline:
             return
 
         label = "115链接推送频道"
-        if cfg.channel_for("115") is None:
+        if not cfg.channels_for("115"):
             await msg.reply_text(
                 f"{prefix}📭 尚未登记{label},建分享后无处推送。\n"
                 "请先登记:发 /bind 后转发频道消息选归属。"
@@ -366,16 +366,21 @@ class SavePipeline:
             total_size=sum(f.size for f in files if not f.is_dir),
         )
         details = await bot.tmdb.match(media) if bot.tmdb else None
-        target = cfg.channel_for("115")
-        if target is None:
+        targets = cfg.channels_for("115")
+        if not targets:
             logger.warning("流水线推送中止:未登记 115 归属频道(%s)", task.name)
             return  # 保留 auditing,等用户登记后下轮推送
         title = (details["title"] if details else media.title) or task.name
-        try:
-            await bot._deliver(media, details, link, files, target)
-        except Exception as exc:  # noqa: BLE001 - 推送失败下轮重试(分享码不变,不会重复建)
-            logger.error("流水线推送失败(%s):%s", task.name, exc, exc_info=exc)
-            task.attempts += 1
+        # 同归属多个频道逐个都投(与手动/监控链路同一口径,见 bot.push_link)
+        sent = 0
+        for target in targets:
+            try:
+                await bot._deliver(media, details, link, files, target)
+                sent += 1
+            except Exception as exc:  # noqa: BLE001 - 单条失败不拖垮其它频道
+                logger.error("流水线推送失败(%s → %s):%s", task.name, target, exc, exc_info=exc)
+        if not sent:
+            task.attempts += 1   # 一条都没送出去:下轮重试(分享码不变,不会重复建)
             return
         bot.store.mark_pushed(task.share_code, title)
         task.status = "done"

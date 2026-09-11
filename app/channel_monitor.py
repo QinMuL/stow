@@ -95,6 +95,8 @@ class ChannelMonitor:
         self._down = False                      # 连接状态(断线告警去重)
         self._handler_on = False                # 事件处理器已注册
         self._notified: set[str] = set()        # 已告警过的一次性事件(避免反复打扰)
+        self._ignored: dict[str, int] = {}      # 非 ed2k 链接计数(115 分支已搁置,只记影响面)
+        self._ignored_told: set[str] = set()    # 已提醒过的 provider(每种只提醒一次,不刷屏)
 
     # ── 生命周期 ────────────────────────────────────────────
     def start(self) -> None:
@@ -462,12 +464,35 @@ class ChannelMonitor:
             )
         return pushed
 
+    def _note_ignored(self, others: list[ParsedLink], source: str) -> None:
+        """非 ed2k 链接当前不推送(115 分支已搁置),但**不再静默丢弃**。
+
+        计数进 runtime_status(接口可见),每种 provider 首次出现时提醒一次(info),
+        其余只记 debug —— 目的是日后能判断缺口的影响面,又不刷屏。
+        """
+        if not others:
+            return
+        for link in others:
+            self._ignored[link.provider] = self._ignored.get(link.provider, 0) + 1
+        tally = ", ".join(f"{k}×{v}" for k, v in sorted(self._ignored.items()))
+        logger.debug("频道监控忽略 %d 条非 ed2k 链接(%s);累计:%s", len(others), source or "-", tally)
+        fresh = {p.provider for p in others} - self._ignored_told
+        if fresh:
+            self._ignored_told |= fresh
+            logger.info(
+                "频道监控暂不处理 %s 链接(该分支已搁置):只计数不推送;累计:%s",
+                "/".join(sorted(fresh)),
+                tally,
+            )
+
     async def push_text_links(self, text: str, *, source: str = "") -> int:
         """提取文本中的 ed2k → 去重 → 卡片推送;返回推送成功条数。
 
         与游标无关(供实时处理与人工/脚本验证共用)。
         """
-        links = [p for p in parse_all(text or "") if p.provider == "ed2k"]
+        parsed = parse_all(text or "")
+        links = [p for p in parsed if p.provider == "ed2k"]
+        self._note_ignored([p for p in parsed if p.provider != "ed2k"], source)
         if not links:
             return 0
         logger.info("频道监控捕获 %d 条 ed2k:%s", len(links), source or "-")
@@ -547,6 +572,7 @@ class ChannelMonitor:
             "login_phone": (self._login.get("phone", "") if self.login_active else ""),
             "last_error": self.last_error,
             "unreachable": dict(self._unreachable),
+            "ignored_links": dict(self._ignored),   # 非 ed2k(如 115)被忽略的条数
         }
 
     def channel_rows(self, states: list[dict]) -> list[dict]:

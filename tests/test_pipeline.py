@@ -87,7 +87,7 @@ def _bot(tmp_path, *, monitor_dirs="") -> FakeBot:
     cfg = Config(
         data_dir=str(tmp_path), monitor_dirs=monitor_dirs, tg_admin_ids=[5406565010],
         pipeline_root_dir="3515046004502037692",
-        channels=[],  # 归属频道:channel_for 返回 None → 推送中止(本测试只关心状态)
+        channels=[],  # 归属频道:channels_for 返回空表 → 推送中止(本测试只关心状态)
     )
     return FakeBot(cfg, Store(tmp_path / "t.db"))
 
