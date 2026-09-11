@@ -11,3 +11,6 @@ telethon>=1.36,<2
 python-socks>=2,<3
 # 处理段:ed2k 哈希需要 MD4 的 C 实现(纯 Python 对 GB 级文件不可用)
 pycryptodome>=3.20,<4
+# 上传段:CD2 gRPC 客户端(pb2 由 grpcio-tools 生成,protobuf 运行时需 >= 生成器版本)
+grpcio>=1.66,<2
+protobuf>=6.33,<7

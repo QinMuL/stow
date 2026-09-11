@@ -1,3 +1,4 @@
 pytest
 pytest-asyncio
 ruff
+grpcio-tools>=1.66,<2

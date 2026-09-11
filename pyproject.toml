@@ -5,6 +5,8 @@ description = "Stow — 网盘媒体管理工具(阶段一:推卡链)"
 requires-python = ">=3.12"
 
 [tool.ruff]
+# CD2 的 pb2 由 protoc 生成,不参与 lint
+extend-exclude = ["app/cd2/clouddrive_pb2.py", "app/cd2/clouddrive_pb2_grpc.py"]
 line-length = 110
 target-version = "py312"
 
