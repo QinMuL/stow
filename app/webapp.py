@@ -374,6 +374,31 @@ def create_app(config_path: str | Path) -> FastAPI:
             "restart_pending": _restart_pending(),
         }
 
+    # ── openlist 目录浏览(获取段监控目录/落地点的选择器数据源) ──
+    @app.get("/api/openlist/dirs")
+    async def list_openlist_dirs(request: Request, path: str = "/") -> dict:
+        """列出 openlist 某路径下的**子目录**(目录选择器用);只列目录,不列文件。"""
+        _current_user(config_path, _auth_header(request))
+        cfg = load_config(config_path)
+        if not (cfg.openlist_base_url and cfg.openlist_token):
+            raise HTTPException(status_code=503, detail="未配置 openlist 地址/令牌,无法浏览")
+        from app.openlist import OpenListClient, OpenListError
+
+        client = OpenListClient(cfg.openlist_base_url, cfg.openlist_token)
+        target = (path or "/").strip() or "/"
+        try:
+            items = await client.list_dir(target)
+        except OpenListError as exc:
+            raise HTTPException(status_code=502, detail=f"列目录失败:{str(exc)[:120]}") from exc
+        finally:
+            await client.aclose()
+        dirs = [
+            {"path": f"{target.rstrip('/')}/{it['name']}" if target != "/" else f"/{it['name']}",
+             "name": it["name"]}
+            for it in items if it.get("is_dir")
+        ]
+        return {"path": target, "items": dirs}
+
     # ── 频道监控(源频道 ed2k → 本项目卡片) ──────────────────
     def _monitor_or_503():
         mon = STATE.get("monitor")

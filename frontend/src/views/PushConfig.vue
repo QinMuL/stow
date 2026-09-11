@@ -166,6 +166,12 @@ function formValues() {
   values.monitor_channels = monitorChannelRows.value.join(',')
   values.tg_api_id = model.value.tg_api_id
   values.tg_api_hash = model.value.tg_api_hash
+  values.openlist_base_url = model.value.openlist_base_url
+  values.openlist_token = model.value.openlist_token
+  values.openlist_monitor_dirs = fetchRows.value.join(',')
+  values.openlist_dest_path = model.value.openlist_dest_path
+  values.openlist_max_tasks = model.value.openlist_max_tasks
+  values.fetch_interval_minutes = model.value.fetch_interval_minutes
   return values
 }
 
@@ -221,15 +227,19 @@ async function save(restart) {
 
 // ── 网盘目录选择器 ──
 const showPicker = ref(false)
-const pickerTarget = ref('')  // 'pipeline' 或监控行索引(字符串)
+const pickerTarget = ref('')            // 'pipeline_root_dir' 或行索引(字符串)
+const pickerSource = ref('115')         // '115' | 'openlist'
 
-function openPicker(target) {
+function openPicker(target, source = '115') {
   pickerTarget.value = String(target)
+  pickerSource.value = source
   showPicker.value = true
 }
 
 function onPickDir(d) {
-  if (pickerTarget.value === 'pipeline_root_dir') {
+  if (pickerSource.value === 'openlist') {
+    fetchRows.value[Number(pickerTarget.value)] = d.cid   // openlist 路径串
+  } else if (pickerTarget.value === 'pipeline_root_dir') {
     model.value.pipeline_root_dir = d.cid
   } else {
     monitorRows.value[Number(pickerTarget.value)] = d.cid
@@ -334,7 +344,7 @@ async function saveChannels() {
     <div class="card">
       <h3>资源获取(openlist)</h3>
       <div class="desc">
-        监控 openlist 目录,新资源自动**移动**到本地落地点(media/openlist),再交给处理链;
+        监控 openlist 目录,新资源自动<strong>移动</strong>到本地落地点(media/openlist),再交给处理链;
         移动而非复制,源盘不留副本。并发上限默认 2(openlist 本身可跑更多,为机器压力设小)
       </div>
 
@@ -353,12 +363,14 @@ async function saveChannels() {
       </div>
 
       <div class="chan-tip">
-        💡 每行一个**监控目录**(openlist 侧路径,如 <code>/夸克云盘/001临时影库</code>):
+        💡 每行一个<strong>监控目录</strong>(openlist 侧路径,点 📂 浏览选择,如 <code>/夸克云盘/001临时影库</code>):
         该目录下出现新条目时,自动移动到落地点。目录留空 = 获取段不启动。
       </div>
       <div class="chan-list">
         <div v-for="(r, i) in fetchRows" :key="i" class="chan-row">
           <input v-model="fetchRows[i]" class="chan-id" placeholder="/夸克云盘/001临时影库">
+          <button class="btn ghost" style="flex:none;padding:8px 12px" title="浏览 openlist 选择目录"
+            @click="openPicker(String(i), 'openlist')">📂</button>
           <button class="btn danger chan-del" @click="fetchRows.splice(i, 1)">删除</button>
         </div>
       </div>
@@ -495,7 +507,7 @@ async function saveChannels() {
       </div>
     </div>
 
-    <DirPickerModal v-if="showPicker" @pick="onPickDir" @close="showPicker = false" />
+    <DirPickerModal v-if="showPicker" :source="pickerSource" @pick="onPickDir" @close="showPicker = false" />
     <MonitorLoginModal v-if="showLogin" :mon="mon" @done="onLoginDone" @close="onLoginClose" />
   </div>
 </template>

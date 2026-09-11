@@ -505,3 +505,25 @@ def test_status_reports_version(tmp_path):
     token = _login(client)
     assert client.get("/api/status", headers=_h(token)).json()["version"] == __version__
     assert __version__.startswith("0.2")
+
+
+# ── openlist 目录选择器数据源 ───────────────────────────────
+def test_openlist_dirs_requires_config(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    r = client.get("/api/openlist/dirs?path=/", headers=_h(token))
+    assert r.status_code == 503 and "未配置 openlist" in r.json()["detail"]
+
+
+def test_openlist_dirs_reports_upstream_error(tmp_path):
+    """地址通但连不上 → 502 且带原因(便于排查,不是白屏)。"""
+    import json as _json
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path),
+                              "openlist_base_url": "http://127.0.0.1:1",
+                              "openlist_token": "tok"}), encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    r = client.get("/api/openlist/dirs?path=/", headers=_h(token))
+    assert r.status_code == 502 and "列目录失败" in r.json()["detail"]
