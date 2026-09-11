@@ -303,3 +303,13 @@ def test_chain_dedup_by_pushed_hash(tmp_path, monkeypatch):
     asyncio.run(chain.scan_now())
     assert bot.pushed == []                                      # 未重复推
     assert len(list(Path(bot.cfg.clouddrive_dir).iterdir())) == 1  # 仍归档
+
+
+def test_tmdb_annotation_is_not_taken_as_release_group():
+    """回归:文件名里的 {tmdb-NNN} 曾被 guessit 当成发布组 → 名字里多出 "-tmdb"。"""
+    raw = "茶啊二中.2014.S06E01.第01集.2160p.WEB-DL {tmdb-119059}.mkv"
+    media = _media(raw)
+    assert media.release_group == ""
+    name = render_name(media, {"title": "茶啊二中", "year": 2014, "tmdb_id": 119059},
+                       ProbeTags(resolution="2160p"), ".mkv", raw_name=raw)
+    assert "-tmdb" not in name and name.endswith(" {tmdb-119059}.mkv")

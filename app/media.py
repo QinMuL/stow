@@ -107,6 +107,8 @@ _GROUP_TOKEN_NOISE_RE = re.compile(
     r"^(?:\d+(?:[.,]\d+)?\s*fps|fps|h|hq|p\d+|10-?bit|\d*audios?|\d+)$",
     re.IGNORECASE,
 )
+# 我们自己的 {tmdb-NNN} 标注会被 guessit 当成发布组("tmdb")→ 命名会多出 "-tmdb"
+_GROUP_KNOWN_NOISE = {"tmdb", "tmdbid", "tmdb_id"}
 
 
 def clean_release_group(group: str) -> str:
@@ -116,6 +118,8 @@ def clean_release_group(group: str) -> str:
     if not kept:
         return ""
     cand = kept[-1]
+    if cand.lower() in _GROUP_KNOWN_NOISE:
+        return ""
     return cand if len(cand) >= 3 and cand[0].isalpha() else ""
 
 
