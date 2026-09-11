@@ -578,3 +578,16 @@ def test_failure_notification_only_on_first_transition(tmp_path, monkeypatch):
         asyncio.run(chain.scan_now())
     assert len([n for n in bot.notified if "目标名已存在" in n]) == 1
     assert bot.store.get_local_file(path.name)["status"] == "failed"
+
+
+# ── 失败后重试成功:旧名的陈旧失败行要清掉(否则总览一直误报) ──
+def test_stale_failure_row_cleared_after_success(tmp_path, monkeypatch):
+    """改名成功落库后,原文件名下的失败记录被清理。"""
+    chain, bot, path = _chain(tmp_path, monkeypatch=monkeypatch)
+    bot.store.save_local_file(name=path.name, size=path.stat().st_size,
+                              status="failed", error="早先的失败")
+    asyncio.run(chain.scan_now())
+    assert bot.store.get_local_file(path.name) is None          # 旧名记录已清
+    moved = list(Path(bot.cfg.clouddrive_dir).iterdir())
+    assert len(moved) == 1
+    assert bot.store.get_local_file(moved[0].name)["status"] == "processed"

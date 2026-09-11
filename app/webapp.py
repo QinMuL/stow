@@ -455,6 +455,16 @@ def create_app(config_path: str | Path) -> FastAPI:
         _disk_cache.update({"at": now, "data": data})
         return data
 
+    def _attention(cfg, store: Store) -> list[dict]:
+        """待人工清单;处理类的条目若文件已不在落地点(已改名/人工删)则不再误报。"""
+        present = {p.name for p in Path(cfg.openlist_dir).rglob("*") if p.is_file()}
+        out = []
+        for a in store.attention_items():
+            if a["kind"] in ("处理失败", "未识别") and a["text"] not in present:
+                continue
+            out.append(a)
+        return out
+
     def _segment_payload(cfg, store: Store) -> dict:
         """三段链:今日/在途/失败/最后活动 + 在途明细(带进度)。"""
         stats = store.segment_stats()
@@ -511,7 +521,7 @@ def create_app(config_path: str | Path) -> FastAPI:
                 "disk": _disk_info(cfg),
             },
             "trend": store.daily_series(7),
-            "attention": store.attention_items(),
+            "attention": _attention(cfg, store),
             "recent": store.recent(5),
         }
 

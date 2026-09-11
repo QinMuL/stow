@@ -106,6 +106,7 @@ class ProcessChain:
             return "failed"
 
     async def _process(self, path: Path) -> str:
+        original_name = path.name     # 改名后清理旧名记录用
         src_stem = path.stem          # 伴行匹配用(视频改名后 stem 会变)
         if path.suffix.lower() not in VIDEO_EXTS:
             return "非视频"                        # 伴行文件不动,等视频一起走
@@ -193,6 +194,12 @@ class ProcessChain:
         moved = self._move_to_clouddrive(final, stems=[src_stem])
         self._record(moved, status="processed", ed2k=uri,
                      tmdb_id=(details or {}).get("tmdb_id") or media.tmdb_id)
+        # 改过名的话,清掉"原文件名"下的陈旧记录(失败后重试成功会留下孤儿失败行,
+        # 否则总览一直挂着"需要你处理"的误报)
+        if final.name != original_name:
+            removed = self.bot.store.delete_local_file(original_name)
+            if removed:
+                logger.info("处理段:已清理旧名的陈旧记录(%s)", original_name)
         logger.info("处理段完成:%s → clouddrive(待上传)", moved.name)
         return "processed"
 

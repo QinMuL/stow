@@ -233,6 +233,12 @@ class Store:
             return None
         return out
 
+    def delete_local_file(self, name: str) -> int:
+        """删掉某文件的处理记录(改名成功后清理旧名的陈旧失败行用)。"""
+        n = self._conn.execute("DELETE FROM local_files WHERE name = ?", (name,)).rowcount
+        self._conn.commit()
+        return n
+
     def list_local_files(self, status: str | None = None) -> list[dict]:
         sql = ("SELECT name, size, status, ed2k, tmdb_id, error, updated_at FROM local_files")
         args: tuple = ()

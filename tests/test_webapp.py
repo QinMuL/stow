@@ -558,8 +558,12 @@ def test_pipeline_attention_lists_failures(tmp_path):
 
     from app.store import Store
 
+    media = tmp_path / "media/openlist"
+    media.mkdir(parents=True)
+    (media / "某片.mkv").write_bytes(b"x")          # 文件还在落地点,才该被列为待处理
     p = tmp_path / "config.json"
-    p.write_text(_json.dumps({"data_dir": str(tmp_path)}), encoding="utf-8")
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "media_root": str(tmp_path / "media")}),
+                 encoding="utf-8")
     client = TestClient(create_app(p))
     token = _login(client)
     s = Store(tmp_path / "stow.db")
@@ -581,3 +585,41 @@ def test_pipeline_run_requires_bot(tmp_path):
     token = _login(client)
     r = client.post("/api/pipeline/run", json={"segment": "fetch"}, headers=_h(token))
     assert r.status_code == 503
+
+
+# ── 待处理清单不误报"文件已不在" ────────────────────────────
+def test_attention_skips_records_without_file(tmp_path):
+    """处理类失败/未识别:落地点里已无该文件(已改名或人工删)→ 不再列入待处理。"""
+    import json as _json
+
+    from app.store import Store
+
+    media = tmp_path / "media/openlist"
+    media.mkdir(parents=True)
+    (media / "还在.mkv").write_bytes(b"x")
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "media_root": str(tmp_path / "media")}),
+                 encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    s = Store(tmp_path / "stow.db")
+    s.save_local_file(name="还在.mkv", size=1, status="unrecognized", error="TMDB 未命中")
+    s.save_local_file(name="早改名了.mkv", size=1, status="failed", error="PermissionError")
+    s.close()
+    items = client.get("/api/pipeline", headers=_h(token)).json()["attention"]
+    texts = [a["text"] for a in items]
+    assert "还在.mkv" in texts and "早改名了.mkv" not in texts
+
+
+def test_attention_keeps_fetch_and_upload_failures(tmp_path):
+    """获取/上传失败不受"文件是否存在"过滤影响(它们是别的位置)。"""
+    from app.store import Store
+
+    client = _client(tmp_path)
+    token = _login(client)
+    s = Store(tmp_path / "stow.db")
+    s.save_fetch("/夸克云盘/x/a.mkv", 1, status="failed", error="任务丢失")
+    s.save_upload("b.mkv", 1, status="failed", error="目标不可写")
+    s.close()
+    kinds = {a["kind"] for a in client.get("/api/pipeline", headers=_h(token)).json()["attention"]}
+    assert {"获取失败", "上传失败"} <= kinds
