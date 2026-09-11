@@ -42,6 +42,11 @@ class FakeClient:
         self.undone.append(task)
         return [task]
 
+    async def remove(self, dir_path, names):
+        # 基类替身默认"删源成功":从 items 里摘掉(与真实 openlist 一致)
+        self.items[dir_path] = [i for i in self.items.get(dir_path, [])
+                                if i["name"] not in set(names)]
+
     async def move_tasks(self, *, undone):
         return self.undone if undone else self.done
 
@@ -408,3 +413,77 @@ def test_upload_resumes_after_restart(tmp_path):
     (bot.cfg.clouddrive_dir / "g.mkv").unlink()
     client.tasks = []
     assert asyncio.run(up2._poll_tasks()) == {"done": 1, "failed": 0}
+
+
+# ── 移动"成功但没删源"的自愈(实测 openlist 偶发) ─────────────
+class FakeClientWithRemain(FakeClient):
+    """模拟 openlist 报成功但源仍在(不自动摘 items),记录 remove 调用。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.removed: list[tuple[str, list[str]]] = []
+        self.remove_fails = False
+
+    async def remove(self, dir_path, names):
+        if self.remove_fails:
+            raise OpenListError("夸克删除失败:权限不足")
+        self.removed.append((dir_path, list(names)))
+
+
+def _fetcher_with_remain(tmp_path):
+    f, bot, _ = _fetcher(tmp_path, files=[{"name": "广域.E18.mkv", "size": 10, "is_dir": False}])
+    client = FakeClientWithRemain()
+    client.items[_MON] = [{"name": "广域.E18.mkv", "size": 10, "is_dir": False}]
+    f.client = client
+    return f, bot, client
+
+
+def test_stray_source_is_deleted_after_done(tmp_path):
+    """openlist 报移动成功但源仍在 → 补删 + 告警(不重复提交)。"""
+    f, bot, client = _fetcher_with_remain(tmp_path)
+    asyncio.run(f.scan_now())                    # 提交
+    client.undone[0].update({"state": 2})        # 任务成功
+    client.done.append(client.undone.pop(0))
+    asyncio.run(f.scan_now())                    # 结算 → 校验源 → 补删
+    assert client.removed == [(_MON, ["广域.E18.mkv"])]
+    assert bot.store.get_fetch(f"{_MON}/广域.E18.mkv")["status"] == "done"
+    assert len(client.moves) == 1                 # 不会因为源还在而重复提交
+
+
+def test_stray_source_delete_failure_notifies(tmp_path):
+    """补删也失败 → 私聊通知人工,不静默。"""
+    f, bot, client = _fetcher_with_remain(tmp_path)
+    asyncio.run(f.scan_now())
+    client.undone[0].update({"state": 2})
+    client.done.append(client.undone.pop(0))
+    client.remove_fails = True
+    asyncio.run(f.scan_now())
+    assert bot.notified and "源文件删不掉" in bot.notified[-1]
+
+
+def test_settle_frees_slot_and_chains_next_submit(tmp_path):
+    """并发位腾出后立刻补提交(不等下一轮扫描)。"""
+    files = [{"name": f"剧.E{i:02d}.mkv", "size": 100, "is_dir": False} for i in (1, 2, 3)]
+    f, bot, client = _fetcher(tmp_path, max_tasks=1, files=files)
+    asyncio.run(f.scan_now())
+    assert len(client.moves) == 1
+    # 完成任务后走 poll_loop 的那条路径:结算 → 立刻补提交
+    client.undone[0].update({"state": 2})
+    client.done.append(client.undone.pop(0))
+    settled = asyncio.run(f._poll_tasks())
+    assert settled["done"] == 1
+    asyncio.run(f._scan_dirs())
+    assert len(client.moves) == 2
+
+
+def test_upload_settle_chains_next_submit(tmp_path):
+    """上传段:一个完成后立刻接下一个(实测单个仅 ~19s,等轮会白等 5 分钟)。"""
+    up, bot, client = _uploader(tmp_path, files=("a.mkv", "b.mkv"))
+    asyncio.run(up.scan_now())
+    assert len(client.moves) == 1
+    (bot.cfg.clouddrive_dir / "a.mkv").unlink()      # 第一个传完(源消失)
+    client.tasks = []
+    settled = asyncio.run(up._poll_tasks())
+    assert settled["done"] == 1
+    asyncio.run(up._submit_next())                   # poll_loop 里就跟着做这一步
+    assert len(client.moves) == 2

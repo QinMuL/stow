@@ -87,6 +87,9 @@ class Uploader:
                 settled = await self._poll_tasks()
                 if settled["done"] or settled["failed"]:
                     logger.info("上传段结算:完成 %d,失败 %d", settled["done"], settled["failed"])
+                    # 串行位腾出后立刻接下一个(实测:单个上传仅 ~19s 命中秒传,
+                    # 但等下一轮 5 分钟扫描会让吞吐白等 —— 一批文件从 2 分钟变半小时)
+                    await self._submit_next()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("上传段结算异常:%s", exc)
 

@@ -76,6 +76,9 @@ class ResourceFetcher:
                 settled = await self._poll_tasks()
                 if settled["done"] or settled["failed"]:
                     logger.info("获取段结算:完成 %d,失败 %d", settled["done"], settled["failed"])
+                    # 腾出并发位就立刻补提交,别等下一轮扫描(实测轮间隔会让吞吐白等 5 分钟)
+                    if self._active_count() < max(1, int(self.bot.cfg.openlist_max_tasks)):
+                        await self._scan_dirs()
             except Exception as exc:  # noqa: BLE001 - 单轮异常不拖垮循环
                 logger.warning("获取段任务结算异常:%s", exc)
 
@@ -87,15 +90,7 @@ class ResourceFetcher:
         if self.client is None:
             return "未配置 openlist 客户端。"
         settled = await self._poll_tasks()
-        submitted, skipped = 0, 0
-        for path in self.bot.cfg.openlist_monitor_list():
-            try:
-                st = await self._scan_dir(path)
-            except OpenListError as exc:
-                logger.warning("获取段扫描目录失败(%s):%s", path, exc)
-                continue
-            submitted += st["submitted"]
-            skipped += st["skipped"]
+        submitted, skipped = await self._scan_dirs()
         done, failed = settled["done"], settled["failed"]
         head = f"📥 获取段报告:提交 {submitted} 个"
         if done:
@@ -108,6 +103,19 @@ class ResourceFetcher:
         if pending:
             head += f"\n⏳ 在途 {pending} 个(并发上限 {self.bot.cfg.openlist_max_tasks})"
         return head
+
+    async def _scan_dirs(self) -> tuple[int, int]:
+        """扫全部监控目录;返回 (提交数, 跳过数)。"""
+        submitted = skipped = 0
+        for path in self.bot.cfg.openlist_monitor_list():
+            try:
+                st = await self._scan_dir(path)
+            except OpenListError as exc:
+                logger.warning("获取段扫描目录失败(%s):%s", path, exc)
+                continue
+            submitted += st["submitted"]
+            skipped += st["skipped"]
+        return submitted, skipped
 
     async def _scan_dir(self, path: str) -> dict:
         """扫一个监控目录:新条目 → 移动任务(受并发闸门约束)。"""
@@ -235,13 +243,40 @@ class ResourceFetcher:
                    error=error, attempts=attempts)
         settled["done" if status == "done" else "failed"] += 1
         if status == "done":
-            logger.info("获取段完成:%s → %s(等待处理段接入)",
-                        row["src_path"], self.bot.cfg.openlist_dir / row["src_path"].rsplit("/", 1)[-1])
+            logger.info("获取段完成:%s → 本地落地点(已交处理段)",
+                        row["src_path"])
+            await self._verify_source_gone(row)
             return
         logger.warning("获取段失败(%s,第 %d 次):%s", row["src_path"], attempts, error)
         text = (f"⚠️ 获取失败:{row['src_path']}\n原因:{error or '未知'}\n"
                 f"已尝试 {attempts} 次(上限 {MAX_ATTEMPTS});源文件未被移走,可重试。")
         asyncio.create_task(self._notify(text))
+
+    async def _verify_source_gone(self, row: dict) -> None:
+        """校验"移动"是否真的删掉了源。
+
+        实测(2026-09-11):openlist 偶发**任务报成功但源文件仍在**(夸克侧删源那步没做成),
+        留个残影在源目录里。这里补删一次并告警;补删也失败则通知人工(不会反复重试)。
+        """
+        if self.client is None:
+            return
+        parent, _, name = row["src_path"].rpartition("/")
+        try:
+            items = await self.client.list_dir(parent or "/")
+        except OpenListError as exc:
+            logger.warning("获取段:校验源是否删除失败(%s):%s", row["src_path"], exc)
+            return
+        if name not in {it.get("name") for it in items}:
+            return
+        logger.warning("获取段:openlist 报移动成功但源仍在,补删一次:%s", row["src_path"])
+        try:
+            await self.client.remove(parent or "/", [name])
+            logger.info("获取段已补删源:%s", row["src_path"])
+        except OpenListError as exc:
+            logger.error("获取段补删源失败(%s):%s", row["src_path"], exc)
+            await self._notify(
+                f"⚠️ 源文件删不掉(openlist 报移动成功但源仍在):{row['src_path']}\n"
+                f"原因:{str(exc)[:120]}\n可到 openlist 里手动删除。")
 
     async def _notify(self, text: str) -> None:
         if self.bot.cfg.tg_admin_ids:
