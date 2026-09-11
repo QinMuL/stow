@@ -42,10 +42,19 @@ const sysState = computed(() => {
 
 const numbers = computed(() => pipe.value?.numbers || {})
 const disk = computed(() => numbers.value.disk || {})
+// 磁盘卡:大号 = 承载 media 的盘剩余(用户真正关心的"还能放多少");
+// 小字 = 媒体目录自身占用 + 文件数,避免和整盘口径混淆
 const diskText = computed(() => {
   const d = disk.value
-  if (!d.total_bytes) return `${gb(d.used_bytes)} / 剩余未知`
-  return `已用 ${gb(d.used_bytes)} / 盘剩 ${gb(d.free_bytes)}`
+  if (!d.total_bytes) return `媒体 ${gb(d.used_bytes)}`
+  return `盘剩 ${gb(d.free_bytes)}`
+})
+const diskHint = computed(() => {
+  const d = disk.value
+  const f = d.files || {}
+  const dirs = `落地点 ${f.openlist ?? 0} / 上传源 ${f.clouddrive ?? 0} 个文件`
+  if (!d.total_bytes) return `媒体目录 ${gb(d.used_bytes)} · ${dirs}`
+  return `媒体目录 ${gb(d.used_bytes)} · ${dirs} · 整盘已用 ${d.used_percent}%`
 })
 const diskState = computed(() => {
   const p = disk.value.used_percent || 0
@@ -188,11 +197,12 @@ onUnmounted(() => timer && window.clearInterval(timer))
         <div class="num">{{ numbers.uploaded_today ?? '—' }}</div>
         <div class="lbl">今日上传</div>
       </div>
-      <div class="stat">
-        <div class="num" :style="{ color: diskState === 'bad' ? 'var(--bad)' : diskState === 'warn' ? 'var(--amber)' : 'inherit', fontSize: '17px' }">
+      <div class="stat" title="承载 media 目录的是宿主机的盘(compose 里 ./media:/app/media);这里显示的是整盘剩余,不是 115 的容量">
+        <div class="num" :style="{ color: diskState === 'bad' ? 'var(--bad)' : diskState === 'warn' ? 'var(--amber)' : 'inherit', fontSize: '20px' }">
           {{ diskText }}
         </div>
-        <div class="lbl">磁盘 · 媒体目录 / 所在盘(已用 {{ disk.used_percent ?? '—' }}%)</div>
+        <div class="lbl">本地 media 所在盘</div>
+        <div class="hint" style="margin-top:2px">{{ diskHint }}</div>
       </div>
     </div>
 
