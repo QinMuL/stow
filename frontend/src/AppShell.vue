@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, clearToken } from './api'
+import { CONFIG_GROUPS } from './configGroups'
 import { pageBar } from './pagebar'
 import AccountModal from './views/AccountModal.vue'
 
@@ -11,37 +12,43 @@ const status = ref(null)
 const version = computed(() => status.value?.version ? 'v' + status.value.version : '—')
 const showAccount = ref(false)
 
+// 「全局配置」是父项:点它只展开子菜单、不导航(2026-09-12 用户要求),
+// 子项才是真正的分组页 /push/<key>。子项定义与页内切换条共用 configGroups.js。
 const nav = [
-  { to: '/overview', ic: '◉', label: '总览' },
-  { to: '/push', ic: '✦', label: '全局配置' },
-  { to: '/logs', ic: '≡', label: '日志' },
+  { to: '/overview', ic: '◉', label: '系统总览' },
+  { to: '/push', ic: '✦', label: '全局配置',
+    children: CONFIG_GROUPS.map((g) => ({ to: `/push/${g.key}`, label: g.label })) },
+  { to: '/logs', ic: '≡', label: '系统日志' },
+  { to: '/tools', ic: '⚙', label: '系统工具' },
 ]
 
-// 整体系统状态:聚合 Bot 进程 / 代理连通 / 115 通道 / 频道监控四段健康,一眼看出有无异常
-const sysState = computed(() => {
-  const s = status.value
-  if (!s) return { cls: 'bad', text: '检测中…', detail: '' }
-  const issues = []
-  let warn = false
-  if (!s.bot_running) issues.push('Bot 未运行')
-  const p = s.proxy || {}
-  if (!p.ok) issues.push(p.configured ? '代理不可达' : '代理未配置')
-  const c = s.pan115 || {}
-  if (c.cookie_set && !c.ok) issues.push('115 Cookie 失效')
-  else if (!c.cookie_set) warn = true
-  const m = s.monitor
-  if (m && m.configured && s.bot_running) {
-    if (m.state === 'no-login') issues.push('频道监控未登录')
-    else if (m.state !== 'running' || !m.connected) issues.push(`频道监控${m.state_text}`)
+// 展开状态:用户手动开合过才记,否则跟随当前路由(在配置页里就自动展开)
+const openOverride = ref({})
+function isOpen(n) {
+  return openOverride.value[n.to] ?? route.path.startsWith(n.to)
+}
+function onNavClick(n) {
+  if (!n.children) {
+    router.push(n.to)
+    return
   }
-  if (issues.length) {
-    return { cls: 'bad', text: '系统异常', detail: issues.join(' · ') }
+  // 窄屏没地方放子项(≤900px 侧栏收成纯图标、手机是底部导航)→ 直接进默认分组
+  if (window.matchMedia('(max-width: 900px)').matches) {
+    router.push(n.to)
+    return
   }
-  return warn
-    ? { cls: 'warn', text: '系统运行中(降级)', detail: '115 未配置 Cookie,匿名通道易限流' }
-    : { cls: 'ok', text: '系统运行中', detail: 'Bot / 代理 / 115 / 频道监控 全部正常' }
+  openOverride.value[n.to] = !isOpen(n)
+}
+// 离开某个父项的子树后清掉手动状态,下次进来重新跟随路由
+watch(() => route.path, (p) => {
+  for (const n of nav) {
+    if (n.children && !p.startsWith(n.to)) delete openOverride.value[n.to]
+  }
 })
 
+// 系统健康指示已收敛到「系统总览」页内那一行(2026-09-11 用户确认取消顶栏那份)。
+// 顶栏这份原先只在页面挂载时取一次、不轮询,状态会陈旧;还多占一条全局视线的位置。
+// 这里保留 status 只为侧栏版本号(version)。
 async function refresh() {
   try {
     status.value = await api('status')
@@ -67,22 +74,31 @@ onMounted(refresh)
         </div>
       </div>
       <nav class="nav">
-        <router-link v-for="n in nav" :key="n.to" class="nav-item"
-          :class="{ active: route.path.startsWith(n.to) }" :to="n.to">
-          <span class="ic">{{ n.ic }}</span><span class="txt">{{ n.label }}</span>
-        </router-link>
-        <!-- 预留位:功能到,页面到
-        <router-link class="nav-item" to="/transfer"><span class="ic">⇅</span><span class="txt">自动转存</span><span class="soon">soon</span></router-link>
-        -->
+        <template v-for="n in nav" :key="n.to">
+          <button v-if="n.children" class="nav-item" :class="{ active: route.path.startsWith(n.to) }"
+            @click="onNavClick(n)">
+            <span class="ic">{{ n.ic }}</span><span class="txt">{{ n.label }}</span>
+            <span class="caret">{{ isOpen(n) ? '▾' : '▸' }}</span>
+          </button>
+          <router-link v-else class="nav-item" :class="{ active: route.path.startsWith(n.to) }" :to="n.to">
+            <span class="ic">{{ n.ic }}</span><span class="txt">{{ n.label }}</span>
+          </router-link>
+          <div v-if="n.children && isOpen(n)" class="subnav">
+            <router-link v-for="c in n.children" :key="c.to" class="subnav-item"
+              :class="{ active: route.path === c.to }" :to="c.to">{{ c.label }}</router-link>
+          </div>
+        </template>
       </nav>
       <div class="side-foot">{{ version }} · amber</div>
     </aside>
 
     <div class="main">
       <div class="topbar">
-        <div class="top-status" :title="sysState.detail">
-          <span class="dot" :class="sysState.cls"></span>
-          {{ sysState.text }}
+        <!-- 手机端:项目标识在顶栏左侧(底部导航只留四个菜单项)。
+             两份标记是有意的——CSS 没法把一个节点搬进另一个容器,按断点各显一份最稳 -->
+        <div class="logo top-logo">
+          <div class="logo-mark">S</div>
+          <div class="logo-name">STOW</div>
         </div>
         <div class="top-right">
           <button class="link-btn who-btn" title="账号与服务" @click="showAccount = true">👤 <b>admin</b></button>

@@ -9,6 +9,8 @@
   --amber: #e8a33d;
   --amber-strong: #f5b95c;
   --amber-soft: rgba(232, 163, 61, 0.13);
+  --chart-2: #6f9fc4;              /* 趋势图第二条曲线(搬运)——暖色底上的冷色数据线,不与状态色混淆 */
+  --chart-3: #9d8ac9;              /* 趋势图第三条曲线(上传) */
   --text: #f0e9e0;
   --sub: #b3a796;
   --faint: #8d8071;
@@ -36,6 +38,7 @@ a { color: var(--amber); text-decoration: none; }
   display: flex; flex-direction: column; padding: 20px 14px;
 }
 .side .logo { display: flex; align-items: center; gap: 10px; padding: 4px 10px 18px; }
+.top-logo { display: none; }        /* 手机端才用(见 ≤640px 断点):桌面端标识在侧栏 */
 .logo-mark {
   width: 40px; height: 40px; border-radius: 11px; flex: none;
   background: linear-gradient(135deg, var(--amber-strong), var(--amber));
@@ -59,6 +62,36 @@ a { color: var(--amber); text-decoration: none; }
 }
 .nav-item .ic { width: 18px; text-align: center; opacity: .9; }
 .nav-item .soon { margin-left: auto; font-size: 10px; color: var(--faint); font-family: var(--mono); }
+.nav-item .caret { margin-left: auto; font-size: 9px; color: var(--faint); }
+/* 父项是可展开的按钮(点它只开合、不导航),所以按按钮重置 */
+button.nav-item { width: 100%; background: none; border: 0; font: inherit; cursor: pointer; text-align: left; }
+.subnav { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 4px; }
+.subnav-item {
+  display: block; padding: 7px 10px 7px 36px; border-radius: var(--r-s);
+  color: var(--sub); font-size: 12.5px; position: relative; transition: all .15s;
+}
+.subnav-item:hover { color: var(--text); background: rgba(255, 255, 255, 0.03); }
+.subnav-item.active { color: var(--amber-strong); background: var(--amber-soft); }
+/* 未保存记号:分组切换条与区块标题行共用 */
+.unsaved-dot {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--amber); flex: none; vertical-align: middle;
+}
+.card h3 .unsaved-dot { margin-left: 8px; }
+/* 配置页的分组切换条 */
+.grouptabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.grouptab {
+  display: inline-flex; align-items: center; gap: 7px; padding: 8px 15px;
+  border: 1px solid var(--line); border-radius: 999px;
+  color: var(--sub); font-size: 13px; transition: all .15s;
+}
+.grouptab:hover { color: var(--text); border-color: var(--line-strong); }
+.grouptab.active { color: var(--amber-strong); border-color: rgba(232, 163, 61, .5); background: var(--amber-soft); }
+/* 侧栏收窄成图标栏(≤900px)/ 手机变底部导航:放不下子项文字 → 子项与箭头都不显示;
+   此时点父项直接进默认分组(见 AppShell.onNavClick),换组靠页内那排切换条 */
+@media (max-width: 900px) {
+  .subnav, .nav-item .caret { display: none; }
+}
 .side-foot { margin-top: auto; padding: 10px 12px; color: var(--faint); font-size: 11px; font-family: var(--mono); }
 
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
@@ -66,7 +99,6 @@ a { color: var(--amber); text-decoration: none; }
   height: 58px; flex: none; display: flex; align-items: center; gap: 16px;
   padding: 0 26px; border-bottom: 1px solid var(--line); background: rgba(14, 12, 10, .8);
 }
-.top-status { display: flex; align-items: center; gap: 8px; color: var(--sub); font-size: 13px; }
 .top-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
 .who { color: var(--sub); font-size: 13px; }
 .who b { color: var(--text); font-weight: 600; }
@@ -85,14 +117,17 @@ a { color: var(--amber); text-decoration: none; }
 }
 .card h3 { font-size: 13px; letter-spacing: 1.5px; color: var(--amber); font-family: var(--mono); margin-bottom: 3px; }
 .card .desc { color: var(--sub); font-size: 12.5px; margin-bottom: 16px; }
-.stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 16px; }
+/* 本机实时资源四卡(CPU / 内存 / 网络 / 硬盘):桌面 4 列,窄屏 2 列 */
+.stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
+@media (max-width: 900px) { .stat-row { grid-template-columns: repeat(2, 1fr); } }
 .stat {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-l);
-  padding: 18px 20px; position: relative; overflow: hidden;
+  padding: 15px 16px; position: relative; overflow: hidden;
 }
 .stat::after { content: ''; position: absolute; inset: auto 0 0 0; height: 2px; background: linear-gradient(90deg, transparent, var(--amber), transparent); opacity: .5; }
-.stat .num { font-size: 30px; font-weight: 800; font-family: var(--mono); }
+.stat .num { font-size: 21px; font-weight: 800; font-family: var(--mono); white-space: nowrap; }
 .stat .lbl { color: var(--sub); font-size: 12.5px; }
+.stat .hint { margin-top: 2px; }
 
 /* ── 表单 ── */
 .field { margin-bottom: 14px; }
@@ -179,9 +214,11 @@ a { color: var(--amber); text-decoration: none; }
     padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
     border-right: none; border-top: 1px solid var(--line);
   }
-  .side .logo { padding: 0 4px 0 0; }
-  .side .logo-name, .side .logo-sub, .side-foot { display: none; }
-  .side .logo-mark { width: 34px; height: 34px; font-size: 17px; }
+  .side .logo { display: none; }        /* 标识改到顶栏左侧(.top-logo) */
+  .side-foot { display: none; }
+  .top-logo { display: flex; align-items: center; gap: 8px; padding: 0; }
+  .top-logo .logo-mark { width: 30px; height: 30px; font-size: 15px; }
+  .top-logo .logo-name { font-size: 14px; letter-spacing: 2px; }
   .nav { flex-direction: row; flex: 1; justify-content: space-around; gap: 4px; margin-top: 0; }
   .nav-item {
     flex: 1; flex-direction: column; gap: 3px; align-items: center; justify-content: center;
@@ -250,6 +287,8 @@ a { color: var(--amber); text-decoration: none; }
 
 /* 推送频道管理 */
 .chan-tip { background: rgba(232,163,61,.08); border: 1px solid rgba(232,163,61,.25); border-radius: 8px; padding: 10px 14px; font-size: 12.5px; color: var(--sub); margin-bottom: 14px; line-height: 1.6; }
+/* 字段级 💡 提示:紧贴输入框,别沿用 14px 下边距(会与 .field 的间距叠加成一大段空白) */
+.field > .chan-tip { margin: 7px 0 0; padding: 8px 12px; }
 .chan-row { display: flex; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .chan-row:last-child { border-bottom: none; }
 .chan-title { width: 130px; background: var(--bg-soft); border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 10px; color: var(--fg); font-size: 12.5px; }
@@ -329,14 +368,24 @@ a { color: var(--amber); text-decoration: none; }
 }
 
 /* 总览:顶栏一行 + 三段主轴 + 趋势 */
-.ov-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+.ov-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; cursor: pointer;
   padding: 12px 16px; margin-bottom: 14px; border-radius: var(--r-m);
   border: 1px solid var(--line); background: rgba(255,255,255,.02); font-size: 14px; }
 .ov-bar.ok { border-color: rgba(127,176,105,.35); background: rgba(127,176,105,.07); }
 .ov-bar.warn { border-color: rgba(232,163,61,.4); background: rgba(232,163,61,.08); }
 .ov-bar.bad { border-color: rgba(217,108,79,.45); background: rgba(217,108,79,.09); }
 .ov-bar-text { font-weight: 600; }
-.ov-bar-nums { color: var(--sub); font-size: 13px; margin-left: auto; }
+.ov-bar-more { margin-left: auto; color: var(--faint); font-size: 12.5px; flex: none; }
+.ov-bar:hover .ov-bar-more { color: var(--amber-strong); }
+
+/* 健康明细:按段分组的行(复用 .health-row;名字列比默认宽,段名较长) */
+.ov-health { margin-bottom: 14px; }
+.ov-health .health-name { width: 138px; }
+@media (max-width: 640px) {
+  .ov-health .health-row { flex-wrap: wrap; }
+  .ov-health .health-name { width: 100%; }
+  .ov-health .health-text { flex-basis: 100%; }
+}
 
 .ov-attn { border-color: rgba(217,108,79,.35) !important; }
 .ov-attn-row { display: flex; align-items: center; gap: 10px; padding: 7px 0;
@@ -374,18 +423,26 @@ a { color: var(--amber); text-decoration: none; }
 .ov-bar-mini i { display: block; height: 100%; background: var(--amber); }
 .ov-item-pct { color: var(--sub); flex: none; width: 34px; text-align: right; }
 
-.stat .num .unit { font-size: 13px; color: var(--sub); margin-left: 2px; }
-.ov-trend-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-.ov-trend-title { font-size: 12px; color: var(--sub); margin-bottom: 8px; }
-.ov-bars { display: flex; align-items: flex-end; gap: 6px; height: 52px; }
-.ov-bar-col { flex: 1; display: flex; flex-direction: column; align-items: center;
-  justify-content: flex-end; gap: 4px; height: 100%; }
-.ov-bar-col i { display: block; width: 100%; max-width: 26px; background: var(--amber);
-  border-radius: 3px 3px 0 0; opacity: .85; }
-.ov-bar-col span { font-size: 10px; color: var(--faint); font-family: var(--mono); }
+/* 7 日趋势:单图双曲线(手写 SVG,无图表库) */
+.ov-legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 10px; }
+.ov-lg { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--sub); }
+.ov-lg b { color: var(--text); font-weight: 600; font-family: var(--mono); }
+.ov-sw { width: 14px; height: 3px; border-radius: 2px; flex: none; }
+.ov-sw.a { background: var(--amber); }
+.ov-sw.b { background: var(--chart-2); }
+.ov-sw.c { background: var(--chart-3); }
+.ov-svg { display: block; width: 100%; height: 110px; }
+.ov-base { stroke: var(--line); stroke-width: 1; }
+.ov-curve { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+  vector-effect: non-scaling-stroke; }   /* 横向拉伸时线宽不被拉变形 */
+.ov-curve.a { stroke: var(--amber); }
+.ov-curve.b { stroke: var(--chart-2); }
+.ov-curve.c { stroke: var(--chart-3); }
+.ov-hit { fill: transparent; }
+/* 日期与曲线端点对齐:左右留出与 viewBox 内 padX(6/700)相同比例的边距 */
+.ov-days { display: flex; justify-content: space-between; padding: 0 calc(100% * 6 / 700); margin-top: 7px; }
+.ov-days span { font-size: 10px; color: var(--faint); font-family: var(--mono); }
 
 @media (max-width: 900px) {
   .ov-segs { grid-template-columns: 1fr; }
-  .ov-trend-row { grid-template-columns: 1fr; gap: 14px; }
-  .ov-bar-nums { margin-left: 0; width: 100%; }
 }

@@ -65,7 +65,7 @@ onBeforeUnmount(() => clearInterval(timer))
 <template>
   <div>
     <div class="page-head">
-      <div class="page-title">日志</div>
+      <div class="page-title">系统日志</div>
       <div class="page-sub">运行日志 · 尾部 500 条,10 秒自动刷新</div>
     </div>
 
