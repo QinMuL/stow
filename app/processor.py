@@ -258,7 +258,11 @@ class ProcessChain:
             logger.info("处理段跳过推卡(已推送过):%s", final.name)
         else:
             self._phase("推卡中", path)
-            result = await self.bot.push_link(link)
+            # 把已算好的 media/details 传下去:省一次 TMDB 搜索,也避免重解析我们自己刚改的名字
+            result = await self.bot.push_link(
+                link, media=media, details=details,
+                files=[ShareFile(final.name, final.stat().st_size, False)],
+            )
             if not result.ok:
                 # 推送失败:文件已改名,记录失败但不移走(下轮按"未推送"重试)
                 self._record(final, status="failed", error=result.text[:200], ed2k=uri)

@@ -1,5 +1,8 @@
 """TMDB 匹配:{tmdb-ID} 标注直连 + 两轮搜索(中→英)+ 别名兜底 + 年份硬门槛。
 
+别名兜底**始终**对 near 候选跑一次(不再只在"零命中"时跑),并把"标题与查询词完全相等"
+的候选优先为强命中 —— 这两条都是 2026-09-12《韩国制造》误配事故换来的,详见 _search_round。
+
 匹配不到返回 None(卡片降级纯文件名信息);详情归一化为统一 dict 供卡片渲染。
 """
 
@@ -9,7 +12,7 @@ import logging
 
 import httpx
 
-from app.media import AggregatedMedia, title_match
+from app.media import AggregatedMedia, norm_title, title_match
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +23,7 @@ _BACKDROP = "https://image.tmdb.org/t/p/w780"
 # 别名兜底最多查几条详情(防候选多打爆 TMDB 限流)
 _SEASON_PROBE_LIMIT = 6   # 剧集消歧最多拉几个候选详情
 _NEAR_MISS_LIMIT = 5
+_YEAR_GAP_WARN = 8        # 剧集唯一候选与资源年份差超过它 → 打提示日志(不拦截)
 
 
 def poster_url(path: str | None) -> str | None:
@@ -70,7 +74,7 @@ class TmdbClient:
             r.raise_for_status()
             return r.json()
         except httpx.HTTPError as exc:
-            logger.warning("TMDB 请求失败 %s %s: %s", path, params, exc)
+            logger.warning("TMDB 请求失败 %s %s: %s", path, _mask(params), exc)
             return None
 
     # ── 搜索 ───────────────────────────────────────────────
@@ -126,15 +130,26 @@ class TmdbClient:
             return None
 
         matched, near = _filter_candidates(candidates, media, queries, mtype)
-        if not matched and near:
-            # 类型+年份全对但标题不中(zh-CN 条目只有中文标题的典型场景):
-            # 拉详情的 translations/AKA 别名再判一次
-            for c in near[:_NEAR_MISS_LIMIT]:
-                d = await self.get_details(int(c["id"]), mtype)
-                if d and any(title_match(q, _title_pool(d)) for q in queries):
-                    matched.append(c)
+        # 别名兜底:**不再只在"一条都没命中"时才跑**(2026-09-12 误配事故修正)。
+        # 原先 `if not matched and near` 的短路会让正主永远进不了候选池:实测《韩国制造》资源里,
+        # 查询词 "Made in Korea" 是真人秀原名 "Made in Korea: The K-Pop Experience" 的**前缀**
+        # (弱命中,直接进 matched),而正剧的中文名《韩国制造》/韩文原名都不含该词、只能靠
+        # translations/AKA 命中,必然落在 near —— 短路一挡,它连被比较的机会都没有,于是单候选直取。
+        pools: dict[int, list[str]] = {}
+        for c in near[:_NEAR_MISS_LIMIT]:
+            d = await self.get_details(int(c["id"]), mtype)
+            if not d:
+                continue
+            pools[int(c["id"])] = _title_pool(d)
+            if any(title_match(q, pools[int(c["id"])]) for q in queries):
+                matched.append(c)
         if not matched:
             return None
+        # 强命中优先:若某条候选的标题(含别名)与查询词**完全相等**,它才是正主,
+        # 其余"包含查询词"的长尾候选(如副标题形式)让位
+        exact = [c for c in matched if _exact_title(c, queries, pools)]
+        if exact:
+            matched = exact
         if mtype == "tv" and media.season is not None and len(matched) > 1:
             picked = await self._pick_by_season(matched, media)
             if picked is not None:
@@ -197,6 +212,30 @@ class TmdbClient:
         return None
 
 
+def _mask(params: dict) -> dict:
+    """日志脱敏:凭据类参数一律打码,别把 api_key 写进日志文件(2026-09-12)。"""
+    sensitive = ("key", "token", "secret", "cookie", "password", "authorization")
+    return {
+        k: "***" if any(s in str(k).lower() for s in sensitive) else v
+        for k, v in params.items()
+    }
+
+
+def _exact_title(c: dict, queries: list[str], pools: dict[int, list[str]]) -> bool:
+    """候选(搜索标题/原名/详情别名池)里是否存在与查询词**归一化后完全相等**的标题。
+
+    用来区分强命中与弱命中:`Made in Korea` 命中 `Made in Korea: The K-Pop Experience`
+    只是**前缀**弱命中,而另一条候选的别名恰好就叫 `Made in Korea` —— 后者才是正主。
+    """
+    names = [
+        str(c.get("name") or c.get("title") or ""),
+        str(c.get("original_name") or c.get("original_title") or ""),
+        *pools.get(int(c.get("id") or 0), []),
+    ]
+    want = {norm_title(q) for q in queries if q}
+    return any(norm_title(n) in want for n in names if n)
+
+
 def _filter_candidates(
     candidates: list[dict], media: AggregatedMedia, queries: list[str], mtype: str
 ) -> tuple[list[dict], list[dict]]:
@@ -226,9 +265,23 @@ def _filter_candidates(
 
 
 def _pick_best(matched: list[dict], media: AggregatedMedia, mtype: str) -> dict | None:
-    """唯一选择:单条直取;无年份多候选无法消歧放弃;剧集取首播最晚。"""
+    """唯一选择:单条直取;无年份多候选无法消歧放弃;剧集取首播最晚。
+
+    剧集多候选取"首播最晚且不晚于资源年"= 自然就是**离资源年最近**的那个,年份本身已有约束。
+    唯一候选时没得比,这里只做一次"年份差得离谱"的提示(**只记日志、不拦截**):
+    2026-09-12 评估过直接拒匹配,否决了 —— 实测他自己的库里存在合法的大跨年匹配
+    (如《完美世界》首播 2021、资源标 2026 的在播剧集),硬拒会把能匹配的变成待人工。
+    """
     if len(matched) == 1:
-        return matched[0]
+        c = matched[0]
+        cy = _cand_year(c)
+        if mtype == "tv" and media.year and cy and media.year - cy >= _YEAR_GAP_WARN:
+            logger.warning(
+                "TMDB 唯一候选与资源年份相差 %d 年(资源 %s / 候选 %s):id=%s %r —— 只提示不拦截",
+                media.year - cy, media.year, cy, c.get("id"),
+                c.get("name") or c.get("title"),
+            )
+        return c
     if media.year is None:
         return None
     if mtype == "tv":

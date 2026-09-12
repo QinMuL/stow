@@ -304,6 +304,7 @@ class FakeBot:
         from app.bot import PushResult
 
         self.pushed.append(link)
+        self.push_kw = kw
         return PushResult(True, "✅ 已推送")
 
     async def _notify_uid(self, uid, text):
@@ -368,6 +369,24 @@ def test_chain_happy_path_renames_hashes_pushes_and_archives(tmp_path, monkeypat
     assert uri.startswith("ed2k://|file|飞到我心上.2026.S01E12") and uri.rstrip("/").endswith("|")
     row = bot.store.get_local_file(archived[0].name, archived[0].stat().st_size)
     assert row and row["status"] == "processed" and row["ed2k"] == uri and row["tmdb_id"] == 123456
+
+
+def test_chain_passes_known_media_to_push_avoiding_reparse(tmp_path, monkeypatch):
+    """推送段必须复用处理段已算好的 media/details,不重新解析文件名。
+
+    动机(2026-09-12):ed2k 链接里是**我们自己刚改好的新名**,重解析会把带全角冒号/连字符
+    的标题切碎(实测 `韩国制造：k-pop体验` → `pop体验`),标题对不上就改搜"pop体验",
+    又把真人秀搜了回来 —— 明明改名是对的,卡片却是错的。
+    """
+    chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch)
+    asyncio.run(chain.scan_now())
+    assert bot.pushed, "应当推卡"
+    media = bot.push_kw.get("media")
+    details = bot.push_kw.get("details")
+    assert media is not None and details is not None, "必须把已算好的 media/details 传给推送段"
+    assert details["tmdb_id"] == 123456
+    files = bot.push_kw.get("files") or []
+    assert len(files) == 1 and files[0].name.startswith("飞到我心上.2026.S01E12")
 
 
 def test_chain_moves_sidecar_files_together(tmp_path, monkeypatch):

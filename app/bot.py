@@ -415,12 +415,18 @@ class StowBot:
             await status.edit_text(text)
 
     async def push_link(
-        self, link: ParsedLink, *, status=None, prefix: str = ""
+        self, link: ParsedLink, *, status=None, prefix: str = "",
+        files=None, media=None, details: dict | None = None,
     ) -> PushResult:
         """链接 → 卡片 → 归属频道(手动推送与频道监控共用同一条链路)。
 
         去重由调用方负责(先查 store.is_pushed);推送成功即标记已推送。
         status 为可编辑的进度消息(可选);失败原因一律落日志。
+
+        `files`/`media`/`details` 可由调用方直接传入(处理段已经算过一遍了):
+        既省一次 TMDB 搜索,也避免**再解析一遍文件名** —— ed2k 链接里是我们自己刚改好的
+        新名,重解析会把带全角冒号/连字符的标题切碎(实测 `韩国制造：k-pop体验` → `pop体验`),
+        于是标题对不上、改搜"pop体验"又把真人秀搜了回来。
         """
         label = _PRESET_LABEL[link.provider]
         targets = self.cfg.channels_for(link.provider)
@@ -434,10 +440,12 @@ class StowBot:
             await self._say(status, prefix + text)
             return PushResult(False, text)
 
-        files, media = await self._load_media(link, status, prefix)
         if media is None:
-            return PushResult(False, "读取失败")  # _load_media 已回报原因
-        details = await self.tmdb.match(media) if self.tmdb else None
+            files, media = await self._load_media(link, status, prefix)
+            if media is None:
+                return PushResult(False, "读取失败")  # _load_media 已回报原因
+        if details is None:
+            details = await self.tmdb.match(media) if self.tmdb else None
         logger.info("TMDB 匹配:%s → %s", media.title[:40], details["title"] if details else "未命中")
 
         # 同一归属可能登记了多个频道 → **逐个都投**(2026-09-12 用户要求;此前只投第一个且静默)
