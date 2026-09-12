@@ -5,7 +5,10 @@
 - 效果:Dolby Vision 优先 → `DoVi P{n}`;否则 smpte2084→HDR10、arib-std-b67→HDR Vivid;其余 SDR(不标)
 - 色深:pix_fmt 里 **≥10 才标**(10bit/12bit)
 - 视频编码:h264→H.264 / hevc→H.265 / av1→AV1 / vp9 / mpeg2 / vc1 …
-- 音频:eac3→DDP / ac3→DD / truehd→TrueHD / dts→DTS / aac / flac / opus …
+- 音频:**编码 + 声道数**(照搬原项目 `normalize_audio`):eac3→DDP / ac3→DD / truehd→TrueHD /
+  aac / flac / opus …;**DTS 的 profile 优先于编码名**(DTS-HD MA / DTS-HD HRA / DTS Express /
+  DTS 96/24);`pcm_*` 一律写 LPCM;声道数按 1.0/2.0/2.1/5.1/6.1/7.1 拼在后面(如 `DDP 5.1`)
+  —— 漏了它,文件名里本来写着的 5.1 会被"技术标签以 ffprobe 为准"这条规则覆盖掉
 
 探测失败(ffprobe 缺失/文件损坏)→ 返回空标签,**不阻塞链路**(与旧项目一致)。
 """
@@ -15,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -25,8 +29,33 @@ _VIDEO_CODEC = {
 }
 _AUDIO_CODEC = {
     "eac3": "DDP", "ac3": "DD", "truehd": "TrueHD", "dts": "DTS", "aac": "AAC",
-    "flac": "FLAC", "opus": "Opus", "mp3": "MP3", "pcm_s16le": "PCM", "pcm_bluray": "PCM",
+    "flac": "FLAC", "opus": "Opus", "mp3": "MP3",
 }
+_PCM_RE = re.compile(r"^pcm_")          # pcm_* 一律 LPCM(不要写死几个具体格式)
+# 声道数 → 标签(原项目原样;没收录的原样写数字)
+_CHANNEL_LABEL = {1: "1.0", 2: "2.0", 3: "2.1", 6: "5.1", 7: "6.1", 8: "7.1"}
+
+
+def normalize_audio(codec: str, profile: str, channels: int) -> str:
+    """音频 codec + profile + 声道数 → 标签(**照搬原项目 `normalize_audio`**)。
+
+    - 声道数拼在后面:`DDP 5.1` / `TrueHD 7.1` / `AAC 2.0`
+    - DTS 的 profile 优先于编码名:`DTS-HD MA` / `DTS-HD HRA` / `DTS Express` / `DTS 96/24`
+    - `pcm_*` 一律 `LPCM`
+    - 认不出的 codec 回退**原始名**(而不是把这一段丢掉)
+    """
+    codec = (codec or "").strip()
+    if not codec:
+        return ""
+    name = _AUDIO_CODEC.get(codec)
+    if codec == "dts" and profile in ("DTS-HD MA", "DTS-HD HRA", "DTS Express", "DTS 96/24"):
+        name = profile
+    if _PCM_RE.match(codec):
+        name = "LPCM"
+    if not name:
+        name = codec
+    ch = _CHANNEL_LABEL.get(channels, str(channels) if channels else "")
+    return f"{name} {ch}" if ch else name
 
 
 @dataclass
@@ -102,8 +131,6 @@ def tags_from_ffprobe(data: dict) -> ProbeTags:
     # 色深:≥10 才标
     pix_fmt = str(v.get("pix_fmt") or "")
     if pix_fmt:
-        import re
-
         m = re.match(r"^yuv[a-z0-9]*?(\d{2})[bl]e?$", pix_fmt)
         if m and int(m.group(1)) >= 10:
             t.bit_depth = f"{int(m.group(1))}bit"
@@ -123,7 +150,12 @@ def tags_from_ffprobe(data: dict) -> ProbeTags:
 
     t.video_codec = _VIDEO_CODEC.get(str(v.get("codec_name") or "").lower(), "")
     if audios:
-        t.audio_codec = _AUDIO_CODEC.get(str(audios[0].get("codec_name") or "").lower(), "")
+        a = audios[0]
+        t.audio_codec = normalize_audio(
+            str(a.get("codec_name") or "").lower(),
+            str(a.get("profile") or ""),
+            int(a.get("channels") or 0),
+        )
     return t
 
 

@@ -148,13 +148,39 @@ def test_tags_from_ffprobe_mapping():
     data = {"streams": [
         {"codec_type": "video", "codec_name": "hevc", "width": 3840, "height": 1608,
          "pix_fmt": "yuv420p10le", "color_transfer": "smpte2084"},
-        {"codec_type": "audio", "codec_name": "eac3"},
-        {"codec_type": "audio", "codec_name": "aac"},
+        {"codec_type": "audio", "codec_name": "eac3", "channels": 6},
+        {"codec_type": "audio", "codec_name": "aac", "channels": 2},
     ], "format": {"duration": "1234.5"}}
     t = tags_from_ffprobe(data)
     assert (t.resolution, t.effect, t.bit_depth) == ("2160p", "HDR10", "10bit")
-    assert t.video_codec == "H.265" and t.audio_codec == "DDP"
+    assert t.video_codec == "H.265"
+    assert t.audio_codec == "DDP 5.1"      # 取第一条音轨,且带声道数
     assert t.audio_tracks == 2 and abs(t.duration - 1234.5) < 0.01 and t.ok()
+
+
+def test_normalize_audio_codec_plus_channels():
+    """音频标签 = 编码 + 声道数(照搬原项目)。
+
+    回归锁:漏了声道,文件名里本来写着的 5.1 会被"技术标签以 ffprobe 为准"这条规则覆盖掉。
+    """
+    from app.probe import normalize_audio
+
+    assert normalize_audio("eac3", "", 6) == "DDP 5.1"
+    assert normalize_audio("ac3", "", 2) == "DD 2.0"
+    assert normalize_audio("truehd", "", 8) == "TrueHD 7.1"
+    assert normalize_audio("aac", "", 0) == "AAC"      # 没有声道信息 → 不拼
+    assert normalize_audio("", "", 6) == ""            # 没有编码 → 整段空
+
+
+def test_normalize_audio_dts_profile_pcm_and_unknown():
+    """DTS 用 profile、pcm_* 一律 LPCM、认不出的回退原名(都与原项目一致)。"""
+    from app.probe import normalize_audio
+
+    assert normalize_audio("dts", "DTS-HD MA", 6) == "DTS-HD MA 5.1"   # profile 优先于编码名
+    assert normalize_audio("dts", "DTS", 6) == "DTS 5.1"
+    assert normalize_audio("pcm_bluray", "", 2) == "LPCM 2.0"          # 所有 pcm_* 都是 LPCM
+    assert normalize_audio("vorbis", "", 2) == "vorbis 2.0"            # 认不出 → 回退原名
+    assert normalize_audio("eac3", "", 4) == "DDP 4"                   # 未收录的声道数原样写
 
 
 def test_tags_dolby_vision_preferred_over_hdr10():
