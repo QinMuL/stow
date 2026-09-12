@@ -61,6 +61,19 @@ class PushResult:
 _PRESET_LABEL = {"115": "115链接推送频道", "ed2k": "ed2k链接推送频道"}
 _HEARTBEAT_INTERVAL = 60.0   # 心跳打点间隔(秒);健康判据按"连丢 3 拍"判定卡死
 
+# /start 的欢迎语:短、只放最常用动作,并指向命令菜单(完整说明留给 /help)。
+# 2026-09-12 用户指出 /start 与 /help 输出同一段文案 —— 菜单有了之后,两者分工应不同。
+_WELCOME = (
+    "📦 Stow · 媒体推送\n\n"
+    "直接把 115 分享链接或 ed2k 链接发给我,就会识别作品并推到对应频道。\n"
+    "点输入框旁的菜单按钮(或打 /)可以看到全部命令。\n\n"
+    "最常用:\n"
+    "· 直接发链接,或 /push <链接>\n"
+    "· /save <115链接> 转存到网盘并建永久分享\n"
+    "· /bind 登记链接该推到哪个频道\n\n"
+    "发 /help 看完整说明。"
+)
+
 _HELP = (
     "📦 Stow · 媒体推送\n\n"
     "直接发送 115 分享链接或 ed2k 链接(一条消息多个会逐个处理)\n"
@@ -81,8 +94,8 @@ _HELP = (
 # ⚠️ 新增命令时**必须**同时加进这里 —— tests/test_bot_commands.py 会比对
 # 「注册的 CommandHandler」与「菜单项」两个集合,漏一个就红,不需要人来提醒。
 _COMMANDS: tuple[tuple[str, str], ...] = (
-    ("start", "查看使用说明"),
-    ("help", "查看使用说明"),
+    ("start", "开始使用(常用动作)"),
+    ("help", "完整使用说明"),
     ("push", "推送一条链接(115 分享 / ed2k)"),
     ("save", "转存 115 分享并建永久分享"),
     ("bind", "登记链接推送频道"),
@@ -154,7 +167,7 @@ class StowBot:
             .concurrent_updates(True)
         )
         app = builder.build()
-        app.add_handler(CommandHandler("start", self._cmd_help))
+        app.add_handler(CommandHandler("start", self._cmd_start))
         app.add_handler(CommandHandler("help", self._cmd_help))
         app.add_handler(CommandHandler("push", self._cmd_push))
         app.add_handler(CommandHandler("save", self._cmd_save))
@@ -322,6 +335,9 @@ class StowBot:
         return uid in self.cfg.tg_admin_ids
 
     # ── 命令 ────────────────────────────────────────────────
+    async def _cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.effective_message.reply_text(_WELCOME)
+
     async def _cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(_HELP)
 

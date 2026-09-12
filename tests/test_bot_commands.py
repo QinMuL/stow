@@ -55,3 +55,14 @@ def test_help_text_mentions_menu_commands():
     mentioned = set(re.findall(r"/([a-z]{3,})", bot._HELP))
     unknown = mentioned - in_menu
     assert not unknown, f"帮助文案提到了菜单里没有的命令:{sorted(unknown)}"
+
+
+def test_start_and_help_are_not_the_same_text():
+    """/start 与 /help 分工不同(2026-09-12 用户指出两者输出同一段文案)。
+
+    /start 短、只放常用动作并指向菜单;/help 是完整参考。菜单描述也不该一样。
+    """
+    assert bot._WELCOME != bot._HELP, "/start 与 /help 不该输出同一段文案"
+    assert len(bot._WELCOME) < len(bot._HELP), "欢迎语应当比完整说明短"
+    descs = dict(bot._COMMANDS)
+    assert descs["start"] != descs["help"], "菜单里两条描述也得能区分"
