@@ -28,10 +28,12 @@ PYPROJECT = ROOT / "pyproject.toml"
 VERSION_FILES = [INIT, PKG, LOCK, PYPROJECT]
 
 
-def sh(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    print("  $", " ".join(args))
+def sh(*args: str, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+    """跑一条命令。capture=True 时收走输出(要读 stdout);否则直接打到终端。"""
+    print("  $", " ".join(args), flush=True)
     return subprocess.run(args, cwd=ROOT, check=check, text=True,
-                          encoding="utf-8", errors="replace")
+                          encoding="utf-8", errors="replace",
+                          capture_output=capture)
 
 
 def current_version() -> str:
@@ -89,7 +91,7 @@ def main() -> None:
             sys.exit("✗ 测试没通过,已中止(版本文件可自行回退:git checkout -- app frontend pyproject.toml)")
 
     tag = f"v{new}"
-    existing = sh("git", "tag", "-l", tag, check=False).stdout.strip()
+    existing = sh("git", "tag", "-l", tag, check=False, capture=True).stdout.strip()
     if existing:
         sys.exit(f"✗ tag {tag} 已存在,换版本号或先删掉它")
 
