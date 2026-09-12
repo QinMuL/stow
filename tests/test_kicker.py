@@ -85,3 +85,65 @@ def test_run_exception_does_not_break_later_kicks():
 
     asyncio.run(main())
     assert calls["n"] == 2
+
+
+def test_self_rearm_does_not_hot_loop():
+    """回归(2026-09-12 线上事故):一轮**在自己内部**申请延迟重跑时,延迟必须生效。
+
+    处理段撞上 `moving` 守门就会 `kick(5.0)`;第一版丢了延迟 → `while _pending` 立刻再跑
+    → 无限热循环(日志 5 分钟 5MB、9p stat 淹死事件循环、心跳停跳、获取段不再结算)。
+    """
+    calls = {"n": 0}
+
+    async def run_once():
+        calls["n"] += 1
+        k.kick(delay=0.1)                 # 模拟"文件还没就绪,5 秒后再看"
+
+    async def main():
+        k = Kicker(run_once)
+        k.kick()
+        await asyncio.sleep(0.55)         # 0.55 秒内:正常只该跑 5~6 轮
+
+    asyncio.run(main())
+    assert 1 <= calls["n"] <= 8, f"疑似自激热循环:{calls['n']} 轮/0.55 秒"
+
+
+def test_self_rearm_plus_immediate_kick_merges_into_that_round():
+    """延迟等待期间来的请求合并进那一轮(不丢、也不多跑一轮)。"""
+    calls = {"n": 0}
+    box: dict = {}
+
+    async def run_once():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            box["k"].kick(delay=0.3)      # 排一轮 0.3 秒后的
+
+    async def main():
+        box["k"] = Kicker(run_once)
+        box["k"].kick()
+        await asyncio.sleep(0.05)
+        box["k"].kick()                   # 通知来了:合并进已排的那一轮
+        await asyncio.sleep(0.4)
+
+    asyncio.run(main())
+    assert calls["n"] == 2, f"应合并成 2 轮,实际 {calls['n']} 轮"
+    assert not box["k"].busy and not box["k"]._pending, "请求不能被丢掉(还有待跑的轮次)"
+
+
+def test_burst_warning_fires_on_hot_loop(caplog):
+    """兜底告警:真的出现密集触发时要留下告警(只看不拦)。"""
+    import logging
+
+    box: dict = {}
+
+    async def run_once():
+        box["k"].kick()                   # 无视延迟、立刻再踢 = 自激
+
+    async def main():
+        box["k"] = Kicker(run_once, name="测试段")
+        box["k"].kick()
+        await asyncio.sleep(0.2)
+
+    with caplog.at_level(logging.WARNING, logger="app.kicker"):
+        asyncio.run(main())
+    assert any("过密" in r.message for r in caplog.records)
