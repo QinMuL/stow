@@ -44,6 +44,7 @@ SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub"}
 SIDECAR_EXTS = SUBTITLE_EXTS | {".nfo", ".jpg", ".jpeg", ".png"}
 
 _GATE_NEVER = float("inf")   # 守门返回它 = 一直不符合(如小于体积下限),不必"等一会再看"
+_BUSY_RETRY_SECONDS = 5.0    # 撞上"已有扫描在跑"时,重排一次触发(不丢通知)
 
 
 class ProcessChain:
@@ -56,6 +57,9 @@ class ProcessChain:
         self.kicker = Kicker(self.scan_now, name="处理段")
         self.on_done = None                    # 归档成功后的回调(bot 装配时接上传段)
         self._retry_after: float | None = None  # 本轮里"最短还要等多久"(用于排延迟触发)
+        # 整轮互斥:四个入口(定时轮/Kicker/手动/Web)都跑在这一个事件循环上,协程会在
+        # await 处交错 —— 没有这道闸,同一文件会被两轮同时处理(见 scan_now 注释)
+        self._scan_lock = asyncio.Lock()
         # 当前正在处理的文件与阶段(总览页显示真进度用;只读内存字段,跨线程读安全)
         self._current: dict = {}
 
@@ -78,6 +82,23 @@ class ProcessChain:
 
     # ── 一轮 ────────────────────────────────────────────────
     async def scan_now(self) -> str:
+        """扫一期落地点;**同一时刻只允许一轮在跑**(四个入口共用)。
+
+        四个入口(5 分钟定时轮 / Kicker 通知式 / 手动 `/process` / Web「跑一轮」)都跑在
+        同一个事件循环上,两个协程会在 await 处交错 —— Kicker 只保证"它自己触发的轮次不
+        重叠",管不住另外三个。实测(2026-09-12)时序:第一轮已改名并卡在哈希,第二轮此
+        时扫描,看到的是改名后的文件(没有对应搬运记录 + mtime 够老 → 守门放行)→ 重复
+        哈希/推卡;第一轮把文件移走后,第二轮 FileNotFoundError 并写进失败记录。
+        让位的那一轮**重排一次**,别把这次通知吞掉。
+        """
+        if self._scan_lock.locked():
+            logger.info("处理段已有扫描在跑,本轮让位(重排 %.0f 秒后)", _BUSY_RETRY_SECONDS)
+            self.kicker.kick(delay=_BUSY_RETRY_SECONDS)
+            return "跳过:已有扫描在跑"
+        async with self._scan_lock:
+            return await self._scan_once()
+
+    async def _scan_once(self) -> str:
         """扫一期 media/openlist;返回报告摘要(手动 /process 与自动轮共用)。"""
         src = Path(self.bot.cfg.openlist_dir)
         if not src.is_dir():

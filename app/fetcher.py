@@ -61,6 +61,7 @@ class ResourceFetcher:
         self._progress: dict[str, float] = {}   # 文件名 → 百分比(最近一次任务查询)
         self._poll_task: asyncio.Task | None = None
         self._poll_lock = asyncio.Lock()  # 结算串行(扫描与轮询两条路都会结算)
+        self._scan_lock = asyncio.Lock()  # 发现+提交串行(scan_now 与 poll_loop 两条路)
         # 通知式衔接:搬运完一个就立刻让处理段看一轮(轮询仍然保留当兜底)
         self.kicker = Kicker(self.scan_now, name="获取段")
         self.on_done = None                     # bot 装配时接处理段
@@ -153,17 +154,27 @@ class ResourceFetcher:
         return head
 
     async def _scan_dirs(self) -> tuple[int, int]:
-        """扫全部监控目录;返回 (提交数, 跳过数)。"""
-        submitted = skipped = 0
-        for path in self.bot.cfg.openlist_monitor_list():
-            try:
-                st = await self._scan_dir(path)
-            except OpenListError as exc:
-                logger.warning("获取段扫描目录失败(%s):%s", path, exc)
-                continue
-            submitted += st["submitted"]
-            skipped += st["skipped"]
-        return submitted, skipped
+        """扫全部监控目录;返回 (提交数, 跳过数)。
+
+        **同一时刻只提交一轮**:本方法是 `scan_now`(定时轮/Kicker/手动/Web)与
+        `poll_loop`(10 秒结算轮腾出并发位后补提交)两条路的公共入口,协程在 await 处交错,
+        没有闸门就会对同一个文件重复提交搬运(2026-09-12 与处理段同一批加固)。
+        撞上时直接返回——另一轮正在做同样的发现,不必重排。
+        """
+        if self._scan_lock.locked():
+            logger.debug("获取段:已有扫描在提交中,本轮跳过发现")
+            return 0, 0
+        async with self._scan_lock:
+            submitted = skipped = 0
+            for path in self.bot.cfg.openlist_monitor_list():
+                try:
+                    st = await self._scan_dir(path)
+                except OpenListError as exc:
+                    logger.warning("获取段扫描目录失败(%s):%s", path, exc)
+                    continue
+                submitted += st["submitted"]
+                skipped += st["skipped"]
+            return submitted, skipped
 
     async def _scan_dir(self, path: str) -> dict:
         """扫一个监控目录:文件逐个提交;**目录递归展开成逐文件**(并发粒度=文件)。"""

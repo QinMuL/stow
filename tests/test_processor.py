@@ -405,6 +405,42 @@ def test_chain_passes_quality_info_from_final_name(tmp_path, monkeypatch):
     assert q == ["4K", "WEB-DL", "HDR10", "H.265", "10-bit", "25fps", "DDP 5.1"], q
 
 
+def test_concurrent_scans_do_not_double_process(tmp_path, monkeypatch):
+    """第二轮在第一轮"已改名、还在哈希"时进来,不能把同一个文件再跑一遍。
+
+    回归(2026-09-12 线上):处理段有**四个入口**(5 分钟定时轮 / 通知式 Kicker / 手动
+    /process / Web「跑一轮」),都在同一个事件循环上,协程在 await 处交错 —— Kicker 只
+    保证"它自己触发的轮次不重叠",管不住另外三个。线上时序:第一轮已改名并卡在哈希,
+    第二轮此时扫描,看到的是**改名后**的文件(没有对应搬运记录 + mtime 够老 → 守门放行),
+    于是重复哈希;第一轮随后把文件移走,第二轮就 FileNotFoundError,还写进失败记录
+    (深渊无间 S01E08:2 秒内两次 ed2k;兰香如故 S01E05:处理失败 + 记账失败)。
+    """
+    chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch)
+    released = asyncio.Event()
+    calls = {"n": 0}
+    base = _fake_probe()
+
+    async def gated_probe(path, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await released.wait()        # 第一轮半路停住(模拟哈希那种长耗时阶段)
+        return await base(path, **kw)
+
+    monkeypatch.setattr(processor_mod, "probe_file", gated_probe)
+
+    async def main():
+        first = asyncio.create_task(chain.scan_now())
+        await asyncio.sleep(0)           # 让第一轮进入探测并停住
+        second = await chain.scan_now()  # 第二轮此时进来(线上就是这个时序)
+        released.set()
+        return await first, second
+
+    _, second_report = asyncio.run(main())
+    assert "跳过" in second_report, f"第二轮应当让位,实际:{second_report}"
+    assert len(bot.pushed) == 1, f"同一个文件被推了 {len(bot.pushed)} 次"
+    assert not bot.store.list_local_files("failed"), "不该留下失败记录"
+
+
 def test_chain_moves_sidecar_files_together(tmp_path, monkeypatch):
     chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch)
     (bot.cfg.openlist_dir / "飞到我心上.2026.WEB-DL.S01E12.zh.srt").write_text("sub", encoding="utf-8")

@@ -812,6 +812,8 @@ def create_app(config_path: str | Path) -> FastAPI:
         if loop is None:
             raise HTTPException(status_code=503, detail="Bot 事件循环未就绪")
         fut = asyncio.run_coroutine_threadsafe(obj.scan_now(), loop)
+        # 记一笔来源:段里报"已有扫描在跑,本轮让位"时靠它能分辨是谁在撞(2026-09-12 加)
+        logger.info("Web 触发了%s的一轮扫描", seg)
         try:
             return {"success": True, "segment": seg, "message": fut.result(timeout=180)}
         except Exception as exc:  # noqa: BLE001
