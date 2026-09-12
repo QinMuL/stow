@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 
+from app import auth
 from app.config import DEFAULT_CONFIG_PATH, ensure_admin, load_config
 from app.logging_setup import setup_logging
 from app.store import Store
@@ -63,6 +64,12 @@ def main() -> None:
     cfg = load_config(config_path)  # 非严格:允许不全
     setup_logging(cfg.log_level, cfg.log_dir)
     logger = logging.getLogger("stow")
+
+    # Web 会话密钥落盘:重启/重建容器不再把所有用户踢下线(2026-09-12)
+    if auth.init_secret(cfg.data_dir):
+        logger.info("Web 会话密钥:已从 %s 加载(重启不掉线)", cfg.data_dir)
+    else:
+        logger.info("Web 会话密钥:已生成并落盘到 %s(重启不掉线)", cfg.data_dir)
 
     # 首次部署:自动创建本地媒体流转目录(openlist 下载落地 / CD2 上传源)
     created = cfg.ensure_media_dirs()
