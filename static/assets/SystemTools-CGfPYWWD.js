@@ -1,0 +1,1 @@
+import{c as e,G as a,o as t}from"./index-Dl8aMwvz.js";const l={__name:"SystemTools",setup(d){return(i,s)=>(t(),e("div",null,[...s[0]||(s[0]=[a('<div class="page-head"><div class="page-title">系统工具</div><div class="page-sub">运维与手动触发</div></div><div class="card"><h3>工具</h3><div class="empty">暂无工具项</div></div>',2)])]))}};export{l as default};

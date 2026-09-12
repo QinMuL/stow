@@ -479,5 +479,8 @@ button.nav-item { width: 100%; background: none; border: 0; font: inherit; curso
 .ov-days span { font-size: 10px; color: var(--faint); font-family: var(--mono); }
 
 @media (max-width: 900px) {
-  .ov-segs { grid-template-columns: 1fr; }
+  /* 窄屏收成单列。⚠️ 必须写 minmax(0, 1fr) 而不是 1fr:
+     `1fr` 实为 `minmax(auto, 1fr)`,**列宽不能小于内容的 min-content** ——
+     展开在途明细时那一列会把卡片横向撑宽(手机上表现为卡片被拉长)。 */
+  .ov-segs { grid-template-columns: minmax(0, 1fr); }
 }

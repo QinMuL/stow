@@ -538,7 +538,7 @@ async function saveChannels() {
         <div class="field">
           <label>扫描间隔(分钟)<code>process_interval_minutes</code></label>
           <input v-model="model.process_interval_minutes" type="number" min="1">
-          <div class="chan-tip">💡 多久扫一次落地点。默认 5 分钟。</div>
+          <div class="chan-tip">💡 兜底轮询:多久扫一次落地点。上一段搬完会**立刻**触发处理,这个间隔只在漏掉通知时兜底。默认 5 分钟。</div>
         </div>
         <div class="field">
           <label>体积下限(MB)<code>min_size_mb</code></label>
@@ -548,7 +548,7 @@ async function saveChannels() {
         <div class="field">
           <label>静默年龄(秒)<code>min_age_seconds</code></label>
           <input v-model="model.min_age_seconds" type="number" min="0">
-          <div class="chan-tip">💡 文件写入后至少静默这么久才动手 —— 宁等一轮,也不处理还在写的半截文件。默认 60 秒。</div>
+          <div class="chan-tip">💡 **只对"不是流水线搬进来"的文件生效**(比如手动拷进落地点):等这么久再处理,防半截文件。流水线自己搬进来的文件按「搬运完成 + 大小一致」直接处理,不用等。默认 120 秒。</div>
         </div>
       </div>
       <label class="switch-row">
@@ -609,7 +609,7 @@ async function saveChannels() {
         <div class="field">
           <label>上传轮询间隔(分钟)<code>upload_interval_minutes</code></label>
           <input v-model="model.upload_interval_minutes" type="number" min="1">
-          <div class="chan-tip">💡 多久扫一次上传源。默认 5 分钟。</div>
+          <div class="chan-tip">💡 兜底轮询:多久扫一次上传源。处理段归档完会**立刻**触发上传,这个间隔只在漏掉通知时兜底。默认 5 分钟。</div>
         </div>
       </div>
       <div class="actions">
