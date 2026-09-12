@@ -1,17 +1,10 @@
 services:
   stow:
-    image: ghcr.io/qinmul/stow:latest   # GitHub Actions 构建发布
+    image: ghcr.io/qinmul/stow:latest
     container_name: stow
     restart: unless-stopped
-    # 塞一个极小的 init 当 PID 1:本服务会频繁 spawn 子进程(ffprobe/ffmpeg),
-    # 没有 init 时 python 不回收孤儿进程 → **僵尸会积累**,到某个时刻
-    # `docker rm -f` 会直接失败("PID ... is zombie and can not be killed",
-    # 2026-09-12 亲历,只能先 docker stop 让命名空间销毁才删得掉)
     init: true
-    network_mode: host        # 直达宿主代理;Bot 无端口监听
+    network_mode: host
     volumes:
-      - ./data:/app/data      # config.json 与 stow.db、日志都持久化在此
-      - ./media:/app/media    # 本地媒体流转目录(相对路径,首次启动自动建两个子目录):
-                              #   media/openlist   —— openlist 下载落地
-                              #   media/clouddrive —— CD2 上传源
-                              # openlist / CD2 两个工具的部署请挂载同样的宿主路径
+      - ./data:/app/data
+      - ./media:/app/media
