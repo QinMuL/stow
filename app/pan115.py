@@ -18,6 +18,30 @@ from functools import partial
 
 logger = logging.getLogger(__name__)
 
+# ── 媒体文件名识别(含重复下载后缀容错) ──────────────────────
+# 不带点的扩展名(带点的集合在 processor.VIDEO_EXTS;pan115 不能反向导入它)
+_VIDEO_BARE = {
+    "mkv", "mp4", "avi", "ts", "m2ts", "mov", "wmv", "flv", "rmvb", "webm",
+    "mpg", "mpeg", "iso", "m4v",
+}
+_SUB_BARE = {"srt", "ass", "ssa", "sub"}
+# 浏览器/下载器重复下载后缀:" (1)" "(2)" "_1" "-2" 等
+_DUP_SUFFIX_RE = re.compile(r"[\s._\-]+\(\d{1,2}\)$|[\s._\-]+[1-9]\d?$")
+
+
+def strip_dup_suffix(name: str) -> str:
+    """剥掉重复下载后缀,仅当剥完仍是**媒体文件名**(否则原样返回)。
+
+    浏览器把重名文件存成 `片名.mkv (1)` / `片名.mkv_1`,不剥的话后缀识别、
+    标题解析、扩展名全被带偏(整集被判成"非视频"→永远待人工)。
+    """
+    m = _DUP_SUFFIX_RE.search(name or "")
+    if not m:
+        return name
+    base = name[: m.start()]
+    ext = base.rsplit(".", 1)[-1].lower() if "." in base else ""
+    return base if ext in _VIDEO_BARE | _SUB_BARE else name
+
 # ── 链接解析 ────────────────────────────────────────────────
 _115_URL_RE = re.compile(
     r"115(?:cdn)?\.com/s/([A-Za-z0-9_-]+)(?:\?(?P<query>[^ \n]*))?", re.IGNORECASE
@@ -111,9 +135,9 @@ class ShareFile:
 
     @property
     def is_video(self) -> bool:
-        return not self.is_dir and self.name.rsplit(".", 1)[-1].lower() in {
-            "mkv", "mp4", "avi", "wmv", "mov", "flv", "ts", "m2ts", "webm", "rmvb",
-        }
+        if self.is_dir:
+            return False
+        return strip_dup_suffix(self.name).rsplit(".", 1)[-1].lower() in _VIDEO_BARE
 
 
 def fmt_size(n: int) -> str:

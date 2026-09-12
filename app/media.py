@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-from app.pan115 import ShareFile
+from app.pan115 import ShareFile, strip_dup_suffix
 
 
 @dataclass
@@ -129,6 +129,9 @@ _EP_RANGE_RE = re.compile(r"S(\d{1,2})\s*E(\d{1,4})\s*[-~E]+\s*(\d{1,4})", re.IG
 _SE_EP_RE = re.compile(r"S(\d{1,2})\s*E(\d{1,4})", re.IGNORECASE)
 # 前置非字母数字防 "Cars2" 类误判;分隔兼容 "Season 3"/"Season.3"/"S3"
 _SEASON_ONLY_RE = re.compile(r"(?:^|[^A-Za-z0-9])S(?:eason[\s._]*)?(\d{1,2})\b", re.IGNORECASE)
+# 片名在集号之后(如 "S02E08.One.Hundred.Years.of.Solitude.2024.1080p..."):
+# guessit 对这种顺序常把标题连年份一起吞掉,需剥掉前缀重解析
+_LEADING_SE_RE = re.compile(r"^s\d{1,2}e\d{1,4}[\s._\-]+", re.IGNORECASE)
 
 
 def extract_season_episode(text: str) -> tuple[int | None, int | None, int]:
@@ -342,6 +345,7 @@ def parse_filename(name: str, *, quick: bool = False) -> MediaData:
     quick=True 跳过 guessit(标题/年份/发布组置空),只跑正则提季集/画质——
     guessit 单次 ~90ms,千集分享全员解析要分钟级;大分享聚合只对抽样文件跑全量。
     """
+    name = strip_dup_suffix(name)      # "片名.mkv (1)" → "片名.mkv"
     cleaned = clean_name(name)
     g: dict = {}
     if not quick:
@@ -361,6 +365,20 @@ def parse_filename(name: str, *, quick: bool = False) -> MediaData:
     year = None if quick else _first(g.get("year"))
     year = int(year) if year else None
 
+    # 片名在集号之后("S02E08.片名.2024...")时 guessit 会把年份一起吞进标题 →
+    # 剥掉前缀重解析,只补标题(年份/季集沿用原解析结果)
+    lead = _LEADING_SE_RE.sub("", name)
+    if not quick and lead != name:
+        try:
+            from guessit import guessit
+
+            t2 = str(_first(guessit(clean_name(lead), {"expected_title": [],
+                                                       "type": "auto"}).get("title")) or "").strip()
+            if t2 and t2 != title:
+                title = t2
+        except Exception:  # noqa: BLE001
+            pass
+
     # 季集检测在原始文件名上做(cleaned 已把 '-' 归一为空格,会破坏 E01-E12 范围)
     season, ep, ep_span = extract_season_episode(name)
     g_season = _first(g.get("season"))
@@ -370,6 +388,11 @@ def parse_filename(name: str, *, quick: bool = False) -> MediaData:
     if ep is None and g_ep:
         ep = int(g_ep)
         ep_span = 1
+    # guessit 会把 "剧名.2026.E05..." 的年份当季号(→ S2026E05):没有显式 SxxEyy
+    # 标记、季号又正好等于年份时判为误读,季号留给"有集号无季号"惯例处理
+    if (season is not None and year is not None and season == year
+            and not _SE_EP_RE.search(name)):
+        season = None
 
     media_type = "tv" if (season is not None or ep is not None) else "movie"
 

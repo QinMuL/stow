@@ -85,8 +85,12 @@ class ProbeTagsLike:
 
 
 def render_name(media, details: dict | None, probe, ext: str = "", raw_name: str = "") -> str:
-    """渲染目标文件名(不含目录);标题或季集号缺失时返回空串交调用方拦下。"""
-    raw_name = raw_name or getattr(media, "title", "") or ""
+    """渲染目标文件名(不含目录);标题缺失或剧集无集号时返回空串交调用方拦下。"""
+    from app.pan115 import strip_dup_suffix   # 惰性导入:避免 media↔namer 循环
+
+    # 浏览器重复下载后缀("片名.mkv (1)")会让 Path(...).suffix 变成 ".mkv (1)",
+    # 目标名就会带着它收尾 —— 在这里兜住,调用方不传 ext 也不会脏
+    raw_name = strip_dup_suffix(raw_name or getattr(media, "title", "") or "")
     extension = ext or (Path(raw_name).suffix if "." in raw_name else ".mkv")
     probe = probe or ProbeTagsLike()
     title = (details or {}).get("title") or getattr(media, "title", "") or ""
@@ -103,9 +107,14 @@ def render_name(media, details: dict | None, probe, ext: str = "", raw_name: str
         name = f"{head} - {quality}" if quality else head
     else:
         season = getattr(media, "season", None)
+        # episode_start 是分享聚合(AggregatedMedia)的字段;兜 episode 兼容单文件解析
         episode = getattr(media, "episode_start", None)
-        if season is None or episode is None:
-            return ""                     # 剧集缺季集号:不猜(交人工)
+        if episode is None:
+            episode = getattr(media, "episode", None)
+        if episode is None:
+            return ""                     # 剧集无集号:不猜(交人工)
+        if season is None:
+            season = 1                    # 有集号无季号 → S1(原项目惯例)
         se = f"S{int(season):02d}E{int(episode):02d}"
         parts = [title] + ([str(year)] if year else []) + [se, f"第{int(episode):02d}集"]
         head = ".".join(parts)

@@ -15,7 +15,7 @@ from app.config import Config
 from app.ed2k import ED2K_CHUNK, ed2k_hash_file, ed2k_uri, sanitize_ed2k_name
 from app.media import analyze_share
 from app.namer import quality_label, render_name, sanitize_name
-from app.pan115 import ShareFile
+from app.pan115 import ShareFile, strip_dup_suffix
 from app.probe import ProbeTags, tags_from_ffprobe
 from app.processor import ProcessChain
 from app.store import Store
@@ -200,11 +200,86 @@ def test_tags_wide_movie_uses_longest_side():
     assert t.resolution == "2160p" and t.bit_depth == ""   # 8bit 不标
 
 
-def test_tags_sdr_has_no_effect_label():
+def test_tags_sdr_labels_sdr():
+    """SDR 也显式标出来(原项目口径);8bit 仍不标色深。"""
     t = tags_from_ffprobe({"streams": [{"codec_type": "video", "codec_name": "h264",
                                         "width": 1920, "height": 1080,
                                         "color_transfer": "bt709", "pix_fmt": "yuv420p"}]})
-    assert t.effect == "" and t.resolution == "1080p"
+    assert t.effect == "SDR" and t.resolution == "1080p" and t.bit_depth == ""
+
+
+def test_tags_without_video_stream_has_no_sdr_claim():
+    """探测失败/纯音频:没有视频轨就不该断言 SDR,留空。"""
+    t = tags_from_ffprobe({"streams": [{"codec_type": "audio", "codec_name": "aac"}]})
+    assert t.effect == "" and not t.ok()
+
+
+# ── 重复下载后缀(浏览器把重名文件存成 "片名.mkv (1)") ───────
+def test_strip_dup_suffix_cases():
+    assert strip_dup_suffix("片名.2026.1080p.mkv (1)") == "片名.2026.1080p.mkv"
+    assert strip_dup_suffix("片名.2026.1080p.mkv (12)") == "片名.2026.1080p.mkv"
+    assert strip_dup_suffix("片名.2026.1080p.mkv_1") == "片名.2026.1080p.mkv"
+    assert strip_dup_suffix("片名.2026.1080p.mkv-2") == "片名.2026.1080p.mkv"
+    assert strip_dup_suffix("片名.zh.srt (1)") == "片名.zh.srt"       # 字幕同样处理
+    # 不该动的:正常名 / 剥完不是媒体文件
+    assert strip_dup_suffix("片名.2026.1080p.mkv") == "片名.2026.1080p.mkv"
+    assert strip_dup_suffix("片名.2026") == "片名.2026"
+    assert strip_dup_suffix("电影 4") == "电影 4"
+    assert strip_dup_suffix("片名.mkv.bak1") == "片名.mkv.bak1"
+
+
+def test_share_file_is_video_tolerates_dup_suffix():
+    """带重复下载后缀的文件仍须被认作视频,否则整集被判"非视频"永远跳过。"""
+    assert ShareFile("片名.2026.mkv (1)", 2000, False).is_video
+    assert ShareFile("片名.2026.mkv_1", 2000, False).is_video
+    assert not ShareFile("片名.2026.mkv (1)", 0, True).is_video      # 目录不是视频
+    assert not ShareFile("说明.txt (1)", 2000, False).is_video
+
+
+def test_parse_filename_leading_sxxexx_keeps_title_clean():
+    """片名在集号之后时,年份不能被吞进标题(否则 TMDB 搜不到 → 待人工)。"""
+    m = analyze_share([ShareFile(
+        "S02E08.One.Hundred.Years.of.Solitude.2024.1080p.WEB-DL.mkv", 2000, False)])
+    assert m.title == "One Hundred Years of Solitude"
+    assert (m.season, m.episode_start) == (2, 8)
+
+
+def test_parse_filename_year_not_mistaken_for_season():
+    """'剧名.2026.E05...' 里的年份不能被 guessit 当季号(否则产出 S2026E05)。"""
+    m = analyze_share([ShareFile("剧名.2026.E05.1080p.WEB-DL.H.264.mkv", 2000, False)])
+    assert m.season is None and m.episode_start == 5 and m.year == 2026
+
+
+def test_render_name_tv_defaults_season_and_accepts_media_data():
+    """有集号无季号 → S1(原项目惯例);同时兼容只有 episode 字段的单文件解析结果。"""
+    from app.media import MediaData
+
+    media = MediaData(title="剧名", media_type="tv", episode=5,
+                      quality="1080P", source="WEB-DL")
+    name = render_name(media, None, ProbeTags(resolution="1080p"), raw_name="剧名.E05.mkv")
+    assert name.startswith("剧名.S01E05.第05集.")
+    # 无集号(电影/无法判断)仍拦下交人工
+    assert render_name(MediaData(title="剧名", media_type="tv"), None, None,
+                       raw_name="剧名.mkv") == ""
+
+
+def test_render_name_extension_ignores_dup_suffix():
+    """调用方不传 ext 时,扩展名也不能从 "片名.mkv (1)" 推出 ".mkv (1)"。"""
+    raw = "片名.2026.1080p.WEB-DL.mkv (1)"
+    media = analyze_share([ShareFile(raw, 2000, False)])
+    name = render_name(media, {"title": "片名", "year": 2026},
+                       ProbeTags(resolution="1080p"), raw_name=raw)
+    assert name.endswith(".mkv") and "(1)" not in name
+
+
+def test_chain_handles_browser_duplicate_suffix(tmp_path, monkeypatch):
+    """端到端:带 " (1)" 的文件要正常改名归档,名字与扩展名都不能被带脏。"""
+    chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch,
+                           name="飞到我心上.2026.WEB-DL.S01E12.mkv (1)")
+    report = asyncio.run(chain.scan_now())
+    assert "processed 1" in report
+    archived = [p.name for p in Path(bot.cfg.clouddrive_dir).iterdir()]
+    assert archived == ["飞到我心上.2026.S01E12.第12集.1080p.WEB-DL.H.264.AAC {tmdb-123456}.mkv"]
 
 
 # ── 处理链 ──────────────────────────────────────────────────

@@ -30,6 +30,7 @@ from pathlib import Path
 
 from app.kicker import Kicker
 from app.openlist import TASK_SUCCEEDED, OpenListClient, OpenListError
+from app.pan115 import strip_dup_suffix
 from app.processor import SUBTITLE_EXTS, VIDEO_EXTS
 
 logger = logging.getLogger(__name__)
@@ -254,7 +255,7 @@ class ResourceFetcher:
             if it.get("is_dir"):
                 if await self._subtree_has_media(f"{path.rstrip('/')}/{name}"):
                     return True
-            elif Path(name).suffix.lower() in KEEP_EXTS:
+            elif Path(strip_dup_suffix(name)).suffix.lower() in KEEP_EXTS:
                 return True
         return False
 

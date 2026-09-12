@@ -2,7 +2,8 @@
 
 照旧项目语义(不做全量元数据清点),也顺便取清洗阶段要用的校验字段:
 - 分辨率:按**最大边**归一(宽幅电影高度不达标按宽度判):≥3200→2160p / ≥1700→1080p / ≥1100→720p
-- 效果:Dolby Vision 优先 → `DoVi P{n}`;否则 smpte2084→HDR10、arib-std-b67→HDR Vivid;其余 SDR(不标)
+- 效果:Dolby Vision 优先 → `DoVi P{n}`;否则 smpte2084→HDR10、arib-std-b67→HDR Vivid;
+  其余 → `SDR`(原项目口径:SDR 也显式写进文件名);**没有视频轨**(探测失败/纯音频)时留空不标
 - 色深:pix_fmt 里 **≥10 才标**(10bit/12bit)
 - 视频编码:h264→H.264 / hevc→H.265 / av1→AV1 / vp9 / mpeg2 / vc1 …
 - 音频:**编码 + 声道数**(照搬原项目 `normalize_audio`):eac3→DDP / ac3→DD / truehd→TrueHD /
@@ -127,6 +128,10 @@ def tags_from_ffprobe(data: dict) -> ProbeTags:
         t.effect = "HDR10"
     elif transfer == "arib-std-b67":
         t.effect = "HDR Vivid"
+    else:
+        # 认不出 HDR 一律标 SDR(原项目口径):与"探测失败"区分开——那条路
+        # 在 not videos 时已提前返回,不会误标
+        t.effect = "SDR"
 
     # 色深:≥10 才标
     pix_fmt = str(v.get("pix_fmt") or "")

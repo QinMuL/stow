@@ -31,7 +31,7 @@ from app.kicker import Kicker
 from app.links import ParsedLink
 from app.media import analyze_share
 from app.namer import render_name
-from app.pan115 import ShareFile
+from app.pan115 import ShareFile, strip_dup_suffix
 from app.probe import probe_file
 
 logger = logging.getLogger(__name__)
@@ -166,8 +166,11 @@ class ProcessChain:
 
     async def _process(self, path: Path) -> str:
         original_name = path.name     # 改名后清理旧名记录用
-        src_stem = path.stem          # 伴行匹配用(视频改名后 stem 会变)
-        if path.suffix.lower() not in VIDEO_EXTS:
+        # 重复下载后缀("片名.mkv (1)")会让 suffix 变成 ".mkv (1)":判定与改名都要
+        # 用剥掉后缀的名字,否则整集被判成"非视频"永远跳过
+        clean = Path(strip_dup_suffix(path.name))
+        src_stem = clean.stem         # 伴行匹配用(视频改名后 stem 会变)
+        if clean.suffix.lower() not in VIDEO_EXTS:
             return "非视频"                        # 伴行文件不动,等视频一起走
         wait = self._gate(path)
         if wait is not None:
@@ -218,7 +221,7 @@ class ProcessChain:
                 f"❓ 无法处理「{path.name}」:TMDB 未命中(识别不出是哪部作品),已留在落地点待人工。")
             return "unrecognized"
         self._phase("重命名", path)
-        target = render_name(media, details, probe, path.suffix.lower(), raw_name=path.name)
+        target = render_name(media, details, probe, clean.suffix.lower(), raw_name=path.name)
         if not target:
             logger.warning("识别不完整(TMDB=%s),拦下:%s", bool(details), path.name)
             self._record(path, status="unrecognized", error="TMDB 未命中或缺季集号")
