@@ -3,6 +3,7 @@ name: docker
 on:
   push:
     branches: [main]
+    tags: ["v*"]
 
 permissions:
   contents: read
@@ -14,6 +15,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 打 tag 时先校验:tag(v1.0.1)去掉 v 必须等于代码里的 __version__,
+      # 对不上直接失败 —— 防"镜像标签与代码版本各说各话"
+      - name: 校验 tag 与代码版本一致
+        if: github.ref_type == 'tag'
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CODE="$(sed -n 's/^__version__ *= *"\([^"]*\)".*/\1/p' app/__init__.py | head -1)"
+          echo "tag=${TAG} app.__version__=${CODE}"
+          if [ "${TAG}" != "${CODE}" ]; then
+            echo "::error::tag(${TAG}) 与 app.__version__(${CODE}) 不一致:先把版本号改到 ${TAG} 再打 tag"
+            exit 1
+          fi
+
+      # 镜像标签:分支推送只出 latest(会被覆盖);tag 推送只出不可变的版本标签。
+      # 刻意不让 tag 构建去动 latest —— 万一给旧提交补打 tag,latest 不会被悄悄退回旧代码。
+      - name: 计算镜像标签
+        id: meta
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tags=ghcr.io/qinmul/stow:${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=ghcr.io/qinmul/stow:latest" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -24,4 +49,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/qinmul/stow:latest  # GHCR 要求小写(仓库名含大写)
+          tags: ${{ steps.meta.outputs.tags }}
