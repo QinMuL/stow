@@ -13,7 +13,7 @@ import app.processor as processor_mod
 from app.cleaner import CleanError, filter_ffmetadata, report_from_ffprobe
 from app.config import Config
 from app.ed2k import ED2K_CHUNK, ed2k_hash_file, ed2k_uri, sanitize_ed2k_name
-from app.media import analyze_share
+from app.media import analyze_share, get_quality_info
 from app.namer import quality_label, render_name, sanitize_name
 from app.pan115 import ShareFile, strip_dup_suffix
 from app.probe import ProbeTags, tags_from_ffprobe
@@ -80,13 +80,13 @@ def _media(name: str):
 
 def test_render_episode_name():
     """剧集模板(原项目规则):SxxEyy + 第NN集(两位补零),来源在效果之前。"""
-    tags = ProbeTags(resolution="2160p", effect="HDR10", bit_depth="10bit",
+    tags = ProbeTags(resolution="2160p", effect="HDR10", bit_depth="10-bit",
                      video_codec="H.265", audio_codec="DDP", frame_rate="25fps")
     raw = "飞到我心上.2026.WEB-DL.S01E12.mkv"
     name = render_name(_media(raw), {"title": "飞到我心上", "year": 2026, "tmdb_id": 123456},
                        tags, ".mkv", raw_name=raw)
     assert name == ("飞到我心上.2026.S01E12.第12集."
-                    "2160p.WEB-DL.HDR10.H.265.10bit.25fps.DDP {tmdb-123456}.mkv")
+                    "2160p.WEB-DL.HDR10.H.265.10-bit.25fps.DDP {tmdb-123456}.mkv")
 
 
 def test_render_episode_pads_episode_number():
@@ -152,7 +152,7 @@ def test_tags_from_ffprobe_mapping():
         {"codec_type": "audio", "codec_name": "aac", "channels": 2},
     ], "format": {"duration": "1234.5"}}
     t = tags_from_ffprobe(data)
-    assert (t.resolution, t.effect, t.bit_depth) == ("2160p", "HDR10", "10bit")
+    assert (t.resolution, t.effect, t.bit_depth) == ("2160p", "HDR10", "10-bit")
     assert t.video_codec == "H.265"
     assert t.audio_codec == "DDP 5.1"      # 取第一条音轨,且带声道数
     assert t.audio_tracks == 2 and abs(t.duration - 1234.5) < 0.01 and t.ok()
@@ -191,6 +191,27 @@ def test_tags_dolby_vision_preferred_over_hdr10():
     }]}
     t = tags_from_ffprobe(data)
     assert t.effect == "DoVi P8"                       # DV 优先且不叠 HDR10
+
+
+def test_bit_depth_tag_uses_hyphen():
+    """色深标签必须带连字符(原项目口径 `f"{bits}-bit"`)。
+
+    回归(2026-09-12 用户发现):Stow 之前写 `10bit` —— 文件名里没有连字符,而卡片画质行
+    解析时又补了连字符(media.py 走 `-bit`),同一份信息两处写法不一致。
+    旧文件(已按 `10bit` 命名过)仍要能解析出带连字符的展示标签。
+    """
+    t = tags_from_ffprobe({"streams": [{"codec_type": "video", "codec_name": "hevc",
+                                        "width": 3840, "height": 2160,
+                                        "pix_fmt": "yuv420p10le"}]})
+    assert t.bit_depth == "10-bit"
+    label = quality_label(t, None, "片名.2026.2160p.WEB-DL.mkv")
+    assert "10-bit" in label and "10bit" not in label, label
+    t12 = tags_from_ffprobe({"streams": [{"codec_type": "video", "codec_name": "hevc",
+                                          "width": 3840, "height": 2160,
+                                          "pix_fmt": "yuv420p12le"}]})
+    assert t12.bit_depth == "12-bit"
+    # 兼容旧名:解析侧本来就同时认 10bit / 10-bit
+    assert "10-bit" in get_quality_info("片名.2026.2160p.WEB-DL.H.265.10bit.mkv")
 
 
 def test_tags_wide_movie_uses_longest_side():
@@ -397,7 +418,7 @@ def test_chain_passes_quality_info_from_final_name(tmp_path, monkeypatch):
     分辨率/HDR/编码/色深/帧率/音频只存在于我们写出的新名字里。
     """
     chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch, probe_tags=ProbeTags(
-        resolution="2160p", video_codec="H.265", bit_depth="10bit", effect="HDR10",
+        resolution="2160p", video_codec="H.265", bit_depth="10-bit", effect="HDR10",
         frame_rate="25fps", audio_codec="DDP 5.1", video_tracks=1, duration=60.0))
     asyncio.run(chain.scan_now())
     q = bot.push_kw.get("quality_info") or []

@@ -4,7 +4,7 @@
 - 分辨率:按**最大边**归一(宽幅电影高度不达标按宽度判):≥3200→2160p / ≥1700→1080p / ≥1100→720p
 - 效果:Dolby Vision 优先 → `DoVi P{n}`;否则 smpte2084→HDR10、arib-std-b67→HDR Vivid;
   其余 → `SDR`(原项目口径:SDR 也显式写进文件名);**没有视频轨**(探测失败/纯音频)时留空不标
-- 色深:pix_fmt 里 **≥10 才标**(10bit/12bit)
+- 色深:pix_fmt 里 **≥10 才标**(`10-bit`/`12-bit`,带连字符)
 - 视频编码:h264→H.264 / hevc→H.265 / av1→AV1 / vp9 / mpeg2 / vc1 …
 - 音频:**编码 + 声道数**(照搬原项目 `normalize_audio`):eac3→DDP / ac3→DD / truehd→TrueHD /
   aac / flac / opus …;**DTS 的 profile 优先于编码名**(DTS-HD MA / DTS-HD HRA / DTS Express /
@@ -133,14 +133,16 @@ def tags_from_ffprobe(data: dict) -> ProbeTags:
         # 在 not videos 时已提前返回,不会误标
         t.effect = "SDR"
 
-    # 色深:≥10 才标
+    # 色深:≥10 才标,**带连字符**(`10-bit` —— 原项目 `normalize_bit_depth` 就是
+    # f"{bits}-bit",命名圈惯例也这么写;2026-09-12 用户指出 Stow 之前写成了 `10bit`,
+    # 结果是文件名里没有连字符、而卡片画质行解析时又补上连字符,两处不一致)
     pix_fmt = str(v.get("pix_fmt") or "")
     if pix_fmt:
         m = re.match(r"^yuv[a-z0-9]*?(\d{2})[bl]e?$", pix_fmt)
         if m and int(m.group(1)) >= 10:
-            t.bit_depth = f"{int(m.group(1))}bit"
+            t.bit_depth = f"{int(m.group(1))}-bit"
         elif pix_fmt.startswith(("p10", "yuv420p10", "yuv422p10", "yuv444p10")):
-            t.bit_depth = "10bit"
+            t.bit_depth = "10-bit"
 
     # 帧率:r_frame_rate 形如 "25/1" / "24000/1001"
     fr = str(v.get("r_frame_rate") or v.get("avg_frame_rate") or "")
