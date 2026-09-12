@@ -29,7 +29,7 @@ from app.cleaner import CleanError, clean_file
 from app.ed2k import ed2k_hash_file, ed2k_uri
 from app.kicker import Kicker
 from app.links import ParsedLink
-from app.media import analyze_share
+from app.media import analyze_share, get_quality_info
 from app.namer import render_name
 from app.pan115 import ShareFile, strip_dup_suffix
 from app.probe import probe_file
@@ -262,6 +262,9 @@ class ProcessChain:
             result = await self.bot.push_link(
                 link, media=media, details=details,
                 files=[ShareFile(final.name, final.stat().st_size, False)],
+                # 画质行按**改名后**的名字解析:那里才有 ffprobe 实测的分辨率/HDR/编码/
+                # 色深/帧率/音频(源文件名常常只有 WEB-DL 一个词,直接用它画质行会退化)
+                quality_info=get_quality_info(final.name),
             )
             if not result.ok:
                 # 推送失败:文件已改名,记录失败但不移走(下轮按"未推送"重试)

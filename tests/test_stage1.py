@@ -125,7 +125,7 @@ def _fanout_bot(tmp_path, cfg, delivered, said, fail_targets=()):
     async def fake_load(link, status=None, prefix=""):
         return [], AggregatedMedia(title="某片", file_count=1, total_size=1)
 
-    async def fake_deliver(media, details, link, files, target):
+    async def fake_deliver(media, details, link, files, target, **kw):
         if target in fail_targets:
             raise RuntimeError("投递炸了")
         delivered.append(target)

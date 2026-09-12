@@ -203,17 +203,23 @@ def _render_head(details: dict, media: AggregatedMedia) -> str:
     return "\n".join(lines)
 
 
-def _quality_line(media: AggregatedMedia) -> str:
-    """画质信息:优先 8 维 quality_info,兜底 quality/hdr/source。"""
-    if media.quality_info:
-        return " | ".join(media.quality_info)
+def _quality_line(media: AggregatedMedia, quality_info: list[str] | None = None) -> str:
+    """画质信息:优先调用方给的标签,再 media 自带的 8 维 quality_info,兜底 quality/hdr/source。
+
+    处理段会显式传入(它是按**改名后**的文件名解析的实测标签,含 ffprobe 的分辨率/HDR/
+    编码/色深/帧率/音频):不要指望从源文件名里也能读到这些 —— 源名常常只有 WEB-DL 一个词,
+    卡片画质行会退化成只显示它(2026-09-12 实测回退)。
+    """
+    info = quality_info or media.quality_info
+    if info:
+        return " | ".join(info)
     parts = [p for p in (media.quality, media.hdr, media.source) if p]
     return " ".join(parts)
 
 
-def _render_quality_block(media: AggregatedMedia) -> str:
+def _render_quality_block(media: AggregatedMedia, quality_info: list[str] | None = None) -> str:
     """画质模块:💿 行;全空返回空串。"""
-    q = _quality_line(media)
+    q = _quality_line(media, quality_info)
     if not q:
         return ""
     return f"<blockquote>💿 画质：{_esc(q)}</blockquote>"
@@ -440,12 +446,13 @@ def render_caption(
     details: dict | None,
     link: ParsedLink,
     files: list[ShareFile] | None = None,
+    quality_info: list[str] | None = None,
 ) -> str:
     """海报下方 caption(≤1024)。details 为 TMDB 归一化详情,未匹配传 None。"""
     details = details or _pseudo_details(media)
     return _fit_caption(
         _render_head(details, media),
-        _render_quality_block(media),
+        _render_quality_block(media, quality_info),
         _render_season_block(details, media),
         _render_footer(link),
         files,
@@ -459,12 +466,13 @@ def render_text(
     details: dict | None,
     link: ParsedLink,
     files: list[ShareFile] | None = None,
+    quality_info: list[str] | None = None,
 ) -> str:
     """无海报时的完整消息(≤4096)。与 caption 同一截断阶梯,限额更高。"""
     details = details or _pseudo_details(media)
     return _fit_caption(
         _render_head(details, media),
-        _render_quality_block(media),
+        _render_quality_block(media, quality_info),
         _render_season_block(details, media),
         _render_footer(link),
         files,

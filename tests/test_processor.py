@@ -389,6 +389,22 @@ def test_chain_passes_known_media_to_push_avoiding_reparse(tmp_path, monkeypatch
     assert len(files) == 1 and files[0].name.startswith("飞到我心上.2026.S01E12")
 
 
+def test_chain_passes_quality_info_from_final_name(tmp_path, monkeypatch):
+    """画质行必须按**改名后**的名字解析并显式传给卡片。
+
+    回归(2026-09-12):处理段不再重解析文件名之后,卡片画质行跟着退化成源文件名里那点信息
+    (实测同一部剧:S01E08 显示完整 7 项,S01E09 只剩 `WEB-DL`)—— 因为 ffprobe 实测的
+    分辨率/HDR/编码/色深/帧率/音频只存在于我们写出的新名字里。
+    """
+    chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch, probe_tags=ProbeTags(
+        resolution="2160p", video_codec="H.265", bit_depth="10bit", effect="HDR10",
+        frame_rate="25fps", audio_codec="DDP 5.1", video_tracks=1, duration=60.0))
+    asyncio.run(chain.scan_now())
+    q = bot.push_kw.get("quality_info") or []
+    # 与修复前的卡片格式逐项一致(4K/10-bit 是显示写法),不能只剩源名里那点 WEB-DL
+    assert q == ["4K", "WEB-DL", "HDR10", "H.265", "10-bit", "25fps", "DDP 5.1"], q
+
+
 def test_chain_moves_sidecar_files_together(tmp_path, monkeypatch):
     chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch)
     (bot.cfg.openlist_dir / "飞到我心上.2026.WEB-DL.S01E12.zh.srt").write_text("sub", encoding="utf-8")
