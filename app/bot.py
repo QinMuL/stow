@@ -7,7 +7,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter, TimedOut
 from telegram.ext import (
@@ -77,6 +77,22 @@ _HELP = (
     "Bot 会读取分享 → 匹配 TMDB → 按链接类型推到对应频道。"
 )
 
+# Bot 快捷命令菜单(点输入框旁的菜单按钮 / 打 "/" 就能看到)。
+# ⚠️ 新增命令时**必须**同时加进这里 —— tests/test_bot_commands.py 会比对
+# 「注册的 CommandHandler」与「菜单项」两个集合,漏一个就红,不需要人来提醒。
+_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("start", "查看使用说明"),
+    ("help", "查看使用说明"),
+    ("push", "推送一条链接(115 分享 / ed2k)"),
+    ("save", "转存 115 分享并建永久分享"),
+    ("bind", "登记链接推送频道"),
+    ("bindcancel", "取消本次频道登记"),
+    ("scan", "立即扫描目录监控"),
+    ("fetch", "立即跑一轮获取段(→ 本地)"),
+    ("process", "立即跑一轮处理段(改名/推卡 → 待上传)"),
+    ("upload", "立即跑一轮上传段(→ 115)"),
+)
+
 
 class StowBot:
     def __init__(self, cfg: Config, store: Store, config_path: str | None = None) -> None:
@@ -122,6 +138,8 @@ class StowBot:
             STATE["bot_loop"] = asyncio.get_running_loop()
             # 心跳打点:健康判据用它识别"进程在、事件循环却卡住不进展"
             self._beat_task = asyncio.create_task(self._heartbeat_loop())
+            # 注册 Bot 快捷命令菜单(点输入框旁的菜单/打 "/" 就能看到)
+            await self._register_commands(app)
 
         builder = (
             Application.builder()
@@ -155,6 +173,19 @@ class StowBot:
         app.add_handler(MessageHandler(filters.FORWARDED, self._on_forward))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
         return app
+
+    async def _register_commands(self, app: Application) -> None:
+        """把快捷命令菜单注册到 Telegram(失败只告警,不拖垮启动)。
+
+        菜单内容就是上面的 `_COMMANDS` —— 那是唯一真源,别在这里另写一份。
+        """
+        try:
+            await app.bot.set_my_commands(
+                [BotCommand(name, desc) for name, desc in _COMMANDS]
+            )
+            logger.info("Bot 命令菜单已注册:%d 条", len(_COMMANDS))
+        except Exception as exc:  # noqa: BLE001 - 菜单注册失败不影响 Bot 其它功能
+            logger.warning("Bot 命令菜单注册失败(不影响推送等主功能):%s", exc)
 
     async def _heartbeat_loop(self) -> None:
         """每 60 秒打一次点(STATE["bot_heartbeat"])。
