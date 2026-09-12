@@ -148,6 +148,36 @@ async def _run(cmd: list[str], *, quiet: bool = True) -> bool:
         return False
 
 
+async def _run_with_progress(cmd: list[str], *, duration: float, on_progress) -> bool:
+    """跑 ffmpeg 并解析 `-progress pipe:1` 的 key=value 流 → 回调百分比。
+
+    用 ffmpeg 自报的 `out_time_us` 除以总时长:比"盯输出文件涨到多大"准
+    (容器文件系统有缓存,文件大小会滞后)。`on_progress` 为 None 时退化成普通 `_run`。
+    """
+    if on_progress is None:
+        return await _run(cmd)
+    args = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("命令执行失败(%s):%s", cmd[0], exc)
+        return False
+    if proc.stdout is not None:
+        try:
+            async for raw in proc.stdout:
+                key, _, value = raw.decode("utf-8", "replace").strip().partition("=")
+                if key == "out_time_us" and value.isdigit() and duration > 0:
+                    on_progress(min(99.0, int(value) / 1_000_000 / duration * 100))
+        except Exception as exc:  # noqa: BLE001 - 进度解析失败不影响命令本身
+            logger.debug("解析 ffmpeg 进度失败:%s", exc)
+    await proc.wait()
+    if proc.returncode == 0:
+        on_progress(100.0)
+        return True
+    return False
+
+
 async def _ffprobe_json(path: str) -> dict | None:
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -210,10 +240,12 @@ async def _export_filtered_meta(src: str, rpt: CleanReport, tmp_meta: str) -> st
     return tmp_meta
 
 
-async def clean_file(path: str | Path) -> tuple[bool, str]:
+async def clean_file(path: str | Path, *, on_progress=None) -> tuple[bool, str]:
     """按需清洗单个文件。
 
     返回 (是否清洗过, 说明)。**无脏数据 → (False, "干净"):文件一个字节都不动**。
+
+    `on_progress(百分比)`:可选,remux 期间按 ffmpeg 自报的 out_time 报进度。
     清洗成功 → 原文件被**同名替换**(调用方随后照常重命名/算哈希)。
     失败 → 清理半成品后抛 CleanError,原文件不动。
     """
@@ -242,7 +274,9 @@ async def clean_file(path: str | Path) -> tuple[bool, str]:
             chapter_meta = await _export_filtered_meta(src, rpt, tmp_meta)
             if chapter_meta is None:
                 logger.warning("ffmetadata 过滤失败(%s)→ 全局标签/章节原样保留兜底", src)
-        if not await _run(_build_args(src, dst, rpt, chapter_meta)):
+        duration = float((data.get("format") or {}).get("duration") or 0.0)
+        if not await _run_with_progress(_build_args(src, dst, rpt, chapter_meta),
+                                        duration=duration, on_progress=on_progress):
             raise CleanError("ffmpeg remux 失败")
         if os.path.getsize(src) != size_before:
             # 源文件在 remux 期间被写入(半截文件):作废本次清洗

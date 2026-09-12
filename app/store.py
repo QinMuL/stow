@@ -4,7 +4,10 @@
 - monitor_state(源频道 → 已处理到的消息 ID):首次接入只记起点、不回补历史,此后重启按游标补扫
 - pipeline_tasks(流水线任务):审核中的任务落库,重启后继续轮询,不再重复建分享
 - fetch_state(获取段):openlist 侧每个源条目的搬运动作与任务 id,防重复提交、支撑重启续跑
-- local_files(处理段):本地文件的处理结果(重命名/ed2k/状态),防重复处理
+- local_files(处理段):本地文件的处理结果(重命名/ed2k/状态),防重复处理。
+  status:`processed`(已处理)/`unrecognized`(未识别,待人工)/`failed`(处理失败,待人工)/
+  `pushing`(推卡中)/**`gone`(文件已不在落地点——被改名或人工删,记录自动收尾)**。
+  ⚠️ 判定"待人工"的两个口径都必须排除 `gone`,否则陈旧记录会让提示永远不消
 - upload_tasks(上传段):本地文件的上传(移动)状态,串行闸门与重启续跑用
 """
 
@@ -192,6 +195,24 @@ class Store:
         return dict(zip(("src_path", "src_size", "dest_path", "task_id", "status",
                          "attempts", "error", "updated_at"), row, strict=False))
 
+    def get_fetch_by_relpath(self, rel: str) -> dict | None:
+        """按**相对路径**找搬运记录:本地 `<落地点>/<rel>` ↔ 记录 `<监控目录>/<rel>`。
+
+        落地保持相对子目录结构,所以两边的 rel 是同一串 —— 处理段据此做分级守门
+        (还在搬运 → 不碰;搬运完成且大小一致 → 直接处理)。
+        同一 rel 可能有多条历史记录,取**最新**那条。
+        """
+        if not rel:
+            return None
+        row = self._conn.execute(
+            "SELECT src_path, src_size, dest_path, task_id, status, attempts, error, updated_at"
+            " FROM fetch_state WHERE src_path = ? OR src_path LIKE ?"
+            " ORDER BY updated_at DESC LIMIT 1", (rel, f"%/{rel}")).fetchone()
+        if row is None:
+            return None
+        return dict(zip(("src_path", "src_size", "dest_path", "task_id", "status",
+                         "attempts", "error", "updated_at"), row, strict=False))
+
     def list_fetch(self, status: str | None = None) -> list[dict]:
         sql = ("SELECT src_path, src_size, dest_path, task_id, status, attempts, error, updated_at"
                " FROM fetch_state")
@@ -323,7 +344,8 @@ class Store:
                       "failed": count("SELECT COUNT(*) FROM fetch_state WHERE status='failed'"),
                       "last_activity": last("fetch_state")},
             "process": {"today": process_done_today,
-                        "manual": count("SELECT COUNT(*) FROM local_files WHERE status!='processed'"),
+                        "manual": count("SELECT COUNT(*) FROM local_files"
+                                        " WHERE status NOT IN ('processed', 'gone')"),
                         "last_activity": last("local_files")},
             "upload": {"inflight": len(self.list_uploads("uploading")), "today": upload_done_today,
                        "failed": count("SELECT COUNT(*) FROM upload_tasks WHERE status='failed'"),
@@ -358,10 +380,12 @@ class Store:
         """待人工处理:未识别 / 失败 / 超时(带原因与可跳日志的查询词)。"""
         out: list[dict] = []
         for r in self._conn.execute(
-                "SELECT name, status, error, updated_at FROM local_files"
-                " WHERE status != 'processed' ORDER BY updated_at DESC LIMIT ?", (limit,)):
-            kind = "未识别" if r[1] == "unrecognized" else "处理失败"
-            out.append({"kind": kind, "text": r[0], "reason": r[2] or "", "at": r[3]})
+                "SELECT name, size, status, error, updated_at FROM local_files"
+                " WHERE status NOT IN ('processed', 'gone')"
+                " ORDER BY updated_at DESC LIMIT ?", (limit,)):
+            kind = "未识别" if r[2] == "unrecognized" else "处理失败"
+            out.append({"kind": kind, "text": r[0], "size": int(r[1] or 0),
+                        "reason": r[3] or "", "at": r[4]})
         for r in self._conn.execute(
                 "SELECT src_path, error, updated_at FROM fetch_state"
                 " WHERE status='failed' ORDER BY updated_at DESC LIMIT ?", (limit,)):

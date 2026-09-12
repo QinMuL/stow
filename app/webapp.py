@@ -679,12 +679,26 @@ def create_app(config_path: str | Path) -> FastAPI:
         _disk_cache.update({"at": now, "data": data})
         return data
 
-    def _attention(cfg, store: Store) -> list[dict]:
+    def _present_files(cfg) -> set[tuple[str, int]]:
+        """落地点现存文件:(文件名, 字节数)。
+
+        **用「文件名 + 大小」而不是只比文件名**:不同子目录里的同名文件会互相遮蔽 ——
+        只比名字时,一条陈旧记录会被别处的同名文件"救活","待人工"就永远不消。
+        """
+        out: set[tuple[str, int]] = set()
+        for p in Path(cfg.openlist_dir).rglob("*"):
+            try:
+                if p.is_file():
+                    out.add((p.name, p.stat().st_size))
+            except OSError:
+                continue
+        return out
+
+    def _attention(store: Store, present: set[tuple[str, int]]) -> list[dict]:
         """待人工清单;处理类的条目若文件已不在落地点(已改名/人工删)则不再误报。"""
-        present = {p.name for p in Path(cfg.openlist_dir).rglob("*") if p.is_file()}
         out = []
         for a in store.attention_items():
-            if a["kind"] in ("处理失败", "未识别") and a["text"] not in present:
+            if a["kind"] in ("处理失败", "未识别") and (a["text"], a["size"]) not in present:
                 continue
             out.append(a)
         return out
@@ -693,9 +707,19 @@ def create_app(config_path: str | Path) -> FastAPI:
         """三段链:今日/在途/失败/最后活动 + 在途明细(带进度)。"""
         stats = store.segment_stats()
         disk = _disk_info(cfg)         # 磁盘卡与健康判据共用(内部 60s 缓存)
+        # ⚠️ "待人工"的两处口径必须一致(2026-09-12 修):**都按"文件还在不在落地点"判**。
+        # 之前计数不过滤、清单过滤 → 你把资源改名跑通后,清单空了、"待人工 1"却还在,
+        # 而且健康判据也读它 → 页面长期挂着"处理待人工",怎么等都不消。
+        present = _present_files(cfg)
+        stats["process"]["manual"] = sum(
+            1 for r in store.list_local_files()
+            if r["status"] not in ("processed", "gone")
+            and (r["name"], int(r["size"] or 0)) in present)
         from app.webapp import STATE  # 同进程,取运行中的三段实例(只读内存字段)
 
-        fetcher, uploader = STATE.get("fetcher"), STATE.get("uploader")
+        fetcher = STATE.get("fetcher")
+        processor = STATE.get("processor")
+        uploader = STATE.get("uploader")
 
         fetch_items = []
         prog = fetcher.progress_snapshot() if fetcher is not None else {}
@@ -705,17 +729,28 @@ def create_app(config_path: str | Path) -> FastAPI:
                                 "size": row["src_size"], "note": "搬运中"})
 
         queue_files, queue_bytes = _dir_usage(cfg.openlist_dir)
+        # 处理段的"当前在做什么"由处理段自己上报(阶段名 + 哈希/清洗的真进度):
+        # 正在处理的那个显示「处理中 · 哈希中 62%」,其余才是「排队中」(原先一律排队中、进度 0)
+        cur = processor.current_snapshot() if processor is not None else {}
         process_items = []
         for p in sorted(Path(cfg.openlist_dir).glob("*")):
             if p.is_file():
-                process_items.append({"name": p.name, "size": p.stat().st_size, "progress": 0.0,
-                                      "note": "排队中"})
+                active = bool(cur) and cur.get("name") == p.name
+                process_items.append({
+                    "name": p.name, "size": p.stat().st_size,
+                    "progress": float(cur.get("percent") or 0.0) if active else 0.0,
+                    "note": (cur.get("note") or "处理中") if active else "排队中",
+                })
 
         upload_items = []
         uprog = uploader.progress_snapshot() if uploader is not None else {}
         for row in store.list_uploads("uploading"):
+            info = uprog.get(row["name"]) or {}
+            done, total = int(info.get("done") or 0), int(info.get("total") or 0)
+            note = "上传中" + (f" · {done / 1024 ** 3:.1f}/{total / 1024 ** 3:.1f} GB"
+                             if total else "")
             upload_items.append({"name": row["name"], "size": row["size"],
-                                 "progress": uprog.get(row["name"], 0.0), "note": "上传中"})
+                                 "progress": float(info.get("percent") or 0.0), "note": note})
 
         def seg(key: str, name: str, src: str, dst: str, items: list[dict], extra: dict) -> dict:
             s = stats[key]
@@ -746,7 +781,7 @@ def create_app(config_path: str | Path) -> FastAPI:
             "trend": store.daily_series(7),
             "health": _health_block(cfg, stats, disk),
             "sys": sysinfo.snapshot(),      # 本机 CPU/内存/网络(磁盘在 numbers.disk)
-            "attention": _attention(cfg, store),
+            "attention": _attention(store, present),
             "recent": store.recent(5),
         }
 

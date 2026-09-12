@@ -607,6 +607,39 @@ def test_pipeline_attention_lists_failures(tmp_path):
     assert items and items[0]["kind"] == "未识别" and "TMDB 未命中" in items[0]["reason"]
 
 
+def test_manual_count_uses_same_criterion_as_attention_list(tmp_path):
+    """「待人工」的**计数**与**清单**必须同口径(2026-09-12 修)。
+
+    回归锁:计数原先只数状态、清单还看"文件在不在" → 你把资源改名跑通之后,
+    清单空了、处理段那行和健康判据里的「待人工 1」却还在,怎么等都不消。
+    """
+    import json as _json
+
+    from app.store import Store
+
+    media = tmp_path / "media/openlist"
+    media.mkdir(parents=True)
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "media_root": str(tmp_path / "media")}),
+                 encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+
+    # ① 记录在、但文件已不在落地点(改名/人工删的残影):计数与清单都该是 0
+    s = Store(tmp_path / "stow.db")
+    s.save_local_file(name="改名前的旧名.mkv", size=10, status="unrecognized", error="TMDB 未命中")
+    s.close()
+    d = client.get("/api/pipeline", headers=_h(token)).json()
+    assert d["segments"][1]["manual"] == 0
+    assert [a for a in d["attention"] if a["kind"] == "未识别"] == []
+
+    # ② 同名文件真的还在:两边都算 1
+    (media / "改名前的旧名.mkv").write_bytes(b"x" * 10)
+    d = client.get("/api/pipeline", headers=_h(token)).json()
+    assert d["segments"][1]["manual"] == 1
+    assert len([a for a in d["attention"] if a["kind"] == "未识别"]) == 1
+
+
 def test_pipeline_run_rejects_unknown_segment(tmp_path):
     client = _client(tmp_path)
     token = _login(client)
@@ -864,3 +897,63 @@ def _async(value):
     async def _coro():
         return value
     return _coro()
+
+
+def test_process_items_split_processing_vs_queued(tmp_path, monkeypatch):
+    """处理段在途明细:正在处理的那个显示阶段+真进度,其余才是「排队中」。
+
+    原先一律写 progress=0.0 / note=排队中 —— 用户看不出"在跑"和"在等"。
+    """
+    import json as _json
+
+    from app import webapp as web
+
+    media = tmp_path / "media/openlist"
+    media.mkdir(parents=True)
+    (media / "正在处理.mkv").write_bytes(b"x" * 100)
+    (media / "排队.mkv").write_bytes(b"x" * 100)
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "media_root": str(tmp_path / "media")}),
+                 encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+
+    class FakeProc:
+        def current_snapshot(self):
+            return {"name": "正在处理.mkv", "phase": "哈希中", "percent": 62.0,
+                    "note": "处理中 · 哈希中 62%"}
+
+    monkeypatch.setitem(web.STATE, "processor", FakeProc())
+    items = client.get("/api/pipeline", headers=_h(token)).json()["segments"][1]["items"]
+    by = {i["name"]: i for i in items}
+    assert by["正在处理.mkv"]["note"] == "处理中 · 哈希中 62%"
+    assert by["正在处理.mkv"]["progress"] == 62.0
+    assert by["排队.mkv"]["note"] == "排队中" and by["排队.mkv"]["progress"] == 0.0
+
+
+def test_upload_items_show_transferred_bytes(tmp_path, monkeypatch):
+    """上传在途明细带「已传/总量 GB」—— 百分比跳变时也能看出在动。"""
+    import json as _json
+
+    from app import webapp as web
+    from app.store import Store
+
+    (tmp_path / "media").mkdir(parents=True)
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "media_root": str(tmp_path / "media")}),
+                 encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    s = Store(tmp_path / "stow.db")
+    s.save_upload("片.mkv", 5_368_709_120, status="uploading")
+    s.close()
+
+    class FakeUp:
+        def progress_snapshot(self):
+            return {"片.mkv": {"percent": 40.0, "done": 2_147_483_648,
+                               "total": 5_368_709_120}}
+
+    monkeypatch.setitem(web.STATE, "uploader", FakeUp())
+    items = client.get("/api/pipeline", headers=_h(token)).json()["segments"][2]["items"]
+    assert items[0]["progress"] == 40.0
+    assert items[0]["note"] == "上传中 · 2.0/5.0 GB"

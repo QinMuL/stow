@@ -71,7 +71,11 @@ class Config:
     # 处理段(media/openlist → 探测/重命名/ed2k/推卡 → media/clouddrive)
     process_interval_minutes: int = 5     # 处理轮询间隔(分钟)
     min_size_mb: int = 50                 # 体积下限(小于此值不当视频处理)
-    min_age_seconds: int = 60             # mtime 静默年龄(避免处理半截文件)
+    # 处理段守门(分级,2026-09-12):
+    #  - 有搬运记录且已完成、大小一致 → 直接处理(不看这个值)
+    #  - 搬运中 → 不处理
+    #  - **没有搬运记录**(手动拷进落地点/别的工具写的)→ 等这么久再处理
+    min_age_seconds: int = 120            # 无搬运记录文件的静默门槛(原 60,改分级后调大)
     clean_enabled: bool = True            # 元数据清洗开关:仅在探到广告类脏数据时才清洗
     upload_interval_minutes: int = 5       # 上传段轮询间隔(分钟)
     upload_max_tasks: int = 2              # 上传并发上限(CD2 可同时跑多个;用户定 2)
@@ -301,7 +305,7 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         fetch_interval_minutes=max(1, int(raw.get("fetch_interval_minutes", 5) or 5)),
         process_interval_minutes=max(1, int(raw.get("process_interval_minutes", 5) or 5)),
         min_size_mb=max(0, int(raw.get("min_size_mb", 50) or 0)),
-        min_age_seconds=max(0, int(raw.get("min_age_seconds", 60) or 0)),
+        min_age_seconds=max(0, int(raw.get("min_age_seconds", 120) or 0)),
         clean_enabled=str(raw.get("clean_enabled", True)).strip().lower() not in ("0", "false", "off", "关"),
         upload_interval_minutes=max(1, int(raw.get("upload_interval_minutes", 5) or 5)),
         upload_max_tasks=max(1, int(raw.get("upload_max_tasks", 2) or 2)),

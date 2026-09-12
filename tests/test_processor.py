@@ -617,3 +617,142 @@ def test_stale_failure_row_cleared_after_success(tmp_path, monkeypatch):
     moved = list(Path(bot.cfg.clouddrive_dir).iterdir())
     assert len(moved) == 1
     assert bot.store.get_local_file(moved[0].name)["status"] == "processed"
+
+
+# ── 记录自愈(#3,2026-09-12) ────────────────────────────────
+def _present(cfg) -> set:
+    out = set()
+    for p in Path(cfg.openlist_dir).rglob("*"):
+        if p.is_file():
+            out.add((p.name, p.stat().st_size))
+    return out
+
+
+def test_reconcile_sweeps_record_whose_file_is_gone(tmp_path):
+    """非 processed 但文件已不在落地点 → 标 gone。
+
+    这正是用户遇到的那条:改名跑通后旧名记录留在库里,清单看不见它、
+    计数却算着它 → "待人工"永远不消。
+    """
+    f, bot, path = _chain(tmp_path)
+    bot.store.save_local_file(name="改名前的旧名.mkv", size=2000,
+                              status="unrecognized", error="TMDB 未命中")
+    assert f._reconcile_records(_present(bot.cfg)) == 1
+    assert bot.store.get_local_file("改名前的旧名.mkv")["status"] == "gone"
+
+
+def test_reconcile_keeps_present_and_terminal_records(tmp_path):
+    """文件还在的、以及 processed/gone 的记录都不动。"""
+    f, bot, path = _chain(tmp_path)
+    bot.store.save_local_file(name=path.name, size=2000, status="unrecognized")
+    bot.store.save_local_file(name="已处理.mkv", size=1, status="processed")
+    bot.store.save_local_file(name="已收尾.mkv", size=1, status="gone")
+    assert f._reconcile_records(_present(bot.cfg)) == 0
+    assert bot.store.get_local_file(path.name)["status"] == "unrecognized"
+    assert bot.store.get_local_file("已处理.mkv")["status"] == "processed"
+
+
+def test_reconcile_not_fooled_by_same_name_different_size(tmp_path):
+    """别处有同名文件但大小不同,不该"救活"陈旧记录(只比文件名会被遮蔽)。"""
+    f, bot, path = _chain(tmp_path, name="S01/片.S01E01.mkv")     # 现存 2000 字节
+    bot.store.save_local_file(name="片.S01E01.mkv", size=999,      # 旧记录是另一个尺寸
+                              status="failed", error="炸了")
+    assert f._reconcile_records(_present(bot.cfg)) == 1
+    assert bot.store.get_local_file("片.S01E01.mkv")["status"] == "gone"
+
+
+def test_scan_now_sweeps_stale_records(tmp_path, monkeypatch):
+    """整轮扫描里也会自愈(不只是单独调用时)。"""
+    f, bot, path = _chain(tmp_path, monkeypatch=monkeypatch)
+    bot.store.save_local_file(name="陈旧.mkv", size=1, status="unrecognized")
+    report = asyncio.run(f.scan_now())
+    assert bot.store.get_local_file("陈旧.mkv")["status"] == "gone"
+    assert "收尾陈旧记录 1 条" in report
+
+
+# ── 分级守门 + 通知式衔接(#1,2026-09-12) ─────────────────────
+def test_gate_tiers_by_fetch_state(tmp_path):
+    """守门用"事实"而不是只靠时间。
+
+    在途不碰 / 完成且大小一致立即放行 / 完成但大小不符先等 / 无搬运记录才按静默年龄。
+    """
+    f, bot, path = _chain(tmp_path, min_age_seconds=600)
+    os.utime(path, (time.time(), time.time()))          # mtime=现在(刚落盘)
+    rel = path.name
+
+    wait = f._gate(path)                                # 无记录 + 很新 → 要等
+    assert wait is not None and 0 < wait <= 600
+
+    bot.store.save_fetch(f"/监控/{rel}", 2000, status="moving")
+    assert f._gate(path) == 5.0                         # 还在搬运 → 不碰
+
+    bot.store.save_fetch(f"/监控/{rel}", 999, status="done")
+    assert f._gate(path) == 5.0                         # 完成但大小对不上 → 再等
+
+    bot.store.save_fetch(f"/监控/{rel}", 2000, status="done")
+    assert f._gate(path) is None                        # ✅ 完成 + 大小一致 → 立即放行
+
+    bot.store.save_fetch(f"/监控/{rel}", 2000, status="cleanup")
+    assert f._gate(path) is None                        # cleanup(内容完整)同样算完成
+
+
+def test_gate_size_floor_is_final_not_a_wait(tmp_path):
+    """小于体积下限:永远不符合,不是"等一会就好"。"""
+    f, bot, path = _chain(tmp_path, min_size_mb=10)     # 文件只有 2000 字节
+    assert f._gate(path) == processor_mod._GATE_NEVER
+
+
+def test_processor_notifies_next_stage_after_archive(tmp_path, monkeypatch):
+    """归档了东西 → 立刻通知下一段(事件驱动衔接)。"""
+    f, bot, path = _chain(tmp_path, monkeypatch=monkeypatch)
+    kicks: list[int] = []
+    f.on_done = lambda: kicks.append(1)
+    asyncio.run(f.scan_now())
+    assert kicks == [1]
+
+
+def test_processor_schedules_delayed_kick_when_gated(tmp_path):
+    """文件被"静默年龄"挡住 → 排一次**延迟触发**(到点再看),而不是干等下一轮。"""
+    f, bot, path = _chain(tmp_path, min_age_seconds=600, age_seconds=0)
+    os.utime(path, (time.time(), time.time()))
+
+    delays: list[float] = []
+
+    class FakeKicker:
+        def kick(self, delay: float = 0.0) -> None:
+            delays.append(delay)
+
+    f.kicker = FakeKicker()
+    asyncio.run(f.scan_now())
+    assert delays and 0 < delays[0] <= 600
+
+
+# ── 真进度(#2,2026-09-12) ───────────────────────────────────
+def test_ed2k_hash_reports_progress(tmp_path):
+    """哈希按字节报进度(GB 级文件要跑几十秒,不报进度用户看不见它在动)。"""
+    big = _write(tmp_path / "big.mkv", ED2K_CHUNK * 2)
+    seen: list[float] = []
+    size, root = asyncio.run(ed2k_hash_file(str(big), on_progress=seen.append))
+    assert size == ED2K_CHUNK * 2 and len(root) == 32
+    assert seen and seen[-1] == 100.0            # 收尾必报 100
+    assert seen == sorted(seen)                  # 单调不减
+
+
+def test_processor_phase_reporting_and_clear(tmp_path, monkeypatch):
+    """处理段上报"正在做什么";处理完清空,免得页面以为它还在处理。"""
+    f, bot, path = _chain(tmp_path, monkeypatch=monkeypatch)
+    f._phase("哈希中", path, 62.0)
+    snap = f.current_snapshot()
+    assert snap["name"] == path.name and snap["percent"] == 62.0
+    assert snap["note"] == "处理中 · 哈希中 62%"
+
+    asyncio.run(f.scan_now())                    # 跑一轮(会把文件处理掉)
+    assert f.current_snapshot() == {}            # 收尾已清空
+
+
+def test_processor_phase_has_no_percent_for_quick_phases(tmp_path, monkeypatch):
+    """快阶段只报阶段名(没有百分比)也照样显示,且 bar 保持 0。"""
+    f, bot, path = _chain(tmp_path, monkeypatch=monkeypatch)
+    f._phase("识别中", path)
+    snap = f.current_snapshot()
+    assert snap["note"] == "处理中 · 识别中" and snap["percent"] == 0.0

@@ -28,12 +28,13 @@ import logging
 import time
 from pathlib import Path
 
+from app.kicker import Kicker
 from app.openlist import TASK_SUCCEEDED, OpenListClient, OpenListError
 from app.processor import SUBTITLE_EXTS, VIDEO_EXTS
 
 logger = logging.getLogger(__name__)
 
-POLL_EVERY_SECONDS = 20    # 任务状态结算间隔(与大轮扫描解耦:搬运通常一两分钟就完)
+POLL_EVERY_SECONDS = 10    # 任务状态结算间隔(与大轮扫描解耦:搬运通常一两分钟就完)
 MAX_ATTEMPTS = 3           # 单个条目最多重试次数(超过则放弃并提示人工)
 RETRY_BACKOFF_SECONDS = 300  # 失败后至少等这么久再重试(避免同一轮/连续轮空转)
 TASK_LOST_SECONDS = 1800   # 任务在列表里消失且目标文件也不在:判定任务丢失的时间阈值
@@ -59,6 +60,9 @@ class ResourceFetcher:
         self._progress: dict[str, float] = {}   # 文件名 → 百分比(最近一次任务查询)
         self._poll_task: asyncio.Task | None = None
         self._poll_lock = asyncio.Lock()  # 结算串行(扫描与轮询两条路都会结算)
+        # 通知式衔接:搬运完一个就立刻让处理段看一轮(轮询仍然保留当兜底)
+        self.kicker = Kicker(self.scan_now, name="获取段")
+        self.on_done = None                     # bot 装配时接处理段
 
     # ── 生命周期 ────────────────────────────────────────────
     def progress_snapshot(self) -> dict[str, float]:
@@ -437,6 +441,8 @@ class ResourceFetcher:
         if status == "done":
             logger.info("获取段完成:%s → 本地落地点(已交处理段)",
                         row["src_path"])
+            if self.on_done is not None:
+                self.on_done()               # 通知处理段:立刻看一轮(不等它的 5 分钟轮询)
             await self._verify_source_gone(row)
             return
         logger.warning("获取段失败(%s,第 %d 次):%s", row["src_path"], attempts, error)

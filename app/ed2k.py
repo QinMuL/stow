@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 logger = logging.getLogger(__name__)
@@ -37,11 +38,14 @@ class Ed2kError(Exception):
     """哈希计算失败。"""
 
 
-def _hash_file_sync(path: str) -> tuple[int, str]:
+def _hash_file_sync(path: str, *, on_progress=None) -> tuple[int, str]:
     """同步计算 (文件大小, 根哈希 hex);流式读取,不整文件入内存。
 
     根哈希语义(eMule):分块 MD4 → **块哈希列表再 MD4**;
     空文件取 MD4("");**单块文件直接取该块哈希**(不要再套一层)。
+
+    `on_progress(百分比)`:可选,按 ≥2% 的步长报 —— GB 级文件要跑几十秒,
+    不报进度用户看不见它在动。
     """
     if _MD4 is None:  # pragma: no cover
         raise Ed2kError("缺少 pycryptodome,无法计算 ed2k 哈希")
@@ -49,6 +53,11 @@ def _hash_file_sync(path: str) -> tuple[int, str]:
     chunk = _MD4.new()
     chunk_len = 0
     size = 0
+    try:
+        total = os.path.getsize(path)
+    except OSError:
+        total = 0
+    next_report = 2.0
     with open(path, "rb") as f:
         while True:
             block = f.read(_READ_BUF)
@@ -65,8 +74,15 @@ def _hash_file_sync(path: str) -> tuple[int, str]:
                     digests.append(chunk.digest())
                     chunk = _MD4.new()
                     chunk_len = 0
+            if on_progress is not None and total > 0:
+                pct = size / total * 100
+                if pct >= next_report:
+                    next_report = pct + 2.0
+                    on_progress(min(pct, 100.0))
     if chunk_len:
         digests.append(chunk.digest())
+    if on_progress is not None:
+        on_progress(100.0)
     if not digests:
         return 0, _MD4.new(b"").digest().hex()
     if len(digests) == 1:
@@ -74,12 +90,17 @@ def _hash_file_sync(path: str) -> tuple[int, str]:
     return size, _MD4.new(b"".join(digests)).digest().hex()
 
 
-async def ed2k_hash_file(path: str, *, pool=None) -> tuple[int, str]:
-    """异步算哈希:丢线程池执行,避免阻塞事件循环。返回 (大小, 根哈希)。"""
+async def ed2k_hash_file(path: str, *, pool=None, on_progress=None) -> tuple[int, str]:
+    """异步算哈希:丢线程池执行,避免阻塞事件循环。返回 (大小, 根哈希)。
+
+    `on_progress` 在工作线程里被调用(写的是处理段的内存字段,与获取段同一套路)。
+    """
     import asyncio
+    from functools import partial
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(pool, _hash_file_sync, path)
+    return await loop.run_in_executor(
+        pool, partial(_hash_file_sync, path, on_progress=on_progress))
 
 
 _BAD_NAME_CHARS = re.compile(r"[|\r\n]")

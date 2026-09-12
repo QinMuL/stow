@@ -25,10 +25,11 @@ import time
 from pathlib import Path
 
 from app.cd2.client import Cd2Client, Cd2Error
+from app.kicker import Kicker
 
 logger = logging.getLogger(__name__)
 
-POLL_EVERY_SECONDS = 20       # 任务结算间隔
+POLL_EVERY_SECONDS = 10       # 任务结算间隔
 MAX_ATTEMPTS = 3              # 单文件重试上限
 RETRY_BACKOFF_SECONDS = 300   # 失败退避(避免连续轮空转)
 TASK_LOST_SECONDS = 3600      # 任务消失且源文件仍在:超过此时长判失败
@@ -47,11 +48,13 @@ class Uploader:
         self._loop_task: asyncio.Task | None = None
         self._poll_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()      # 并发闸门 + 结算互斥
+        # 通知式衔接:处理段归档完会踢我们一轮(轮询仍然保留当兜底)
+        self.kicker = Kicker(self.scan_now, name="上传段")
         self._progress: dict[str, float] = {}   # 文件名 → 百分比(最近一次任务查询)
 
     # ── 生命周期 ────────────────────────────────────────────
-    def progress_snapshot(self) -> dict[str, float]:
-        """在途上传的进度快照(name → 百分比),供总览页展示(读缓存,不触网)。"""
+    def progress_snapshot(self) -> dict:
+        """在途上传的进度快照(name → {percent, done, total} 字节),供总览页展示。"""
         return dict(self._progress)
 
     def enabled(self) -> bool:
@@ -214,8 +217,13 @@ class Uploader:
             logger.warning("上传段查询任务失败:%s", exc)
             return settled
         src_dir = self.bot.cfg.cd2_source_path.rstrip("/")
+        # 进度带上**已传字节**:百分比在秒传/跳变时看不出增长,字节数能看出在动
         self._progress = {
-            t["source"].rsplit("/", 1)[-1]: float(t.get("progress") or 0)
+            t["source"].rsplit("/", 1)[-1]: {
+                "percent": float(t.get("progress") or 0.0),
+                "done": int(t.get("uploaded_bytes") or 0),
+                "total": int(t.get("total_bytes") or 0),
+            }
             for t in tasks if t.get("source")
         }
         for row in rows:

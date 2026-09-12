@@ -687,3 +687,19 @@ def test_prune_never_touches_paths_outside_monitor(tmp_path):
 
     assert client.items[other]                 # 监控目录之外原样保留
     assert f"{other}/x" in client.items
+
+
+# ── 通知式衔接(#1,2026-09-12) ───────────────────────────────
+def test_fetcher_notifies_next_stage_on_done(tmp_path):
+    """搬运完成一个 → 立刻通知下一段(轮询仍然保留当兜底)。"""
+    f, bot, client = _fetcher(tmp_path, files=[{"name": "a.mkv", "size": 1000, "is_dir": False}])
+    kicks: list[int] = []
+    f.on_done = lambda: kicks.append(1)
+
+    asyncio.run(f.scan_now())                     # 提交
+    assert kicks == []                            # 只是提交,还没完成
+    client.undone[0].update({"state": 2})         # 任务成功
+    client.done.append(client.undone.pop(0))
+    asyncio.run(f._poll_tasks())                  # 结算
+
+    assert kicks == [1]

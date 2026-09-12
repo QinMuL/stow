@@ -108,6 +108,10 @@ class StowBot:
             self.fetcher.start()        # 获取段:openlist 监控目录 → 移动到 media/openlist
             self.processor.start()      # 处理段:media/openlist → 探测/ed2k/推卡 → clouddrive
             self.uploader.start()       # 上传段:clouddrive → 115(CD2 移动,串行)
+            # 通知式衔接(2026-09-12):上一段干完立刻踢下一段跑一轮,把段间空窗从"最多 5 分钟"
+            # 降到秒级。**轮询仍然保留当兜底** —— 漏一次通知只是退回"等下一轮",不会卡死。
+            self.fetcher.on_done = self.processor.kicker.kick
+            self.processor.on_done = self.uploader.kicker.kick
             # Web 登录端点需在 Bot 事件循环里驱动 Telethon 客户端(Web 跑在另一线程)
             from app.webapp import STATE
 
