@@ -44,11 +44,12 @@ def check_version(cfg) -> dict:
     """查 GitHub 最新 release。网络/限流/解析失败一律返回 error,绝不抛出。"""
     import httpx
 
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "stow"}
+    token = (getattr(cfg, "github_token", "") or "").strip()
+    if token:  # 带认证:公开仓库匿名限流(共享出口 IP 常被打满 403)
+        headers["Authorization"] = f"Bearer {token}"
     try:
-        with httpx.Client(
-            proxy=cfg.proxy_url or None, timeout=8,
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "stow"},
-        ) as c:
+        with httpx.Client(proxy=cfg.proxy_url or None, timeout=8, headers=headers) as c:
             r = c.get(_GH_LATEST_URL)
             if r.status_code == 404:
                 return {"error": "仓库无 release(仓库私有或尚未发布)"}

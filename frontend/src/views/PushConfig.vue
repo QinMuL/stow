@@ -51,12 +51,15 @@ const GROUPS = [
   {
     key: 'proxy',
     group: 'creds',
-    title: '项目代理配置',
-    desc: '只有 Telegram 与 TMDB 走代理;115 始终直连',
+    title: '项目代理与 GitHub 令牌',
+    desc: '只有 Telegram 与 TMDB 走代理;115 始终直连;GitHub 令牌供版本检测',
     fields: [
       { key: 'proxy_url', label: '代理地址(可选)',
         ph: 'http://127.0.0.1:7897',
         hint: '留空即直连。地址要填服务能访问到的那个:与代理同机部署时用 127.0.0.1,填局域网 IP 通常连不通。' },
+      { key: 'github_token', label: 'GitHub Token(可选)', sensitive: true,
+        ph: 'ghp_…',
+        hint: '版本检测访问 GitHub Releases API 用。部署在共享出口 IP(经代理/TUN)时匿名限流常被打满(403),填一个有 repo 权限的 PAT 即稳定;家庭宽带直连通常不用填。' },
     ],
   },
   {
@@ -98,7 +101,7 @@ const GROUPS = [
 // 注意 formValues() 仍遍历**全部** GROUPS,不能按分组过滤,否则会漏保存字段。
 const SECTION_KEYS = {
   bot: ['tg_bot_token', 'tg_admin_ids'],
-  proxy: ['proxy_url'],
+  proxy: ['proxy_url', 'github_token'],
   tmdb: ['tmdb_api_key'],
   pan115: ['pan115_cookie'],
   save_pipeline: ['pipeline_root_dir'],

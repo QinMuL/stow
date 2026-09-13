@@ -383,7 +383,7 @@ _INT_DEFAULTS = {"web_port": DEFAULT_WEB_PORT, "openlist_max_tasks": 2,
 EDITABLE = {
     "tg_bot_token": "s", "tg_admin_ids": "ids",
     "tmdb_api_key": "s", "proxy_url": "s", "log_level": "s", "web_port": "i",
-    "pan115_cookie": "s",
+    "github_token": "s", "pan115_cookie": "s",
     "pipeline_root_dir": "s", "monitor_dirs": "s",
     "tg_api_id": "i", "tg_api_hash": "s", "monitor_channels": "s",
     "openlist_base_url": "s", "openlist_token": "s", "openlist_path": "s",

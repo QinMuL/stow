@@ -57,8 +57,15 @@ class _HClient:
 
 
 def _fake_httpx(monkeypatch, resp):
-    # httpx 是 check_version 内部局部导入,从全局 httpx 模块 patch
-    monkeypatch.setattr("httpx.Client", lambda **kw: _HClient(resp))
+    # httpx 是 check_version 内部局部导入,从全局 httpx 模块 patch;捕获 Client 构造参数
+    captured = {}
+
+    def _client(**kw):
+        captured["kw"] = kw
+        return _HClient(resp)
+
+    monkeypatch.setattr("httpx.Client", _client)
+    return captured
 
 
 def test_check_version_ok(monkeypatch):
@@ -85,6 +92,19 @@ def test_check_version_network_error(monkeypatch):
     monkeypatch.setattr("httpx.Client", boom)
     r = upgrade.check_version(SimpleNamespace(proxy_url=""))
     assert r["error"].startswith("检测失败:")
+
+
+def test_check_version_sends_token(monkeypatch):
+    cap = _fake_httpx(monkeypatch, _Resp(data={"tag_name": "v9.9.9"}))
+    r = upgrade.check_version(SimpleNamespace(proxy_url="", github_token="ghp_abc"))
+    assert r["has_update"] is True
+    assert cap["kw"]["headers"]["Authorization"] == "Bearer ghp_abc"
+
+
+def test_check_version_no_token_no_auth_header(monkeypatch):
+    cap = _fake_httpx(monkeypatch, _Resp(data={"tag_name": "v9.9.9"}))
+    upgrade.check_version(SimpleNamespace(proxy_url=""))
+    assert "Authorization" not in cap["kw"]["headers"]
 
 
 # ── 一键升级(docker SDK mock) ─────────────────────────────
