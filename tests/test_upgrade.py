@@ -184,12 +184,12 @@ def test_upgrade_success(monkeypatch, tmp_path):
     img, kw = client.containers.created[0]
     assert img == upgrade.IMAGE
     assert kw["name"] == "stow"
-    # docker SDK 的 create() 参数名是 environment(不是 env),host 参数平铺直传
+    # docker SDK 的 create() 参数名是 environment(不是 env);挂载卷参数名是 volumes(转成 Binds)
     assert kw["environment"] == ["A=1"]
     assert kw["network_mode"] == "host"
     assert kw["restart_policy"]["Name"] == "unless-stopped"
     assert kw["init"] is True
-    assert kw["binds"] == ["/x:/app/data"]
+    assert kw["volumes"] == ["/x:/app/data"]
     # 结果已落盘,供前端 status 轮询
     state = upgrade.read_upgrade_state(str(tmp_path))
     assert state["ok"] is True and "升级完成" in state["message"]

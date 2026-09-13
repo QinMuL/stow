@@ -161,8 +161,11 @@ def _recreate(client, container) -> None:
         working_dir=cfg.get("WorkingDir"),
         environment=cfg.get("Env"),
         labels=cfg.get("Labels"),
-        # host 侧配置:create() 内部自动组装 HostConfig
-        binds=hc.get("Binds"),
+        # host 侧配置:create() 内部自动组装 HostConfig。
+        # 注意挂载卷的参数名是 **volumes**(内部转成 HostConfig.Binds),
+        # 不是 binds —— docker SDK 7.x 的 create() 只认 RUN_HOST_CONFIG_KWARGS
+        # 里的键,未知键直接 reject(2026-09-13 两次实测翻车)。
+        volumes=hc.get("Binds"),
         network_mode=hc.get("NetworkMode") or "default",
         restart_policy=restart,
         init=hc.get("Init"),
