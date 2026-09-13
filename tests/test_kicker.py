@@ -94,13 +94,15 @@ def test_self_rearm_does_not_hot_loop():
     → 无限热循环(日志 5 分钟 5MB、9p stat 淹死事件循环、心跳停跳、获取段不再结算)。
     """
     calls = {"n": 0}
+    holder = {}   # run_once 里要引用还没建出来的 Kicker,用 holder 转一手
 
     async def run_once():
         calls["n"] += 1
-        k.kick(delay=0.1)                 # 模拟"文件还没就绪,5 秒后再看"
+        holder["k"].kick(delay=0.1)    # 模拟"文件还没就绪,5 秒后再看"
 
     async def main():
         k = Kicker(run_once)
+        holder["k"] = k
         k.kick()
         await asyncio.sleep(0.55)         # 0.55 秒内:正常只该跑 5~6 轮
 

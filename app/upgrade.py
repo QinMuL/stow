@@ -1,12 +1,15 @@
-"""系统工具:版本检测与一键升级(容器内经 docker socket 自升级)。
+"""系统工具:版本检测与一键升级。
 
+方案(2026-09-13 重做,Watchtower 触发式):
 - 检测:GitHub Releases API 的最新 tag vs 本地 app.__version__,只读、带代理
-- 升级:docker SDK 连 unix socket → pull 最新镜像 → 复制本容器配置重建
-  (镜像换成新拉的层),旧进程随之消亡,restart: unless-stopped 的新容器接管
-- 安全:挂载 /var/run/docker.sock 后容器即拥有宿主机 docker 权限(等同 root),
-  仅推荐自部署单机使用;不挂 socket 时升级接口返回明确错误,不影响其余功能
-
-镜像/容器名与 docker-compose.yml 保持一致(发布与升级共用同一标识)。
+- 升级:POST 到 Watchtower 的 HTTP API(/v1/update),由常驻的 Watchtower 容器
+  (compose 里的 stow-watchtower)拉取新镜像并原配置重建 stow。
+  主容器自己不碰 docker.sock —— 没有宿主机 root 权限,也没有"自杀式重建"
+  (容器无法销毁替换自己)或一次性 sidecar 的复杂度,更新流程交给专职工具。
+- 安全:docker 权限只在 watchtower 容器;它开 --label-enable,只更新打了
+  com.centurylinklabs.watchtower.enable 标签的 stow,不碰宿主机其它容器
+- 完成感知:Watchtower 的 API 立即返回(更新在后台跑);前端轮询版本接口,
+  重建期间请求中断、恢复后比对版本号即知道升没升上去
 """
 
 from __future__ import annotations
@@ -18,11 +21,12 @@ from app import __version__
 
 logger = logging.getLogger(__name__)
 
-IMAGE = "ghcr.io/qinmul/stow:latest"
 REPO = "qinmul/stow"
 _GH_LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
-_CONTAINER = "stow"
-_STATE_FILE = "upgrade_state.json"   # 放 data/ 下;升级结果落盘,前端轮询有反馈
+# Watchtower(compose 里的 stow-watchtower):地址与令牌可用配置覆盖,
+# 默认与 compose 的 WATCHTOWER_TOKEN 环境变量对齐
+_DEFAULT_WT_URL = "http://127.0.0.1:8080"
+_DEFAULT_WT_TOKEN = "stow-upgrade"
 
 
 def parse_ver(s: str) -> tuple[int, ...]:
@@ -61,164 +65,29 @@ def check_version(cfg) -> dict:
     return version_report(latest)
 
 
-def upgrade(cfg, data_dir: str = "") -> tuple[bool, str]:
-    """一键升级:拉最新镜像 → 启动独立 sidecar 容器执行重建。返回 (成功, 消息)。
+def upgrade(cfg) -> tuple[bool, str]:
+    """触发 Watchtower 更新本容器。返回 (成功, 消息)。
 
-    重建不能在当前容器里做:`container.stop()` 会把 stow(包括正在执行升级的
-    进程)一起杀掉,后面的 remove/rename/start 永远执行不到(2026-09-13 实测
-    留下 Exited 的 stow + Created 的 stow-new 脏状态)。所以主进程只负责
-    pull 镜像 + 拉起 sidecar(挂 docker.sock + data,运行新镜像里的
-    `python -m app.upgrade --rebuild`),重建在 sidecar 里完成,不受旧容器
-    生死影响。data_dir 非空时结果落盘,前端轮询升级成败。
+    Watchtower 收到 /v1/update 后在后台:拉取新镜像 → 停旧容器 → 原配置重建
+    → 启动;API 本身立即返回。配置解析顺序:watchtower_url/watchtower_token
+    → 环境变量 WATCHTOWER_TOKEN(与 compose 对齐)→ 内置默认。
     """
+    import os
+
+    import httpx
+
+    url = (getattr(cfg, "watchtower_url", "") or _DEFAULT_WT_URL).rstrip("/")
+    token = (getattr(cfg, "watchtower_token", "") or os.environ.get("WATCHTOWER_TOKEN", "")
+             or _DEFAULT_WT_TOKEN)
     try:
-        import docker
-    except ImportError:
-        return False, "缺少 docker SDK——容器未安装/未挂载 docker socket 时不可用"
-    try:
-        client = docker.from_env()
+        with httpx.Client(timeout=15) as c:
+            r = c.post(f"{url}/v1/update", headers={"Authorization": f"Bearer {token}"})
+    except httpx.ConnectError:
+        return False, "连不上 Watchtower:确认 compose 里的 stow-watchtower 已部署并启动"
     except Exception as exc:  # noqa: BLE001
-        return False, f"连接 docker daemon 失败(未挂载 socket?):{str(exc)[:80]}"
-    try:
-        logger.info("升级:拉取镜像 %s", IMAGE)
-        client.images.pull(IMAGE)
-    except Exception as exc:  # noqa: BLE001
-        return False, f"拉取镜像失败:{str(exc)[:120]}"
-    try:
-        _spawn_rebuilder(client, data_dir)
-    except Exception as exc:  # noqa: BLE001
-        return False, f"启动重建容器失败:{str(exc)[:120]}"
-    return True, "升级已启动:镜像已拉取,正在后台重建容器"
-
-
-def _spawn_rebuilder(client, data_dir: str = "") -> None:
-    """启动 sidecar 容器执行重建。sidecar 挂 docker.sock + data,跑新镜像的 --rebuild。"""
-    # 找宿主机上 data 目录的挂载路径(从当前容器 Binds 里解析 /app/data)
-    host_data = "./data"
-    try:
-        me = client.containers.get(_CONTAINER)
-        binds = (me.attrs.get("HostConfig") or {}).get("Binds") or []
-        for b in binds:
-            parts = b.split(":")
-            if len(parts) >= 2 and (parts[-1].rstrip("/") == "/app/data"):
-                host_data = parts[0]
-                break
-    except Exception:  # noqa: BLE001 - 解析不到就默认 ./data
-        pass
-    sidecar = f"{_CONTAINER}-rebuild"
-    # 清掉可能残留的旧 sidecar(上次失败留下的)
-    try:
-        old = client.containers.get(sidecar)
-        old.remove(force=True)
-    except Exception:  # noqa: BLE001
-        pass
-    client.containers.run(
-        IMAGE,
-        name=sidecar,
-        command=["python", "-m", "app.upgrade", "--rebuild"],
-        detach=True,
-        network_mode="host",
-        volumes={
-            "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"},
-            host_data: {"bind": "/app/data", "mode": "rw"},
-        },
-        restart_policy={"Name": "no"},
-    )
-
-
-def _rebuild_sidecar() -> None:
-    """sidecar 入口:停/删旧 stow → 用新镜像重建(复制原配置)→ 启动 → 落状态。
-
-    跑在新镜像的 sidecar 容器里;对旧 stow 的 stop/remove 不影响自己。
-    """
-    ok = False
-    msg = ""
-    try:
-        import docker
-
-        client = docker.from_env()
-        container = client.containers.get(_CONTAINER)
-        attrs = container.attrs
-        cfg = attrs.get("Config") or {}
-        hc = attrs.get("HostConfig") or {}
-        rp = hc.get("RestartPolicy") or {}
-        restart = {"Name": rp.get("Name") or "no"}
-        if restart["Name"] == "on-failure":
-            restart["MaximumRetryCount"] = rp.get("MaximumRetryCount") or 0
-        container.stop()
-        container.remove()
-        new = client.containers.create(
-            IMAGE,
-            name=_CONTAINER,
-            command=cfg.get("Cmd"),
-            entrypoint=cfg.get("Entrypoint"),
-            working_dir=cfg.get("WorkingDir"),
-            environment=cfg.get("Env"),
-            labels=cfg.get("Labels"),
-            # host 侧配置:create() 内部自动组装 HostConfig。
-            # 挂载卷参数名是 **volumes**(内部转成 HostConfig.Binds);
-            # 参数只认 RUN_HOST_CONFIG_KWARGS 里的键,未知键直接 reject。
-            volumes=hc.get("Binds"),
-            network_mode=hc.get("NetworkMode") or "default",
-            restart_policy=restart,
-            init=hc.get("Init"),
-            privileged=hc.get("Privileged"),
-            extra_hosts=hc.get("ExtraHosts"),
-            dns=hc.get("Dns"),
-        )
-        new.start()
-        ok = True
-        msg = "升级完成,已用新镜像重建容器"
-    except Exception as exc:  # noqa: BLE001 - sidecar 内捕获,结果写状态文件
-        ok, msg = False, f"重建容器失败:{str(exc)[:120]}"
-    _write_state("/app/data", ok, msg)
-    logger.info("sidecar 重建结果:%s %s", ok, msg)
-    return ok, msg
-
-
-def _write_state(data_dir: str, ok: bool, msg: str) -> None:
-    """升级结果落盘(data/upgrade_state.json):时间/成败/消息/目标版本。"""
-    import json as _json
-    import time as _time
-    from pathlib import Path
-
-    if not data_dir:
-        return
-    try:
-        p = Path(data_dir) / _STATE_FILE
-        Path(data_dir).mkdir(parents=True, exist_ok=True)
-        p.write_text(
-            _json.dumps({
-                "ts": _time.time(), "ok": bool(ok), "message": msg,
-                "to_version": __version__,
-            }, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception as exc:  # noqa: BLE001 - 状态写失败不影响升级结果本身
-        logger.warning("升级状态落盘失败:%s", exc)
-
-
-def read_upgrade_state(data_dir: str = "") -> dict:
-    """读最近一次升级结果;无记录返回空 dict。"""
-    import json as _json
-    from pathlib import Path
-
-    if not data_dir:
-        return {}
-    p = Path(data_dir) / _STATE_FILE
-    try:
-        return _json.loads(p.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("读取升级状态失败:%s", exc)
-        return {}
-
-
-def _rebuild_main() -> None:
-    """`python -m app.upgrade --rebuild` 入口:sidecar 里执行重建。"""
-    _rebuild_sidecar()
-
-
-if __name__ == "__main__" and "--rebuild" in __import__("sys").argv:
-    _rebuild_main()
+        return False, f"触发失败:{type(exc).__name__} {str(exc)[:80]}"
+    if r.status_code in (401, 403):
+        return False, "Watchtower 拒绝:令牌不匹配(检查 WATCHTOWER_TOKEN 两边是否一致)"
+    if r.status_code not in (200, 204):
+        return False, f"Watchtower 返回 HTTP {r.status_code}:{str(r.text)[:60]}"
+    return True, "升级已触发:Watchtower 正在后台拉取镜像并重建容器"

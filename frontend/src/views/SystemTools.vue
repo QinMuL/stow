@@ -9,6 +9,9 @@ const checking = ref(false)
 const upgrading = ref(false)
 const msg = ref('')
 let pollTimer = null
+let pollStartedAt = 0
+let sawDown = false        // 轮询期间断过线 = 容器重建中
+let versionBefore = ''     // 触发升级时的当前版本号
 
 async function check() {
   checking.value = true
@@ -23,41 +26,59 @@ async function check() {
 }
 
 async function upgrade() {
-  const target = ver.value?.has_update ? `到 v${ver.value.latest}` : '(拉取 latest 镜像)'
+  const target = ver.value?.has_update ? `到 v${ver.value.latest}` : '(拉取 latest 镜像重建)'
   if (!window.confirm(
-    `确认一键升级${target}?\n将拉取新镜像并重建容器,页面会短暂断线。`
+    `确认一键升级${target}?\n由 Watchtower 拉取新镜像并重建容器,页面会短暂断线。`
   )) return
   upgrading.value = true
+  versionBefore = ver.value?.current || ''
+  sawDown = false
   msg.value = { kind: '', text: '升级中:正在拉取新镜像并重建容器…' }
   try {
-    await api('tools/upgrade', {}, 'POST')
-    pollResult()   // 升级启动后轮询结果,不靠手动刷新猜
+    const d = await api('tools/upgrade', {}, 'POST')
+    msg.value = { kind: '', text: d.message }
+    pollStartedAt = Date.now()
+    pollUpgrade()   // 触发成功后轮询感知完成,不靠手动刷新猜
   } catch (e) {
     msg.value = { kind: 'err', text: e.message }
     upgrading.value = false
   }
 }
 
-// 轮询 /api/tools/upgrade/status:重建期间请求会失败(服务重启),持续重试;
-// 读到明确结果(成功/失败)后停止,成功则自动刷新页面。
-async function pollResult() {
+// 感知升级完成:Watchtower 在后台拉镜像 → 停旧容器 → 原配置重建 → 启动。
+// 期间版本接口会断(sawDown),恢复后再请求成功即完成;若版本号直接变化
+// (没捕捉到断线)也算完成。最长等 5 分钟。
+async function pollUpgrade() {
   window.clearTimeout(pollTimer)
-  try {
-    const s = await api('tools/upgrade/status')
-    if (s.ok === true) {
-      msg.value = { kind: 'ok', text: `升级成功 → v${s.to_version},正在刷新页面…` }
-      window.setTimeout(() => location.reload(), 800)
-      return
-    }
-    if (s.ok === false) {
-      msg.value = { kind: 'err', text: `升级失败:${s.message}` }
-      upgrading.value = false
-      return
-    }
-  } catch (e) {
-    // 重建进行中(连接断开/尚无结果),静默重试
+  if (Date.now() - pollStartedAt > 5 * 60 * 1000) {
+    msg.value = { kind: 'err', text: '升级等待超时,请刷新页面查看当前版本' }
+    upgrading.value = false
+    return
   }
-  pollTimer = window.setTimeout(pollResult, 2500)
+  try {
+    const v = await api('tools/version')
+    if (sawDown) {
+      const now = v.current || ''
+      const changed = now && now !== versionBefore
+      msg.value = {
+        kind: 'ok',
+        text: changed
+          ? `升级成功:v${versionBefore} → v${now},正在刷新页面…`
+          : `已用最新镜像重建完成(当前 v${now}),正在刷新页面…`,
+      }
+      window.setTimeout(() => location.reload(), 900)
+      return
+    }
+    if (v.current && v.current !== versionBefore) {
+      msg.value = { kind: 'ok', text: `升级成功:v${versionBefore} → v${v.current},正在刷新页面…` }
+      window.setTimeout(() => location.reload(), 900)
+      return
+    }
+    // 版本没变且没断过线:还在拉镜像,继续等
+  } catch (e) {
+    sawDown = true   // 重建中:连接中断
+  }
+  pollTimer = window.setTimeout(pollUpgrade, 3000)
 }
 
 onMounted(check)
@@ -80,7 +101,7 @@ onUnmounted(() => window.clearTimeout(pollTimer))
           <span class="tool-icon">⬆️</span>
           <div class="tool-title">
             <div class="tool-name">版本升级</div>
-            <div class="tool-desc">检测最新版本,一键拉取镜像并重建容器</div>
+            <div class="tool-desc">检测最新版本,由 Watchtower 拉取镜像并重建容器</div>
           </div>
         </div>
 
@@ -114,7 +135,7 @@ onUnmounted(() => window.clearTimeout(pollTimer))
           </button>
         </div>
 
-        <div class="tool-note">升级需要容器挂载 docker socket;期间服务短暂不可用</div>
+        <div class="tool-note">升级由 compose 里的 stow-watchtower 容器执行;期间服务短暂不可用,页面自动感知刷新</div>
       </div>
     </div>
   </div>

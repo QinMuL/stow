@@ -421,37 +421,19 @@ def test_tools_version_api(tmp_path, monkeypatch):
 
 
 def test_tools_upgrade_api(tmp_path, monkeypatch):
-    """立即返回「已启动」,真正升级在线程里延时执行(重建会杀掉进程)。"""
+    """触发 Watchtower:成功 200;连不上(升级函数返回 False)→ 502 带原因。"""
     from app import upgrade as up_mod
 
     client = _client(tmp_path)
     assert client.post("/api/tools/upgrade").status_code == 401
     token = _login(client)
-    monkeypatch.setattr(up_mod, "upgrade", lambda cfg: (True, "升级完成"))
+    monkeypatch.setattr(up_mod, "upgrade", lambda cfg: (True, "升级已触发"))
     r = client.post("/api/tools/upgrade", headers=_h(token))
     assert r.status_code == 200
-    body = r.json()
-    assert body["success"] is True and "已启动" in body["message"]
-
-
-def test_tools_upgrade_status_api(tmp_path, monkeypatch):
-    """升级结果落盘后可轮询:无记录 / 失败 / 成功三种形态。"""
-    from app import upgrade as up_mod
-
-    client = _client(tmp_path)
-    assert client.get("/api/tools/upgrade/status").status_code == 401
-    token = _login(client)
-    # 尚无记录
-    r = client.get("/api/tools/upgrade/status", headers=_h(token))
-    assert r.status_code == 200 and r.json()["ok"] is None
-    # 模拟一次失败的升级结果落盘(_client 的 data_dir 就是 tmp_path)
-    up_mod._write_state(str(tmp_path), False, "拉取镜像失败:denied")
-    r = client.get("/api/tools/upgrade/status", headers=_h(token))
-    assert r.json()["ok"] is False and "denied" in r.json()["message"]
-    # 成功
-    up_mod._write_state(str(tmp_path), True, "升级完成,已用新镜像重建容器")
-    r = client.get("/api/tools/upgrade/status", headers=_h(token))
-    assert r.json()["ok"] is True and "升级完成" in r.json()["message"]
+    assert r.json()["success"] is True and "升级已触发" in r.json()["message"]
+    monkeypatch.setattr(up_mod, "upgrade", lambda cfg: (False, "连不上 Watchtower"))
+    r = client.post("/api/tools/upgrade", headers=_h(token))
+    assert r.status_code == 502 and "Watchtower" in r.json()["detail"]
 
 
 def test_config_get_treats_placeholder_as_empty(tmp_path):

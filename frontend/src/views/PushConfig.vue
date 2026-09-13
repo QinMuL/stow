@@ -51,8 +51,8 @@ const GROUPS = [
   {
     key: 'proxy',
     group: 'creds',
-    title: '项目代理与 GitHub 令牌',
-    desc: '只有 Telegram 与 TMDB 走代理;115 始终直连;GitHub 令牌供版本检测',
+    title: '项目代理与外部令牌',
+    desc: '代理只走 Telegram/TMDB;115 直连;GitHub/Watchtower 令牌供检测与一键升级',
     fields: [
       { key: 'proxy_url', label: '代理地址(可选)',
         ph: 'http://127.0.0.1:7897',
@@ -60,6 +60,12 @@ const GROUPS = [
       { key: 'github_token', label: 'GitHub Token(可选)', sensitive: true,
         ph: 'ghp_…',
         hint: '版本检测访问 GitHub Releases API 用。部署在共享出口 IP(经代理/TUN)时匿名限流常被打满(403),填一个有 repo 权限的 PAT 即稳定;家庭宽带直连通常不用填。' },
+      { key: 'watchtower_url', label: 'Watchtower 地址(可选)',
+        ph: 'http://127.0.0.1:8080',
+        hint: '一键升级的执行容器(compose 里的 stow-watchtower)地址。默认本机 8080,通常不用改。' },
+      { key: 'watchtower_token', label: 'Watchtower 令牌(可选)', sensitive: true,
+        ph: 'stow-upgrade',
+        hint: '触发升级的认证令牌,需与 compose 里 WATCHTOWER_TOKEN 一致(默认 stow-upgrade,一致即可留空)。' },
     ],
   },
   {
@@ -101,7 +107,7 @@ const GROUPS = [
 // 注意 formValues() 仍遍历**全部** GROUPS,不能按分组过滤,否则会漏保存字段。
 const SECTION_KEYS = {
   bot: ['tg_bot_token', 'tg_admin_ids'],
-  proxy: ['proxy_url', 'github_token'],
+  proxy: ['proxy_url', 'github_token', 'watchtower_url', 'watchtower_token'],
   tmdb: ['tmdb_api_key'],
   pan115: ['pan115_cookie'],
   save_pipeline: ['pipeline_root_dir'],

@@ -86,7 +86,7 @@ class ProbeTagsLike:
 
 def render_name(media, details: dict | None, probe, ext: str = "", raw_name: str = "") -> str:
     """渲染目标文件名(不含目录);标题缺失或剧集无集号时返回空串交调用方拦下。"""
-    from app.pan115 import strip_dup_suffix   # 惰性导入:避免 media↔namer 循环
+    from app.pan115 import strip_dup_suffix  # 惰性导入:避免 media↔namer 循环
 
     # 浏览器重复下载后缀("片名.mkv (1)")会让 Path(...).suffix 变成 ".mkv (1)",
     # 目标名就会带着它收尾 —— 在这里兜住,调用方不传 ext 也不会脏

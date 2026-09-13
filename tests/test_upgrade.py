@@ -1,10 +1,8 @@
-"""系统工具:版本检测与一键升级(docker SDK / GitHub API 全 mock,不触网不碰 daemon)。"""
+"""系统工具:版本检测与一键升级(Watchtower 触发式,全 mock 不触网不碰 daemon)。"""
 
 from __future__ import annotations
 
-import sys
 from types import SimpleNamespace
-from unittest import mock
 
 from app import upgrade
 from app.upgrade import parse_ver, version_report
@@ -30,9 +28,10 @@ def test_version_report():
 
 # ── 版本检测(GitHub API mock) ─────────────────────────────
 class _Resp:
-    def __init__(self, status_code=200, data=None):
+    def __init__(self, status_code=200, data=None, text=""):
         self.status_code = status_code
         self._data = data
+        self.text = text
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -107,173 +106,92 @@ def test_check_version_no_token_no_auth_header(monkeypatch):
     assert "Authorization" not in cap["kw"]["headers"]
 
 
-# ── 一键升级(docker SDK mock) ─────────────────────────────
-class _Old:
-    name = "stow"
-    attrs = {
-        "Config": {"Env": ["A=1"], "Cmd": ["python", "-m", "app.main"],
-                   "Entrypoint": None, "WorkingDir": "/app", "Labels": None},
-        "HostConfig": {"Binds": ["/x:/app/data"], "NetworkMode": "host",
-                       "RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
-                       "Init": True, "Privileged": False, "ExtraHosts": None, "Dns": None},
-    }
+# ── 一键升级(Watchtower HTTP API mock) ──────────────────────
+class _WtClient:
+    """mock httpx.Client:记录 post 的 url/headers,按预设返回或抛异常。"""
 
-    def __init__(self):
-        self.stopped = self.removed = False
+    def __init__(self, resp=None, exc=None):
+        self._resp, self._exc = resp, exc
+        self.request = None
 
-    def stop(self):
-        self.stopped = True
+    def __enter__(self):
+        return self
 
-    def remove(self):
-        self.removed = True
+    def __exit__(self, *a):
+        return False
 
-
-class _New:
-    def __init__(self):
-        self.started = False
-
-    def start(self):
-        self.started = True
+    def post(self, url, headers=None, **kw):
+        self.request = {"url": url, "headers": headers}
+        if self._exc:
+            raise self._exc
+        return self._resp
 
 
-class _Images:
-    def __init__(self):
-        self.pulled = []
-
-    def pull(self, image):
-        self.pulled.append(image)
-
-
-class _Containers:
-    def __init__(self):
-        self.old = _Old()
-        self.created = []
-        self.runs = []           # sidecar 启动参数 (image, kw)
-        self.removed_sidecars = []
-
-    def get(self, name):
-        if name.endswith("-rebuild") and not self.old.stopped:
-            raise RuntimeError("no such container")
-        return self.old
-
-    def remove(self, force=False):
-        self.removed_sidecars.append(force)
-
-    def create(self, image, **kw):
-        self.created.append((image, kw))
-        return _New()
-
-    def run(self, image, **kw):
-        self.runs.append((image, kw))
-        return _New()
-
-
-class _Api:
-    def create_host_config(self, **kw):
-        return dict(kw)
-
-
-class _Client:
-    def __init__(self):
-        self.images = _Images()
-        self.containers = _Containers()
-        self.api = _Api()
-
-
-def _fake_docker(monkeypatch):
-    client = _Client()
-    mod = mock.MagicMock()
-    mod.from_env.return_value = client
-    monkeypatch.setitem(sys.modules, "docker", mod)
+def _fake_wt(monkeypatch, resp=None, exc=None):
+    client = _WtClient(resp, exc)
+    monkeypatch.setattr("httpx.Client", lambda **kw: client)
     return client
 
 
-def test_upgrade_success(monkeypatch, tmp_path):
-    """主进程:拉镜像 + 启动 sidecar(--rebuild),不自己重建。"""
-    client = _fake_docker(monkeypatch)
-    ok, msg = upgrade.upgrade(SimpleNamespace(), data_dir=str(tmp_path))
+def test_upgrade_success_default_endpoint(monkeypatch):
+    """默认打 127.0.0.1:8080/v1/update,令牌取 compose 对齐的默认值。"""
+    client = _fake_wt(monkeypatch, resp=_Resp(status_code=204))
+    ok, msg = upgrade.upgrade(SimpleNamespace())
+    assert ok and "已触发" in msg
+    assert client.request["url"] == "http://127.0.0.1:8080/v1/update"
+    assert client.request["headers"]["Authorization"] == "Bearer stow-upgrade"
+
+
+def test_upgrade_success_custom_url_token(monkeypatch):
+    """配置了 watchtower_url/token 时用配置值(末尾斜杠要去掉)。"""
+    client = _fake_wt(monkeypatch, resp=_Resp(status_code=200))
+    cfg = SimpleNamespace(watchtower_url="http://192.168.1.202:8080/",
+                          watchtower_token="my-secret")
+    ok, msg = upgrade.upgrade(cfg)
     assert ok
-    assert client.images.pulled == [upgrade.IMAGE]
-    assert client.containers.old.stopped is False  # 主进程不动旧容器
-    img, kw = client.containers.runs[0]
-    assert img == upgrade.IMAGE
-    assert kw["name"] == "stow-rebuild"
-    assert kw["command"] == ["python", "-m", "app.upgrade", "--rebuild"]
-    assert kw["detach"] is True
-    assert kw["network_mode"] == "host"
-    assert "/var/run/docker.sock" in kw["volumes"]
-    # data 挂载:从旧容器 Binds 解析宿主机路径
-    assert "/x:/app/data" in kw["volumes"] or kw["volumes"].get("/x")
+    assert client.request["url"] == "http://192.168.1.202:8080/v1/update"
+    assert client.request["headers"]["Authorization"] == "Bearer my-secret"
 
 
-def test_upgrade_pull_fails(monkeypatch):
-    client = _fake_docker(monkeypatch)
+def test_upgrade_token_from_env(monkeypatch):
+    """配置为空时回退读环境变量 WATCHTOWER_TOKEN(compose 注入的那份)。"""
+    client = _fake_wt(monkeypatch, resp=_Resp(status_code=204))
+    monkeypatch.setenv("WATCHTOWER_TOKEN", "from-env")
+    ok, _ = upgrade.upgrade(SimpleNamespace())
+    assert ok
+    assert client.request["headers"]["Authorization"] == "Bearer from-env"
 
-    def boom(image):
-        raise RuntimeError("denied")
 
-    client.images.pull = boom
+def test_upgrade_rejected_bad_token(monkeypatch):
+    _fake_wt(monkeypatch, resp=_Resp(status_code=401))
     ok, msg = upgrade.upgrade(SimpleNamespace())
-    assert not ok and "拉取镜像失败" in msg
+    assert not ok and "令牌不匹配" in msg
 
 
-def test_upgrade_connect_fails(monkeypatch):
-    mod = mock.MagicMock()
-    mod.from_env.side_effect = RuntimeError("cannot connect")
-    monkeypatch.setitem(sys.modules, "docker", mod)
+def test_upgrade_connect_error(monkeypatch):
+    import httpx
+
+    _fake_wt(monkeypatch, exc=httpx.ConnectError("connection refused"))
     ok, msg = upgrade.upgrade(SimpleNamespace())
-    assert not ok and "连接 docker daemon 失败" in msg
+    assert not ok and "连不上 Watchtower" in msg
 
 
-# ── sidecar 重建(--rebuild) ───────────────────────────────
-def test_rebuild_sidecar_success(monkeypatch, tmp_path):
-    """sidecar:停/删旧 → create 原名 → start;结果落盘。"""
-    client = _fake_docker(monkeypatch)
-    client.containers.old.stopped = False  # 模拟旧容器在跑
-    upgrade._rebuild_sidecar()
-    old = client.containers.old
-    assert old.stopped and old.removed
-    img, kw = client.containers.created[0]
-    assert img == upgrade.IMAGE
-    assert kw["name"] == "stow"  # 原名(旧的已删,不再冲突)
-    assert kw["environment"] == ["A=1"]
-    assert kw["network_mode"] == "host"
-    assert kw["restart_policy"]["Name"] == "unless-stopped"
-    assert kw["init"] is True
-    assert kw["volumes"] == ["/x:/app/data"]
-    assert client.containers.created[0][1] is not None
-    # 结果落盘到 /app/data(测试里 mock 写不动,用临时目录验证 _write_state 行为)
-    # sidecar 固定写 /app/data;这里单独验证 _write_state
-    state_dir = tmp_path / "d"
-    upgrade._write_state(str(state_dir), True, "升级完成,已用新镜像重建容器")
-    state = upgrade.read_upgrade_state(str(state_dir))
-    assert state["ok"] is True and "升级完成" in state["message"]
-    assert state["to_version"] == upgrade.__version__
-
-
-def test_rebuild_sidecar_failure_marks_state(monkeypatch):
-    """sidecar 内异常 → 结果写 False(前端能读到失败原因)。"""
-    client = _fake_docker(monkeypatch)
-
-    def boom(name):
-        raise RuntimeError("no such container")
-
-    client.containers.create = boom
-    ok, msg = upgrade._rebuild_sidecar()
-    assert ok is False and "重建容器失败" in msg
-
-
-def test_upgrade_missing_docker_sdk(monkeypatch):
-    """没装 docker SDK → 明确错误,不抛。"""
-    import builtins
-
-    real_import = builtins.__import__
-
-    def fake_import(name, *a, **kw):
-        if name == "docker":
-            raise ImportError("No module named 'docker'")
-        return real_import(name, *a, **kw)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+def test_upgrade_http_error(monkeypatch):
+    _fake_wt(monkeypatch, resp=_Resp(status_code=500))
     ok, msg = upgrade.upgrade(SimpleNamespace())
-    assert not ok and "缺少 docker SDK" in msg
+    assert not ok and "HTTP 500" in msg
+
+
+def test_upgrade_unexpected_error(monkeypatch):
+    _fake_wt(monkeypatch, exc=OSError("boom"))
+    ok, msg = upgrade.upgrade(SimpleNamespace())
+    assert not ok and "触发失败" in msg
+
+
+# ── 旧方案的教训(防回归注释,不测实现细节) ──────────────────
+def test_upgrade_module_has_no_docker_sdk_usage():
+    """升级不再 import docker SDK —— 重建交给 Watchtower,stow 不碰宿主机 daemon。"""
+    import inspect
+
+    src = inspect.getsource(upgrade)
+    assert "import docker" not in src and "from_env" not in src
