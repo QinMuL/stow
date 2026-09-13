@@ -119,7 +119,7 @@ class FakeBot:
         self.results: list[PushResult] = []
         self.notified: list[str] = []
 
-    async def push_link(self, link, *, status=None, prefix=""):
+    async def push_link(self, link, *, status=None, prefix="", source="manual"):
         self.sent.append(link)
         if self.results:
             return self.results.pop(0)

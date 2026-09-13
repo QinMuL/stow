@@ -279,6 +279,66 @@ def test_store_migrates_pushed_provider_column(tmp_path):
     s = Store(db)
     rec = s.recent(1)
     assert rec[0]["code"] == "old" and rec[0]["provider"] == "115"  # 老行 provider 兜底为 115
+    assert rec[0]["url"] == ""  # url 列也已自动补上(老行无完整链接)
+    s.close()
+
+
+def test_store_search_and_url(tmp_path):
+    """搜索历史 + 完整链接(url)落库(2026-09-13 加)。"""
+    from app.store import Store
+
+    s = Store(tmp_path / "t.db")
+    s.mark_pushed("sw123", "某剧", "115", "https://115.com/s/sw123?password=abc")
+    s.mark_pushed("0123456789abcdef0123456789abcdef", "某片", "ed2k",
+                  "ed2k://|file|某片.mkv|1048576|0123456789abcdef0123456789abcdef|/")
+    s.mark_pushed("sw456", "另一部", "115", "https://115.com/s/sw456")
+
+    # url 落库
+    rec = {r["code"]: r for r in s.recent(10)}
+    assert rec["sw123"]["url"] == "https://115.com/s/sw123?password=abc"
+    assert rec["sw456"]["url"] == "https://115.com/s/sw456"
+
+    # 搜索:按标题 / 分享码 / url 片段
+    assert [r["code"] for r in s.search("某剧")] == ["sw123"]
+    assert [r["code"] for r in s.search("sw456")] == ["sw456"]
+    assert [r["code"] for r in s.search("password=abc")] == ["sw123"]
+    assert s.search("不存在的") == []
+    s.close()
+
+
+def test_store_source(tmp_path):
+    """推送来源(入口)落库并返回;老数据/未传 source 兜底为 manual(2026-09-13 加)。"""
+    from app.store import Store
+
+    s = Store(tmp_path / "t.db")
+    s.mark_pushed("sw123", "某剧", "115", "https://115.com/s/sw123", "save")
+    s.mark_pushed("0123456789abcdef0123456789abcdef", "某片", "ed2k", "", "channel")
+    s.mark_pushed("sw456", "另一部", "115")  # 不传 source
+    rec = {r["code"]: r["source"] for r in s.recent(10)}
+    assert rec["sw123"] == "save"
+    assert rec["0123456789abcdef0123456789abcdef"] == "channel"
+    assert rec["sw456"] == "manual"   # 兜底为 manual
+    s.close()
+
+
+def test_store_ed2k_file_info(tmp_path):
+    """ed2k 记录带 file_name/file_size(从 url 列的完整链接解析,2026-09-13 补)。"""
+    from app.store import Store
+
+    s = Store(tmp_path / "t.db")
+    url = "ed2k://|file|Movie.A.2023.1080p.mkv|1234567890|0123456789ABCDEF0123456789ABCDEF|/"
+    s.mark_pushed("0123456789ABCDEF0123456789ABCDEF", "Movie A", "ed2k", url, "process")
+    row = next(r for r in s.recent(10) if r["provider"] == "ed2k")
+    assert row["file_name"] == "Movie.A.2023.1080p.mkv"
+    assert row["file_size"] == 1234567890
+    # 老数据 url 为空 → None(前端显示 —)
+    s.mark_pushed("FEDCBA9876543210FEDCBA9876543210", "老记录", "ed2k", "", "channel")
+    old = next(r for r in s.recent(10) if r["code"] == "FEDCBA9876543210FEDCBA9876543210")
+    assert old["file_name"] is None and old["file_size"] is None
+    # 115 记录不带这两个键(文件清单走 /api/share/files)
+    s.mark_pushed("sw123", "某剧", "115", "https://115.com/s/sw123", "save")
+    p115 = next(r for r in s.recent(10) if r["code"] == "sw123")
+    assert "file_name" not in p115 and "file_size" not in p115
     s.close()
 
 

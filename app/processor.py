@@ -286,6 +286,7 @@ class ProcessChain:
                 # 画质行按**改名后**的名字解析:那里才有 ffprobe 实测的分辨率/HDR/编码/
                 # 色深/帧率/音频(源文件名常常只有 WEB-DL 一个词,直接用它画质行会退化)
                 quality_info=get_quality_info(final.name),
+                source="process",
             )
             if not result.ok:
                 # 推送失败:文件已改名,记录失败但不移走(下轮按"未推送"重试)

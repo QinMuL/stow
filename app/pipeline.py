@@ -47,6 +47,7 @@ class PipelineTask:
     status: str = "auditing"  # auditing | done | violated | timeout
     attempts: int = 0
     created_at: float = field(default_factory=time.time)
+    source: str = "save"   # 入口来源:save(/save 转存) | dir_watch(目录监控)
 
     def to_row(self) -> dict:
         """落库字段(与 Store.pipeline_tasks 列一致)。"""
@@ -54,7 +55,7 @@ class PipelineTask:
             "share_code": self.share_code, "receive_code": self.receive_code,
             "fid": self.fid, "name": self.name, "uid": self.uid,
             "status": self.status, "attempts": self.attempts,
-            "created_at": self.created_at,
+            "created_at": self.created_at, "source": self.source,
         }
 
     @classmethod
@@ -65,6 +66,7 @@ class PipelineTask:
             uid=int(row.get("uid") or 0), status=str(row.get("status") or "auditing"),
             attempts=int(row.get("attempts") or 0),
             created_at=float(row.get("created_at") or time.time()),
+            source=str(row.get("source") or "save"),
         )
 
 
@@ -259,6 +261,7 @@ class SavePipeline:
             task = PipelineTask(
                 share_code=share_code, receive_code=receive_code,
                 fid=nr.fid, name=nr.name, uid=bot.cfg.tg_admin_ids[0],
+                source="dir_watch",
             )
             self.tasks[share_code] = task
             self._persist(task)  # 落库:重启后跳过该 fid,不再重复建分享
@@ -382,7 +385,7 @@ class SavePipeline:
         if not sent:
             task.attempts += 1   # 一条都没送出去:下轮重试(分享码不变,不会重复建)
             return
-        bot.store.mark_pushed(task.share_code, title, "115")
+        bot.store.mark_pushed(task.share_code, title, "115", link.url, task.source)
         task.status = "done"
         logger.info("流水线推送成功:%s(%s)", task.name, task.share_code)
         await self._move_to(cfg.pipeline_dirs()[1], task)

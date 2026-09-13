@@ -136,6 +136,80 @@ async function dismiss(a) {
   }
 }
 
+// 历史搜索 + 详情展开(2026-09-13):搜索 pushed 全部历史,点击展开 ed2k 字段 / 115 文件清单
+const searchQ = ref('')
+const searchItems = ref(null)   // null = 显示默认最近推送;数组 = 搜索结果
+const searchLoading = ref(false)
+const expandedCode = ref('')    // 展开详情的条目 code
+const detailMap = ref({})       // code → { loading, files, error }(115 分享文件清单)
+
+const feedItems = computed(() => searchItems.value ?? pipe.value?.recent ?? [])
+
+function fmtSize(n) {
+  if (n == null || n === '') return '—'
+  const v = Number(n)
+  if (!Number.isFinite(v)) return '—'
+  if (v < 1024) return `${v} B`
+  if (v < 1048576) return `${(v / 1024).toFixed(1)} KB`
+  if (v < 1073741824) return `${(v / 1048576).toFixed(1)} MB`
+  return `${(v / 1073741824).toFixed(2)} GB`
+}
+
+function fmtTime(ts) {
+  if (ts == null) return '—'
+  const d = new Date(Number(ts) * 1000)
+  const p = (x) => String(x).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+// 推送来源(入口):后端存英文 key,这里映射中文标签
+const SOURCE_LABELS = {
+  manual: '手动推送',
+  channel: '频道监控',
+  process: '处理段',
+  save: '转存流水线',
+  dir_watch: '目录监控',
+}
+function sourceLabel(s) { return SOURCE_LABELS[s] || s || '—' }
+
+function toggle(it) {
+  if (expandedCode.value === it.code) {
+    expandedCode.value = ''
+    return
+  }
+  expandedCode.value = it.code
+  // 115 展开时按需读取分享文件清单(ed2k 的标题/文件名/大小已在 history 返回里带全)
+  if (it.provider === '115' && !detailMap.value[it.code]) {
+    load115Files(it)
+  }
+}
+
+async function load115Files(it) {
+  detailMap.value[it.code] = { loading: true, files: null, error: '' }
+  try {
+    const qs = 'share/files?code=' + encodeURIComponent(it.code) +
+      (it.password ? '&password=' + encodeURIComponent(it.password) : '')
+    const d = await api(qs)
+    detailMap.value[it.code] = { loading: false, files: d.files, error: '' }
+  } catch (e) {
+    detailMap.value[it.code] = { loading: false, files: null, error: e.message }
+  }
+}
+
+async function doSearch() {
+  const q = searchQ.value.trim()
+  if (!q) { searchItems.value = null; return }
+  searchLoading.value = true
+  try {
+    const d = await api('history?q=' + encodeURIComponent(q) + '&limit=50')
+    searchItems.value = d.items
+  } catch (e) {
+    err.value = e.message
+  } finally {
+    searchLoading.value = false
+  }
+}
+
 // D 方案:手写迷你**曲线**图(无依赖)——两条序列合成一张图,共用一把 0 起刻度。
 // 坐标系固定(700×110),靠 preserveAspectRatio="none" 横向拉伸铺满容器宽度;
 // 曲线用 vector-effect="non-scaling-stroke" 保证线宽不被拉伸变形——代价是**不能画圆点**
@@ -350,22 +424,61 @@ onUnmounted(() => timer && window.clearInterval(timer))
       </div>
     </div>
 
-    <!-- 最近推送(压缩版) -->
+    <!-- 最近推送(可搜索、点击展开详情) -->
     <div class="card">
       <h3>最近推送</h3>
-      <div v-if="pipe?.recent?.length" class="feed">
-        <div v-for="it in pipe.recent" :key="it.code" class="feed-item">
-          <span class="dot ok" style="width:7px;height:7px"></span>
-          <span class="feed-tag" :class="it.provider === 'ed2k' ? 'ed2k' : 'p115'"
-                :title="it.provider === 'ed2k' ? 'ed2k 链接' : '115 分享链接'">
-            {{ it.provider === 'ed2k' ? 'ed2k' : '115' }}
-          </span>
-          <span class="t" :title="it.title">{{ it.title }}</span>
-          <span class="c">{{ it.code }}</span>
-          <span class="when">{{ timeAgo(it.pushed_at) }}</span>
-        </div>
+      <div class="feed-search">
+        <input v-model="searchQ" class="search-input" type="text"
+          placeholder="搜索历史推送(标题 / 分享码)…" @keyup.enter="doSearch" />
+        <button class="search-btn" :disabled="searchLoading" @click="doSearch">
+          {{ searchLoading ? '…' : '搜索' }}
+        </button>
+        <button v-if="searchItems" class="search-clear" title="清除搜索"
+          @click="searchQ = ''; searchItems = null">✕</button>
       </div>
-      <div v-else class="empty">还没有推送记录 —— 在 Telegram 给 Bot 发一条 115 分享链接试试</div>
+      <div v-if="feedItems.length" class="feed">
+        <template v-for="it in feedItems" :key="it.code">
+          <div class="feed-item" @click="toggle(it)">
+            <span class="dot ok" style="width:7px;height:7px"></span>
+            <span class="feed-tag" :class="it.provider === 'ed2k' ? 'ed2k' : 'p115'"
+                  :title="it.provider === 'ed2k' ? 'ed2k 链接' : '115 分享链接'">
+              {{ it.provider === 'ed2k' ? 'ed2k' : '115' }}
+            </span>
+            <span class="t" :title="it.title">{{ it.title }}</span>
+            <span class="c">{{ it.code }}</span>
+            <span class="when">{{ timeAgo(it.pushed_at) }}</span>
+            <span class="chev" :class="{ open: expandedCode === it.code }">▾</span>
+          </div>
+          <div v-if="expandedCode === it.code" class="feed-detail">
+            <!-- ed2k:标题 / 文件名(含来源) / 大小 / 时间 / 完整链接 -->
+            <template v-if="it.provider === 'ed2k'">
+              <div class="fd-row"><span class="fd-k">标题</span><span class="fd-v">{{ it.title }}</span></div>
+              <div class="fd-row"><span class="fd-k">来源</span><span class="fd-v">{{ sourceLabel(it.source) }}</span></div>
+              <div class="fd-row"><span class="fd-k">文件名</span><span class="fd-v mono">{{ it.file_name || '—' }}</span></div>
+              <div class="fd-row"><span class="fd-k">大小</span><span class="fd-v">{{ fmtSize(it.file_size) }}</span></div>
+              <div class="fd-row"><span class="fd-k">时间</span><span class="fd-v">{{ fmtTime(it.pushed_at) }}</span></div>
+              <div class="fd-row"><span class="fd-k">链接</span><span class="fd-v mono">{{ it.url || it.code }}</span></div>
+            </template>
+            <!-- 115:分享码 / 时间 / 链接 / 文件清单(按需读取) -->
+            <template v-else>
+              <div class="fd-row"><span class="fd-k">分享码</span><span class="fd-v mono">{{ it.code }}</span></div>
+              <div class="fd-row"><span class="fd-k">来源</span><span class="fd-v">{{ sourceLabel(it.source) }}</span></div>
+              <div class="fd-row"><span class="fd-k">时间</span><span class="fd-v">{{ fmtTime(it.pushed_at) }}</span></div>
+              <div class="fd-row"><span class="fd-k">链接</span><span class="fd-v mono">{{ it.url || ('https://115.com/s/' + it.code) }}</span></div>
+              <div v-if="detailMap[it.code]?.loading" class="fd-loading">正在读取分享内容…</div>
+              <div v-else-if="detailMap[it.code]?.error" class="fd-error">{{ detailMap[it.code].error }}</div>
+              <div v-else-if="detailMap[it.code]?.files" class="fd-files">
+                <div class="fd-files-h">文件清单 ({{ detailMap[it.code].files.length }})</div>
+                <div v-for="(f, i) in detailMap[it.code].files" :key="i" class="fd-file">
+                  <span class="fd-file-name">{{ f.is_dir ? '📁 ' + f.name : f.name }}</span>
+                  <span v-if="!f.is_dir" class="fd-file-size">{{ fmtSize(f.size) }}</span>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+      <div v-else class="empty">{{ searchItems ? '没有匹配的记录' : '还没有推送记录 —— 在 Telegram 给 Bot 发一条 115 分享链接试试' }}</div>
     </div>
   </div>
 </template>

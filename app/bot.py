@@ -483,7 +483,7 @@ class StowBot:
     async def push_link(
         self, link: ParsedLink, *, status=None, prefix: str = "",
         files=None, media=None, details: dict | None = None,
-        quality_info: list[str] | None = None,
+        quality_info: list[str] | None = None, source: str = "manual",
     ) -> PushResult:
         """链接 → 卡片 → 归属频道(手动推送与频道监控共用同一条链路)。
 
@@ -543,7 +543,7 @@ class StowBot:
 
         # **只要有一个成功就标记已推送**:否则下次重推会骚扰已经收到的那几个频道
         title = (details["title"] if details else media.title) or link.dedup_display
-        self.store.mark_pushed(link.key, title, link.provider)
+        self.store.mark_pushed(link.key, title, link.provider, link.url, source)
         n = media.file_count or len(files)
         head = "✅ 已推送" + (f"({len(sent)}/{len(targets)} 个频道)" if len(targets) > 1 else "")
         text = f"{head} · {n} 文件 · 🎬 {title}" + (

@@ -21,8 +21,19 @@ from pathlib import Path
 # ed2k 去重 key = 32 位十六进制文件 hash;老数据没有 provider 时靠它兜底判别(115 分享码不会恰好是这个形态)
 _ED2K_HASH_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 
+# 推送来源(入口):这条推送是从项目哪个入口产出的。存英文 key,前端映射中文标签。
+SOURCE_LABELS = {
+    "manual": "手动推送",
+    "channel": "频道监控",
+    "process": "处理段",
+    "save": "转存流水线",
+    "dir_watch": "目录监控",
+}
+_DEFAULT_SOURCE = "manual"
+
 _TASK_FIELDS = (
     "share_code", "receive_code", "fid", "name", "uid", "status", "created_at", "attempts",
+    "source",
 )
 
 
@@ -32,12 +43,17 @@ class Store:
         self._conn = sqlite3.connect(db_path)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS pushed ("
-            " code TEXT PRIMARY KEY, pushed_at REAL, title TEXT, provider TEXT DEFAULT '')"
+            " code TEXT PRIMARY KEY, pushed_at REAL, title TEXT, provider TEXT DEFAULT '',"
+            " url TEXT DEFAULT '', source TEXT DEFAULT '')"
         )
-        # 迁移:老表(建表时还没有 provider 列)补一列;列已存在则跳过。
+        # 迁移:老表(建表时还没有这些列)补列;列已存在则跳过。
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(pushed)")}
         if "provider" not in cols:
             self._conn.execute("ALTER TABLE pushed ADD COLUMN provider TEXT DEFAULT ''")
+        if "url" not in cols:
+            self._conn.execute("ALTER TABLE pushed ADD COLUMN url TEXT DEFAULT ''")
+        if "source" not in cols:
+            self._conn.execute("ALTER TABLE pushed ADD COLUMN source TEXT DEFAULT ''")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS monitor_state ("
             " ref TEXT PRIMARY KEY, chat_id TEXT, title TEXT,"
@@ -46,8 +62,12 @@ class Store:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS pipeline_tasks ("
             " share_code TEXT PRIMARY KEY, receive_code TEXT, fid INTEGER, name TEXT,"
-            " uid INTEGER, status TEXT, created_at REAL, attempts INTEGER)"
+            " uid INTEGER, status TEXT, created_at REAL, attempts INTEGER,"
+            " source TEXT DEFAULT 'save')"
         )
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(pipeline_tasks)")}
+        if "source" not in cols:
+            self._conn.execute("ALTER TABLE pipeline_tasks ADD COLUMN source TEXT DEFAULT 'save'")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS local_files ("
             " name TEXT PRIMARY KEY, size INTEGER, status TEXT, ed2k TEXT,"
@@ -71,28 +91,50 @@ class Store:
         ).fetchone()
         return row is not None
 
-    def mark_pushed(self, code: str, title: str = "", provider: str = "") -> None:
+    def mark_pushed(self, code: str, title: str = "", provider: str = "", url: str = "",
+                    source: str = "") -> None:
         self._conn.execute(
-            "INSERT INTO pushed(code, pushed_at, title, provider) VALUES(?,?,?,?) "
+            "INSERT INTO pushed(code, pushed_at, title, provider, url, source) VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(code) DO UPDATE SET pushed_at=excluded.pushed_at, title=excluded.title,"
-            " provider=excluded.provider",
-            (code, time.time(), title, provider),
+            " provider=excluded.provider, url=excluded.url, source=excluded.source",
+            (code, time.time(), title, provider, url, source or _DEFAULT_SOURCE),
         )
         self._conn.commit()
+
+    @staticmethod
+    def _item(c: str, t: str, ts: float, p: str, u: str, src: str = "") -> dict:
+        """pushed 行 → 展示 dict;老数据没有 provider/source 时按去重 key 兜底。"""
+        from app.links import ed2k_file
+
+        prov = p or ("ed2k" if _ED2K_HASH_RE.fullmatch(c) else "115")
+        d = {"code": c, "title": t or c, "pushed_at": ts, "provider": prov,
+             "url": u or "", "source": src or _DEFAULT_SOURCE}
+        # ed2k 的文件名/大小内嵌在链接里(url 列存了完整 URI),展开详情直接给;
+        # 115 的文件清单走 /api/share/files 按需读,不带这两个键
+        if prov == "ed2k":
+            f = ed2k_file(u or c)
+            d["file_name"], d["file_size"] = (f[0], f[1]) if f else (None, None)
+        return d
 
     def recent(self, limit: int = 20) -> list[dict]:
         """最近推送(新→旧)。同时间戳按写入顺序决胜(Windows 时钟精度粗,连推会同戳)。"""
         rows = self._conn.execute(
-            "SELECT code, title, pushed_at, provider FROM pushed"
+            "SELECT code, title, pushed_at, provider, url, source FROM pushed"
             " ORDER BY pushed_at DESC, rowid DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        out = []
-        for c, t, ts, p in rows:
-            # 老数据没有 provider,按去重 key 兜底:ed2k 的 key 是 32 位 hex 文件 hash,其余算 115
-            prov = p or ("ed2k" if _ED2K_HASH_RE.fullmatch(c) else "115")
-            out.append({"code": c, "title": t or c, "pushed_at": ts, "provider": prov})
-        return out
+        return [self._item(*r) for r in rows]
+
+    def search(self, q: str, limit: int = 50) -> list[dict]:
+        """按关键词搜推送历史(标题/分享码/完整链接模糊匹配),新→旧。"""
+        like = f"%{q}%"
+        rows = self._conn.execute(
+            "SELECT code, title, pushed_at, provider, url, source FROM pushed"
+            " WHERE title LIKE ? OR code LIKE ? OR url LIKE ?"
+            " ORDER BY pushed_at DESC, rowid DESC LIMIT ?",
+            (like, like, like, limit),
+        ).fetchall()
+        return [self._item(*r) for r in rows]
 
     def stats(self) -> dict:
         """推送统计:今日/累计。"""
@@ -155,16 +197,17 @@ class Store:
         """写/更新一条流水线任务(share_code 为主键,幂等)。"""
         self._conn.execute(
             "INSERT INTO pipeline_tasks"
-            " (share_code, receive_code, fid, name, uid, status, created_at, attempts)"
-            " VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(share_code) DO UPDATE SET"
+            " (share_code, receive_code, fid, name, uid, status, created_at, attempts, source)"
+            " VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(share_code) DO UPDATE SET"
             " receive_code=excluded.receive_code, fid=excluded.fid, name=excluded.name,"
             " uid=excluded.uid, status=excluded.status, created_at=excluded.created_at,"
-            " attempts=excluded.attempts",
+            " attempts=excluded.attempts, source=excluded.source",
             (
                 str(task["share_code"]), str(task.get("receive_code", "") or ""),
                 int(task.get("fid", 0) or 0), str(task.get("name", "") or ""),
                 int(task.get("uid", 0) or 0), str(task.get("status", "auditing")),
                 float(task.get("created_at", time.time())), int(task.get("attempts", 0) or 0),
+                str(task.get("source", "save")),
             ),
         )
         self._conn.commit()

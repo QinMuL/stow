@@ -207,6 +207,36 @@ button.nav-item { width: 100%; background: none; border: 0; font: inherit; curso
   font-family: var(--mono); letter-spacing: .3px; }
 .feed-tag.p115 { color: var(--amber-strong); background: var(--amber-soft); border: 1px solid rgba(232,163,61,.32); }
 .feed-tag.ed2k { color: var(--chart-2); background: rgba(111,159,196,.14); border: 1px solid rgba(111,159,196,.32); }
+/* 最近推送:可点击展开 + 搜索历史 */
+.feed-item { cursor: pointer; }
+.feed-item:hover { background: rgba(255, 255, 255, 0.02); }
+.chev { color: var(--faint); font-size: 11px; transition: transform .15s; flex: none; }
+.chev.open { transform: rotate(180deg); }
+.feed-search { display: flex; gap: 8px; margin-bottom: 6px; }
+.search-input { flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--text); padding: 7px 12px; border-radius: var(--r-s); font-size: 13px; }
+.search-input:focus { outline: none; border-color: var(--line-strong); }
+.search-input::placeholder { color: var(--faint); }
+.search-btn { flex: none; padding: 7px 14px; border-radius: var(--r-s); border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--sub); cursor: pointer; font-size: 12.5px; }
+.search-btn:hover { color: var(--text); border-color: var(--line-strong); }
+.search-btn:disabled { opacity: .5; cursor: default; }
+.search-clear { flex: none; border: none; background: none; color: var(--faint); cursor: pointer;
+  font-size: 13px; padding: 0 4px; }
+.search-clear:hover { color: var(--text); }
+.feed-detail { margin: -4px 0 8px 26px; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: var(--r-m); background: var(--panel-2); }
+.fd-row { display: flex; gap: 12px; padding: 3px 0; font-size: 12.5px; }
+.fd-k { flex: none; width: 48px; color: var(--faint); }
+.fd-v { flex: 1; min-width: 0; word-break: break-all; color: var(--text); }
+.mono { font-family: var(--mono); font-size: 12px; }
+.fd-loading { color: var(--faint); font-size: 12.5px; padding: 4px 0; }
+.fd-error { color: var(--bad); font-size: 12.5px; padding: 4px 0; }
+.fd-files { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; max-height: 260px; overflow-y: auto; }
+.fd-files-h { color: var(--sub); font-size: 11.5px; margin-bottom: 4px; }
+.fd-file { display: flex; gap: 10px; padding: 2px 0; font-size: 12px; }
+.fd-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fd-file-size { flex: none; color: var(--faint); font-family: var(--mono); }
 .empty { color: var(--faint); text-align: center; padding: 26px 0; font-size: 13px; }
 .missing { margin-top: 12px; display: flex; flex-direction: column; gap: 4px; }
 .missing li { list-style: none; color: var(--amber); font-size: 12.5px; font-family: var(--mono); }

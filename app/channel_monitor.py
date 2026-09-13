@@ -507,7 +507,7 @@ class ChannelMonitor:
 
     async def _push(self, link: ParsedLink, source: str) -> bool:
         """单链接推送:失败重试一次;投递超时(结果不确定)不重试。"""
-        result = await self.bot.push_link(link)
+        result = await self.bot.push_link(link, source="channel")
         if result.ok:
             logger.info("频道监控推送成功:%s(%s)", link.dedup_display, source or "-")
             return True
@@ -517,7 +517,7 @@ class ChannelMonitor:
             return False
         logger.warning("频道监控推送未成功(%s),%ds 后重试:%s", link.dedup_display, _RETRY_DELAY, result.text)
         await asyncio.sleep(_RETRY_DELAY)
-        result = await self.bot.push_link(link)
+        result = await self.bot.push_link(link, source="channel")
         if result.ok:
             logger.info("频道监控重试推送成功:%s(%s)", link.dedup_display, source or "-")
             return True

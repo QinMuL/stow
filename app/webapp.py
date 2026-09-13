@@ -1010,18 +1010,50 @@ def create_app(config_path: str | Path) -> FastAPI:
         }
 
     @app.get("/api/history")
-    def history(request: Request, limit: int = 20) -> dict:
-        """总览数据:最近推送 + 今日/累计统计。"""
+    def history(request: Request, limit: int = 20, q: str = "") -> dict:
+        """总览数据:最近推送(或按 q 搜索历史)+ 今日/累计统计。"""
         _current_user(config_path, _auth_header(request))
         cfg = load_config(config_path)
         store = Store(cfg.db_path)
         try:
-            return {
-                "items": store.recent(max(1, min(limit, 100))),
-                **store.stats(),
-            }
+            limit = max(1, min(limit, 100))
+            items = store.search(q.strip(), limit) if q.strip() else store.recent(limit)
+            # ed2k 的文件名/大小已在 store._item 里解析;这里只补 115 的访问码
+            # (从完整 url 提取,供前端读文件清单用)
+            from urllib.parse import parse_qs, urlparse
+
+            for it in items:
+                if it["provider"] == "115" and it["url"]:
+                    it["password"] = (parse_qs(urlparse(it["url"]).query).get("password") or [""])[0]
+            return {"items": items, **store.stats()}
         finally:
             store.close()
+
+    @app.get("/api/share/files")
+    async def share_files(request: Request, code: str, password: str = "") -> dict:
+        """读 115 分享的文件清单(历史详情展开用);实时调 115,带 cookie 走 proapi 通道。"""
+        _current_user(config_path, _auth_header(request))
+        if not code.strip():
+            raise HTTPException(status_code=400, detail="缺少分享码")
+        cfg = load_config(config_path)
+        from app.pan115 import Pan115Reader, ShareDead, ShareError, ShareLink, ShareNeedCode, ShareRateLimited
+
+        reader = Pan115Reader(cfg.pan115_cookie)
+        link = ShareLink(code.strip(), password.strip() or None)
+        try:
+            files = await reader.read_share(link)
+        except ShareDead as exc:
+            raise HTTPException(status_code=410, detail="分享已失效或不存在") from exc
+        except ShareNeedCode as exc:
+            raise HTTPException(status_code=428, detail="需要访问码(或访问码已变更)") from exc
+        except ShareRateLimited as exc:
+            raise HTTPException(status_code=429, detail="115 限速,稍后重试") from exc
+        except ShareError as exc:
+            raise HTTPException(status_code=502, detail=f"读取分享失败:{str(exc)[:100]}") from exc
+        return {
+            "code": code.strip(),
+            "files": [{"name": f.name, "size": f.size, "is_dir": f.is_dir} for f in files],
+        }
 
     @app.post("/api/restart")
     def restart(request: Request) -> dict:
