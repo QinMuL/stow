@@ -174,9 +174,9 @@ def _fake_docker(monkeypatch):
     return client
 
 
-def test_upgrade_success(monkeypatch):
+def test_upgrade_success(monkeypatch, tmp_path):
     client = _fake_docker(monkeypatch)
-    ok, msg = upgrade.upgrade(SimpleNamespace())
+    ok, msg = upgrade.upgrade(SimpleNamespace(), data_dir=str(tmp_path))
     assert ok
     assert client.images.pulled == [upgrade.IMAGE]
     old = client.containers.old
@@ -184,10 +184,16 @@ def test_upgrade_success(monkeypatch):
     img, kw = client.containers.created[0]
     assert img == upgrade.IMAGE
     assert kw["name"] == "stow"
-    assert kw["env"] == ["A=1"]
-    assert kw["host_config"]["network_mode"] == "host"
-    assert kw["host_config"]["restart_policy"]["Name"] == "unless-stopped"
-    assert kw["host_config"]["init"] is True
+    # docker SDK 的 create() 参数名是 environment(不是 env),host 参数平铺直传
+    assert kw["environment"] == ["A=1"]
+    assert kw["network_mode"] == "host"
+    assert kw["restart_policy"]["Name"] == "unless-stopped"
+    assert kw["init"] is True
+    assert kw["binds"] == ["/x:/app/data"]
+    # 结果已落盘,供前端 status 轮询
+    state = upgrade.read_upgrade_state(str(tmp_path))
+    assert state["ok"] is True and "升级完成" in state["message"]
+    assert state["to_version"] == upgrade.__version__
 
 
 def test_upgrade_pull_fails(monkeypatch):

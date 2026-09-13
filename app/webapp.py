@@ -1173,6 +1173,19 @@ def create_app(config_path: str | Path) -> FastAPI:
 
         return check_version(load_config(config_path))
 
+    @app.get("/api/tools/upgrade/status")
+    def tools_upgrade_status(request: Request) -> dict:
+        """系统工具:最近一次升级结果(成功/失败+消息)。前端升级后轮询这个,
+        不用靠"手动刷新页面猜结果" —— 重建会杀掉本进程,结果已落盘(data/)。"""
+        _current_user(config_path, _auth_header(request))
+
+        from app.upgrade import read_upgrade_state
+
+        cfg = load_config(config_path)
+        return read_upgrade_state(cfg.data_dir) or {
+            "ts": 0, "ok": None, "message": "尚无升级记录", "to_version": "",
+        }
+
     @app.post("/api/tools/upgrade")
     def tools_upgrade(request: Request) -> dict:
         """系统工具:一键升级 —— 拉最新镜像并重建本容器(需要 docker socket)。"""
@@ -1185,7 +1198,8 @@ def create_app(config_path: str | Path) -> FastAPI:
 
             time.sleep(2)  # 先让响应回给前端,再重建(重建会杀掉本进程)
             try:
-                ok, msg = upgrade(load_config(config_path))
+                cfg = load_config(config_path)
+                ok, msg = upgrade(cfg, data_dir=cfg.data_dir)
                 logger.info("一键升级结果:%s %s", ok, msg)
             except Exception as exc:  # noqa: BLE001 - 升级失败只留日志
                 logger.error("一键升级异常:%s", exc, exc_info=exc)

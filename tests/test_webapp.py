@@ -434,6 +434,26 @@ def test_tools_upgrade_api(tmp_path, monkeypatch):
     assert body["success"] is True and "已启动" in body["message"]
 
 
+def test_tools_upgrade_status_api(tmp_path, monkeypatch):
+    """升级结果落盘后可轮询:无记录 / 失败 / 成功三种形态。"""
+    from app import upgrade as up_mod
+
+    client = _client(tmp_path)
+    assert client.get("/api/tools/upgrade/status").status_code == 401
+    token = _login(client)
+    # 尚无记录
+    r = client.get("/api/tools/upgrade/status", headers=_h(token))
+    assert r.status_code == 200 and r.json()["ok"] is None
+    # 模拟一次失败的升级结果落盘(_client 的 data_dir 就是 tmp_path)
+    up_mod._write_state(str(tmp_path), False, "拉取镜像失败:denied")
+    r = client.get("/api/tools/upgrade/status", headers=_h(token))
+    assert r.json()["ok"] is False and "denied" in r.json()["message"]
+    # 成功
+    up_mod._write_state(str(tmp_path), True, "升级完成,已用新镜像重建容器")
+    r = client.get("/api/tools/upgrade/status", headers=_h(token))
+    assert r.json()["ok"] is True and "升级完成" in r.json()["message"]
+
+
 def test_config_get_treats_placeholder_as_empty(tmp_path):
     """中文占位符不显示为「已保存」(与启动加载同口径)。"""
     import json as _json

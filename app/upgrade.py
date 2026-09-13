@@ -22,6 +22,7 @@ IMAGE = "ghcr.io/qinmul/stow:latest"
 REPO = "qinmul/stow"
 _GH_LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 _CONTAINER = "stow"
+_STATE_FILE = "upgrade_state.json"   # 放 data/ 下;升级结果落盘,前端轮询有反馈
 
 
 def parse_ver(s: str) -> tuple[int, ...]:
@@ -60,8 +61,18 @@ def check_version(cfg) -> dict:
     return version_report(latest)
 
 
-def upgrade(cfg) -> tuple[bool, str]:
-    """执行升级:拉最新镜像 → 重建本容器(复制原容器配置)。返回 (成功, 消息)。"""
+def upgrade(cfg, data_dir: str = "") -> tuple[bool, str]:
+    """执行升级:拉最新镜像 → 重建本容器(复制原容器配置)。返回 (成功, 消息)。
+
+    data_dir 非空时结果落盘到 {data_dir}/{_STATE_FILE}:重建会杀掉本进程,
+    只有落盘的状态能在新进程里被读回,前端据此轮询升级成败(2026-09-13 加)。
+    """
+    ok, msg = _upgrade_impl(cfg)
+    _write_state(data_dir, ok, msg)
+    return ok, msg
+
+
+def _upgrade_impl(cfg) -> tuple[bool, str]:
     try:
         import docker
     except ImportError:
@@ -86,12 +97,54 @@ def upgrade(cfg) -> tuple[bool, str]:
     return True, "升级完成,已用新镜像重建容器"
 
 
+def _write_state(data_dir: str, ok: bool, msg: str) -> None:
+    """升级结果落盘(data/upgrade_state.json):时间/成败/消息/目标版本。"""
+    import json as _json
+    import time as _time
+    from pathlib import Path
+
+    if not data_dir:
+        return
+    try:
+        p = Path(data_dir) / _STATE_FILE
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            _json.dumps({
+                "ts": _time.time(), "ok": bool(ok), "message": msg,
+                "to_version": __version__,
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001 - 状态写失败不影响升级结果本身
+        logger.warning("升级状态落盘失败:%s", exc)
+
+
+def read_upgrade_state(data_dir: str = "") -> dict:
+    """读最近一次升级结果;无记录返回空 dict。"""
+    import json as _json
+    from pathlib import Path
+
+    if not data_dir:
+        return {}
+    p = Path(data_dir) / _STATE_FILE
+    try:
+        return _json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("读取升级状态失败:%s", exc)
+        return {}
+
+
 def _recreate(client, container) -> None:
     """按原容器配置重建(镜像换成已拉取的新版本)。
 
-    从 inspect attrs 复制关键字段:env/cmd/entrypoint/working_dir/labels +
-    host 侧(binds/network_mode/restart_policy/init/privileged)。
-    重建必然杀掉当前进程,调用方需先回响应、再延时执行。
+    从 inspect attrs 复制关键字段:environment/cmd/entrypoint/working_dir/labels +
+    host 侧(binds/network_mode/restart_policy/init/privileged/extra_hosts/dns)。
+    docker SDK 的 containers.create(**kw) 会把 host 参数自动装进 HostConfig,
+    所以这些参数**平铺直传**,不要手动 create_host_config 再塞 host_config= 进去
+    (SDK 会把未消费的 kwargs 直接 reject,报 "run() got unexpected keyword arguments";
+    2026-09-13 实测翻车)。重建必然杀掉当前进程,调用方需先回响应、再延时执行。
     """
     attrs = container.attrs
     cfg = attrs.get("Config") or {}
@@ -100,7 +153,15 @@ def _recreate(client, container) -> None:
     restart = {"Name": rp.get("Name") or "no"}
     if restart["Name"] == "on-failure":
         restart["MaximumRetryCount"] = rp.get("MaximumRetryCount") or 0
-    host_config = client.api.create_host_config(
+    new = client.containers.create(
+        IMAGE,
+        name=container.name,
+        command=cfg.get("Cmd"),
+        entrypoint=cfg.get("Entrypoint"),
+        working_dir=cfg.get("WorkingDir"),
+        environment=cfg.get("Env"),
+        labels=cfg.get("Labels"),
+        # host 侧配置:create() 内部自动组装 HostConfig
         binds=hc.get("Binds"),
         network_mode=hc.get("NetworkMode") or "default",
         restart_policy=restart,
@@ -108,16 +169,6 @@ def _recreate(client, container) -> None:
         privileged=hc.get("Privileged"),
         extra_hosts=hc.get("ExtraHosts"),
         dns=hc.get("Dns"),
-    )
-    new = client.containers.create(
-        IMAGE,
-        name=container.name,
-        command=cfg.get("Cmd"),
-        entrypoint=cfg.get("Entrypoint"),
-        working_dir=cfg.get("WorkingDir"),
-        env=cfg.get("Env"),
-        labels=cfg.get("Labels"),
-        host_config=host_config,
     )
     container.stop()
     container.remove()
