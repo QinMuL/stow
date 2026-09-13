@@ -24,7 +24,6 @@ DEFAULT_WEB_PORT = 8686
 SENSITIVE_KEYS = (
     "tg_bot_token", "tmdb_api_key", "pan115_cookie", "tg_api_hash",
     "openlist_token", "cd2_token", "cd2_password", "github_token",
-    "watchtower_token",
 )
 MASK = "••••••••"
 
@@ -47,10 +46,6 @@ class Config:
     # GitHub 访问令牌(可选):版本检测带认证,绕开共享出口 IP 的匿名 API 限流(403)。
     # 家庭宽带直连部署通常用不到;留空 = 匿名请求。敏感,Web 掩码显示
     github_token: str = ""
-    # 一键升级(系统工具):Watchtower 容器(compose 的 stow-watchtower)的
-    # 地址与令牌。留空走默认(127.0.0.1:8080 + compose 的 WATCHTOWER_TOKEN 环境变量)
-    watchtower_url: str = ""
-    watchtower_token: str = ""
     # 115 登录 cookie(可选):读分享走 android/proapi 通道,绕开 115 对匿名
     # webapi share_snap 的指纹封锁(405);留空则匿名 web 兜底
     pan115_cookie: str = ""
@@ -298,8 +293,6 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         tmdb_api_key=_clean(raw.get("tmdb_api_key")),
         proxy_url=_clean(raw.get("proxy_url")),
         github_token=_clean(raw.get("github_token")),
-        watchtower_url=_clean(raw.get("watchtower_url")),
-        watchtower_token=_clean(raw.get("watchtower_token")),
         pan115_cookie=_clean(raw.get("pan115_cookie")),
         channels=channels,
         pipeline_root_dir=_dir(raw, "pipeline_root_dir", "stow流水线"),
@@ -357,8 +350,6 @@ def ensure_admin(cfg_path: str | Path | None = None) -> None:
     raw.setdefault("tmdb_api_key", "")
     raw.setdefault("proxy_url", "")
     raw.setdefault("github_token", "")
-    raw.setdefault("watchtower_url", "")
-    raw.setdefault("watchtower_token", "")
     raw.setdefault("pan115_cookie", "")
     raw.setdefault("channels", [])
     raw.setdefault("monitor_dirs", "")

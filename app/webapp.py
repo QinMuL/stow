@@ -409,7 +409,6 @@ EDITABLE = {
     "tg_bot_token": "s", "tg_admin_ids": "ids",
     "tmdb_api_key": "s", "proxy_url": "s", "log_level": "s", "web_port": "i",
     "github_token": "s", "pan115_cookie": "s",
-    "watchtower_url": "s", "watchtower_token": "s",
     "pipeline_root_dir": "s", "monitor_dirs": "s",
     "tg_api_id": "i", "tg_api_hash": "s", "monitor_channels": "s",
     "openlist_base_url": "s", "openlist_token": "s", "openlist_path": "s",
@@ -1173,22 +1172,6 @@ def create_app(config_path: str | Path) -> FastAPI:
         from app.upgrade import check_version
 
         return check_version(load_config(config_path))
-
-    @app.post("/api/tools/upgrade")
-    def tools_upgrade(request: Request) -> dict:
-        """系统工具:一键升级 —— 触发 Watchtower 重建本容器(见 compose 的 stow-watchtower)。
-
-        Watchtower API 立即返回,重建在后台进行;前端轮询版本接口感知完成
-        (重建期间请求中断,恢复后比对版本号)。
-        """
-        _current_user(config_path, _auth_header(request))
-
-        from app.upgrade import upgrade
-
-        ok, msg = upgrade(load_config(config_path))
-        if not ok:
-            raise HTTPException(status_code=502, detail=msg)
-        return {"success": True, "message": msg}
 
     # ── 前端(Vite 构建产物:index.html + /assets/*) ────────
     from fastapi.staticfiles import StaticFiles

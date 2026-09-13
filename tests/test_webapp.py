@@ -420,22 +420,6 @@ def test_tools_version_api(tmp_path, monkeypatch):
     assert r.json()["has_update"] is True and r.json()["latest"] == "v9.9.9"
 
 
-def test_tools_upgrade_api(tmp_path, monkeypatch):
-    """触发 Watchtower:成功 200;连不上(升级函数返回 False)→ 502 带原因。"""
-    from app import upgrade as up_mod
-
-    client = _client(tmp_path)
-    assert client.post("/api/tools/upgrade").status_code == 401
-    token = _login(client)
-    monkeypatch.setattr(up_mod, "upgrade", lambda cfg: (True, "升级已触发"))
-    r = client.post("/api/tools/upgrade", headers=_h(token))
-    assert r.status_code == 200
-    assert r.json()["success"] is True and "升级已触发" in r.json()["message"]
-    monkeypatch.setattr(up_mod, "upgrade", lambda cfg: (False, "连不上 Watchtower"))
-    r = client.post("/api/tools/upgrade", headers=_h(token))
-    assert r.status_code == 502 and "Watchtower" in r.json()["detail"]
-
-
 def test_config_get_treats_placeholder_as_empty(tmp_path):
     """中文占位符不显示为「已保存」(与启动加载同口径)。"""
     import json as _json

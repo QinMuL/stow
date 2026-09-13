@@ -5,26 +5,6 @@ services:
     restart: unless-stopped
     init: true
     network_mode: host
-    # 只允许 Watchtower 更新本容器(--label-enable 的过滤标签)
-    labels:
-      com.centurylinklabs.watchtower.enable: "true"
-    environment:
-      # 一键升级令牌,与 stow-watchtower 共享;改这里要同步改下面 watchtower 的
-      WATCHTOWER_TOKEN: ${WATCHTOWER_TOKEN:-stow-upgrade}
     volumes:
       - ./data:/app/data
       - ./media:/app/media
-
-  # 一键升级的执行者(系统工具):常驻更新容器,HTTP API 触发式更新。
-  # --label-enable 只动打了标签的 stow,不碰宿主机其它容器;
-  # stow 自身不再挂 docker.sock,宿主机 docker 权限只在这一个容器。
-  stow-watchtower:
-    image: containrrr/watchtower:latest
-    container_name: stow-watchtower
-    restart: unless-stopped
-    network_mode: host
-    command: --label-enable --http-api-update
-    environment:
-      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:-stow-upgrade}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock

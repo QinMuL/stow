@@ -1,4 +1,4 @@
-"""系统工具:版本检测与一键升级(Watchtower 触发式,全 mock 不触网不碰 daemon)。"""
+"""系统工具:版本检测(GitHub API mock,不触网)。一键升级功能已移除。"""
 
 from __future__ import annotations
 
@@ -28,10 +28,9 @@ def test_version_report():
 
 # ── 版本检测(GitHub API mock) ─────────────────────────────
 class _Resp:
-    def __init__(self, status_code=200, data=None, text=""):
+    def __init__(self, status_code=200, data=None):
         self.status_code = status_code
         self._data = data
-        self.text = text
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -106,92 +105,6 @@ def test_check_version_no_token_no_auth_header(monkeypatch):
     assert "Authorization" not in cap["kw"]["headers"]
 
 
-# ── 一键升级(Watchtower HTTP API mock) ──────────────────────
-class _WtClient:
-    """mock httpx.Client:记录 post 的 url/headers,按预设返回或抛异常。"""
-
-    def __init__(self, resp=None, exc=None):
-        self._resp, self._exc = resp, exc
-        self.request = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def post(self, url, headers=None, **kw):
-        self.request = {"url": url, "headers": headers}
-        if self._exc:
-            raise self._exc
-        return self._resp
-
-
-def _fake_wt(monkeypatch, resp=None, exc=None):
-    client = _WtClient(resp, exc)
-    monkeypatch.setattr("httpx.Client", lambda **kw: client)
-    return client
-
-
-def test_upgrade_success_default_endpoint(monkeypatch):
-    """默认打 127.0.0.1:8080/v1/update,令牌取 compose 对齐的默认值。"""
-    client = _fake_wt(monkeypatch, resp=_Resp(status_code=204))
-    ok, msg = upgrade.upgrade(SimpleNamespace())
-    assert ok and "已触发" in msg
-    assert client.request["url"] == "http://127.0.0.1:8080/v1/update"
-    assert client.request["headers"]["Authorization"] == "Bearer stow-upgrade"
-
-
-def test_upgrade_success_custom_url_token(monkeypatch):
-    """配置了 watchtower_url/token 时用配置值(末尾斜杠要去掉)。"""
-    client = _fake_wt(monkeypatch, resp=_Resp(status_code=200))
-    cfg = SimpleNamespace(watchtower_url="http://192.168.1.202:8080/",
-                          watchtower_token="my-secret")
-    ok, msg = upgrade.upgrade(cfg)
-    assert ok
-    assert client.request["url"] == "http://192.168.1.202:8080/v1/update"
-    assert client.request["headers"]["Authorization"] == "Bearer my-secret"
-
-
-def test_upgrade_token_from_env(monkeypatch):
-    """配置为空时回退读环境变量 WATCHTOWER_TOKEN(compose 注入的那份)。"""
-    client = _fake_wt(monkeypatch, resp=_Resp(status_code=204))
-    monkeypatch.setenv("WATCHTOWER_TOKEN", "from-env")
-    ok, _ = upgrade.upgrade(SimpleNamespace())
-    assert ok
-    assert client.request["headers"]["Authorization"] == "Bearer from-env"
-
-
-def test_upgrade_rejected_bad_token(monkeypatch):
-    _fake_wt(monkeypatch, resp=_Resp(status_code=401))
-    ok, msg = upgrade.upgrade(SimpleNamespace())
-    assert not ok and "令牌不匹配" in msg
-
-
-def test_upgrade_connect_error(monkeypatch):
-    import httpx
-
-    _fake_wt(monkeypatch, exc=httpx.ConnectError("connection refused"))
-    ok, msg = upgrade.upgrade(SimpleNamespace())
-    assert not ok and "连不上 Watchtower" in msg
-
-
-def test_upgrade_http_error(monkeypatch):
-    _fake_wt(monkeypatch, resp=_Resp(status_code=500))
-    ok, msg = upgrade.upgrade(SimpleNamespace())
-    assert not ok and "HTTP 500" in msg
-
-
-def test_upgrade_unexpected_error(monkeypatch):
-    _fake_wt(monkeypatch, exc=OSError("boom"))
-    ok, msg = upgrade.upgrade(SimpleNamespace())
-    assert not ok and "触发失败" in msg
-
-
-# ── 旧方案的教训(防回归注释,不测实现细节) ──────────────────
-def test_upgrade_module_has_no_docker_sdk_usage():
-    """升级不再 import docker SDK —— 重建交给 Watchtower,stow 不碰宿主机 daemon。"""
-    import inspect
-
-    src = inspect.getsource(upgrade)
-    assert "import docker" not in src and "from_env" not in src
+def test_module_has_no_upgrade_function():
+    """升级功能已移除(2026-09-13 用户决定,不再实现一键升级)。"""
+    assert not hasattr(upgrade, "upgrade")
