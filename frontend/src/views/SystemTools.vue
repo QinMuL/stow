@@ -73,41 +73,49 @@ onUnmounted(() => window.clearTimeout(pollTimer))
 
     <div v-if="msg" class="msg" :class="msg.kind" style="display:block">{{ msg.text }}</div>
 
-    <div class="card">
-      <h3>版本升级</h3>
-      <div class="desc">检测 GitHub 发布的最新版本;一键拉取最新镜像并重建容器(无新版本也可强制刷新)</div>
+    <!-- 工具卡片:一个工具一张小卡片(网格排布,新工具逐个加入) -->
+    <div class="tool-grid">
+      <div class="tool-card">
+        <div class="tool-head">
+          <span class="tool-icon">⬆️</span>
+          <div class="tool-title">
+            <div class="tool-name">版本升级</div>
+            <div class="tool-desc">检测最新版本,一键拉取镜像并重建容器</div>
+          </div>
+        </div>
 
-      <div class="ver-rows">
-        <div class="ver-row">
-          <span class="ver-k">当前版本</span>
-          <span class="ver-v mono">{{ ver?.current || '—' }}</span>
+        <div class="ver-rows">
+          <div class="ver-row">
+            <span class="ver-k">当前版本</span>
+            <span class="ver-v mono">{{ ver?.current || '—' }}</span>
+          </div>
+          <div class="ver-row">
+            <span class="ver-k">最新版本</span>
+            <span class="ver-v mono">{{ ver?.latest || (checking ? '检测中…' : '—') }}</span>
+          </div>
+          <div class="ver-row">
+            <span class="ver-k">状态</span>
+            <span class="ver-v">
+              <template v-if="checking">检测中…</template>
+              <template v-else-if="ver?.error">{{ ver.error }}</template>
+              <template v-else-if="ver?.has_update">有新版本</template>
+              <template v-else>已是最新</template>
+            </span>
+          </div>
         </div>
-        <div class="ver-row">
-          <span class="ver-k">最新版本</span>
-          <span class="ver-v mono">{{ ver?.latest || (checking ? '检测中…' : '—') }}</span>
+
+        <div class="tool-foot">
+          <button class="btn sm ghost" :disabled="checking || upgrading" @click="check">
+            {{ checking ? '检测中…' : '重新检测' }}
+          </button>
+          <!-- 按钮常驻:版本号没变化时也能点,拉取 latest 镜像重建(强制刷新到最新镜像) -->
+          <button class="btn sm primary" :disabled="checking || upgrading" @click="upgrade">
+            {{ upgrading ? '升级中…' : (ver?.has_update ? `升级到 v${ver.latest}` : '拉取 latest 镜像') }}
+          </button>
         </div>
-        <div class="ver-row">
-          <span class="ver-k">状态</span>
-          <span class="ver-v">
-            <template v-if="checking">检测中…</template>
-            <template v-else-if="ver?.error">{{ ver.error }}</template>
-            <template v-else-if="ver?.has_update">有新版本</template>
-            <template v-else>已是最新</template>
-          </span>
-        </div>
+
+        <div class="tool-note">升级需要容器挂载 docker socket;期间服务短暂不可用</div>
       </div>
-
-      <div class="actions">
-        <button class="btn ghost" :disabled="checking || upgrading" @click="check">
-          {{ checking ? '检测中…' : '重新检测' }}
-        </button>
-        <!-- 按钮常驻:版本号没变化时也能点,拉取 latest 镜像重建(强制刷新到最新镜像) -->
-        <button class="btn primary" :disabled="checking || upgrading" @click="upgrade">
-          {{ upgrading ? '升级中…' : (ver?.has_update ? `一键升级到 v${ver.latest}` : '一键升级(拉取 latest 镜像)') }}
-        </button>
-      </div>
-
-      <div class="ver-note">升级需要容器挂载 docker socket(compose 已配);升级期间服务短暂不可用</div>
     </div>
   </div>
 </template>
