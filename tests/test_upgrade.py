@@ -109,8 +109,14 @@ def test_check_version_no_token_no_auth_header(monkeypatch):
 
 # ── 一键升级(docker SDK mock) ─────────────────────────────
 class _New:
+    def __init__(self):
+        self.renamed_to = None
+
     def start(self):
         pass
+
+    def rename(self, name):
+        self.renamed_to = name
 
 
 class _Old:
@@ -145,13 +151,15 @@ class _Containers:
     def __init__(self):
         self.old = _Old()
         self.created = []
+        self.new = None   # 最近一次 create 返回的实例
 
     def get(self, name):
         return self.old
 
     def create(self, image, **kw):
         self.created.append((image, kw))
-        return _New()
+        self.new = _New()
+        return self.new
 
 
 class _Api:
@@ -183,7 +191,9 @@ def test_upgrade_success(monkeypatch, tmp_path):
     assert old.stopped and old.removed
     img, kw = client.containers.created[0]
     assert img == upgrade.IMAGE
-    assert kw["name"] == "stow"
+    # 先以临时名建新容器(原名被旧容器占着会 409),停删旧容器后再 rename 回原名
+    assert kw["name"] == "stow-new"
+    assert client.containers.new.renamed_to == "stow"
     # docker SDK 的 create() 参数名是 environment(不是 env);挂载卷参数名是 volumes(转成 Binds)
     assert kw["environment"] == ["A=1"]
     assert kw["network_mode"] == "host"

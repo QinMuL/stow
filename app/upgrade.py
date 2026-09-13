@@ -144,7 +144,12 @@ def _recreate(client, container) -> None:
     docker SDK 的 containers.create(**kw) 会把 host 参数自动装进 HostConfig,
     所以这些参数**平铺直传**,不要手动 create_host_config 再塞 host_config= 进去
     (SDK 会把未消费的 kwargs 直接 reject,报 "run() got unexpected keyword arguments";
-    2026-09-13 实测翻车)。重建必然杀掉当前进程,调用方需先回响应、再延时执行。
+    2026-09-13 实测翻车)。挂载卷参数名是 volumes(内部转成 HostConfig.Binds)。
+
+    顺序关键:先以**临时名**建新容器 → 停/删旧容器 → 新容器 rename 回原名。
+    不能先 create 原名(旧容器还占着名字 → 409 Conflict,2026-09-13 又翻车),
+    也不能先删旧再建(万一 create 失败旧容器就没了)。重建必然杀掉当前进程,
+    调用方需先回响应、再延时执行。
     """
     attrs = container.attrs
     cfg = attrs.get("Config") or {}
@@ -153,9 +158,10 @@ def _recreate(client, container) -> None:
     restart = {"Name": rp.get("Name") or "no"}
     if restart["Name"] == "on-failure":
         restart["MaximumRetryCount"] = rp.get("MaximumRetryCount") or 0
+    new_name = f"{container.name}-new"
     new = client.containers.create(
         IMAGE,
-        name=container.name,
+        name=new_name,
         command=cfg.get("Cmd"),
         entrypoint=cfg.get("Entrypoint"),
         working_dir=cfg.get("WorkingDir"),
@@ -175,5 +181,6 @@ def _recreate(client, container) -> None:
     )
     container.stop()
     container.remove()
+    new.rename(container.name)
     new.start()
     logger.info("升级:容器 %s 已用新镜像重建", container.name)
