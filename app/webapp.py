@@ -6,6 +6,7 @@ Web 永远在线(哪怕 Bot 配置不全),用户在网页补齐配置后一键�
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import threading
@@ -34,6 +35,7 @@ from app.store import Store
 # 进程状态(bot 线程写入,web 读取);Bot 就绪后还会写入:
 #   "monitor" —— 频道监控实例(Web 登录端点用)
 #   "bot_loop" —— Bot 事件循环(Telethon 客户端绑定该循环,只能投递到它执行)
+logger = logging.getLogger(__name__)
 STATE = {"bot_running": False, "bot_error": ""}
 
 _STATIC = Path(__file__).parent.parent / "static" / "index.html"
@@ -352,6 +354,10 @@ class ChannelsUpdate(BaseModel):
 
 class PipelineRun(BaseModel):
     segment: str = ""   # fetch | process | upload
+
+
+class PipelineDismiss(BaseModel):
+    share_code: str = ""   # 待处理清单里「流水线违规/超时」条目的 share_code
 
 
 class MonitorPhone(BaseModel):
@@ -818,6 +824,22 @@ def create_app(config_path: str | Path) -> FastAPI:
             return {"success": True, "segment": seg, "message": fut.result(timeout=180)}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"执行失败:{str(exc)[:120]}") from exc
+
+    @app.post("/api/pipeline/attention/dismiss")
+    def attention_dismiss(body: PipelineDismiss, request: Request) -> dict:
+        """把「需要你处理」里的流水线违规/超时条目标记为已确认,不再提醒。"""
+        _current_user(config_path, _auth_header(request))
+        code = (body.share_code or "").strip()
+        if not code:
+            raise HTTPException(status_code=400, detail="缺少 share_code")
+        cfg = load_config(config_path)
+        store = Store(cfg.db_path)
+        try:
+            if not store.ack_pipeline_task(code):
+                raise HTTPException(status_code=404, detail="该任务不存在或已处理")
+            return {"success": True}
+        finally:
+            store.close()
 
     # ── CD2 目录浏览(上传目标目录的选择器数据源) ────────────
     @app.get("/api/cd2/dirs")

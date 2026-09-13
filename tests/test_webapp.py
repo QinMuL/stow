@@ -607,6 +607,41 @@ def test_pipeline_attention_lists_failures(tmp_path):
     assert items and items[0]["kind"] == "未识别" and "TMDB 未命中" in items[0]["reason"]
 
 
+def test_attention_dismiss_pipeline_violation(tmp_path):
+    """流水线违规/超时是终态无自动出口,必须能经 dismiss 手动确认(2026-09-13 加)。
+
+    回归锁:①违规任务出现在「需要你处理」清单且带 share_code;
+    ②POST dismiss 后状态置 acknowledged,清单不再出现;③重复 dismiss 返回 404。
+    """
+    import json as _json
+
+    from app.store import Store
+
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "media_root": str(tmp_path / "media")}),
+                 encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    s = Store(tmp_path / "stow.db")
+    s.save_pipeline_task({"share_code": "s123", "name": "某违规资源", "status": "violated"})
+    s.close()
+
+    items = client.get("/api/pipeline", headers=_h(token)).json()["attention"]
+    row = [a for a in items if a["kind"] == "流水线违规"]
+    assert len(row) == 1 and row[0]["share_code"] == "s123"
+
+    r = client.post("/api/pipeline/attention/dismiss",
+                    json={"share_code": "s123"}, headers=_h(token))
+    assert r.status_code == 200 and r.json()["success"] is True
+
+    items = client.get("/api/pipeline", headers=_h(token)).json()["attention"]
+    assert [a for a in items if a["kind"] == "流水线违规"] == []
+
+    r = client.post("/api/pipeline/attention/dismiss",
+                    json={"share_code": "s123"}, headers=_h(token))
+    assert r.status_code == 404
+
+
 def test_manual_count_uses_same_criterion_as_attention_list(tmp_path):
     """「待人工」的**计数**与**清单**必须同口径(2026-09-12 修)。
 

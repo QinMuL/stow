@@ -423,6 +423,10 @@ button.nav-item { width: 100%; background: none; border: 0; font: inherit; curso
 .ov-attn-text { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
 .ov-attn-reason { color: var(--sub); font-size: 12px; }
 .ov-link { margin-left: auto; font-size: 12px; color: var(--amber-strong); flex: none; }
+.ov-dismiss { flex: none; font-size: 12px; padding: 2px 10px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--sub); background: transparent; cursor: pointer; }
+.ov-dismiss:hover { color: var(--text); border-color: var(--sub); }
+.ov-dismiss:disabled { opacity: .5; cursor: default; }
 
 /* align-items:start + minmax(0,1fr):展开某段的在途明细时,
    另外两列**不再被拉成等高**、也不会因第一列内容变宽而被挤窄

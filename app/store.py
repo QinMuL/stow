@@ -171,6 +171,14 @@ class Store:
         ).fetchall()
         return {s: n for s, n in rows}
 
+    def ack_pipeline_task(self, share_code: str) -> bool:
+        """把终态任务(违规/超时)标记为已确认,不再进待处理清单;返回是否命中。"""
+        cur = self._conn.execute(
+            "UPDATE pipeline_tasks SET status='acknowledged' WHERE share_code=?"
+            " AND status IN ('timeout','violated')", (share_code,))
+        self._conn.commit()
+        return cur.rowcount > 0
+
     # ── 获取段状态(openlist 搬运) ──────────────────────────
     def save_fetch(self, src_path: str, src_size: int, *, dest_path: str = "",
                    task_id: str = "", status: str = "moving", attempts: int = 0,
@@ -397,12 +405,12 @@ class Store:
             out.append({"kind": "上传失败", "text": r[0], "reason": r[1] or "", "at": r[2]})
         # pipeline_tasks 没有 error 列(只有 attempts),原因是固定文案
         for r in self._conn.execute(
-                "SELECT name, status, attempts, created_at FROM pipeline_tasks"
+                "SELECT share_code, name, status, attempts, created_at FROM pipeline_tasks"
                 " WHERE status IN ('timeout','violated') ORDER BY created_at DESC LIMIT ?", (limit,)):
-            kind = "流水线超时" if r[1] == "timeout" else "流水线违规"
-            out.append({"kind": kind, "text": r[0],
-                        "reason": f"等待 {r[2]} 轮未通过" if r[1] == "timeout" else "审核未通过/违规",
-                        "at": r[3]})
+            kind = "流水线超时" if r[2] == "timeout" else "流水线违规"
+            out.append({"kind": kind, "text": r[1],
+                        "reason": f"等待 {r[3]} 轮未通过" if r[2] == "timeout" else "审核未通过/违规",
+                        "at": r[4], "share_code": r[0]})
         out.sort(key=lambda x: x["at"] or 0, reverse=True)
         return out[:limit]
 

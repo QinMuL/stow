@@ -119,6 +119,23 @@ async function run(seg) {
   }
 }
 
+// 待处理清单里只有「流水线违规/超时」是终态无自动出口,需要手动确认(其余靠文件/重试自动消)
+const DISMISSABLE = new Set(['流水线违规', '流水线超时'])
+const dismissing = ref('')
+async function dismiss(a) {
+  if (!a.share_code) return
+  dismissing.value = a.share_code
+  try {
+    await api('pipeline/attention/dismiss', { share_code: a.share_code }, 'POST')
+    pipe.value.attention = (pipe.value.attention || []).filter(x => x !== a)
+    err.value = ''
+  } catch (e) {
+    err.value = e.message
+  } finally {
+    dismissing.value = ''
+  }
+}
+
 // D 方案:手写迷你**曲线**图(无依赖)——两条序列合成一张图,共用一把 0 起刻度。
 // 坐标系固定(700×110),靠 preserveAspectRatio="none" 横向拉伸铺满容器宽度;
 // 曲线用 vector-effect="non-scaling-stroke" 保证线宽不被拉伸变形——代价是**不能画圆点**
@@ -242,6 +259,10 @@ onUnmounted(() => timer && window.clearInterval(timer))
         <router-link class="ov-link" :to="{ path: '/logs', query: { q: a.text.slice(0, 24) } }">
           去日志
         </router-link>
+        <button v-if="DISMISSABLE.has(a.kind)" class="ov-dismiss" :disabled="dismissing === a.share_code"
+          title="确认已处理,不再提醒" @click="dismiss(a)">
+          {{ dismissing === a.share_code ? '…' : '移除' }}
+        </button>
       </div>
     </div>
 
