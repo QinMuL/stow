@@ -1,0 +1,1 @@
+import{c as a,a as e,o as t}from"./index-Dbev5Z3Z.js";const p={__name:"SystemTools",setup(l){return(o,s)=>(t(),a("div",null,[...s[0]||(s[0]=[e("div",{class:"page-head"},[e("div",{class:"page-title"},"系统工具"),e("div",{class:"page-sub"},"运维与手动触发")],-1),e("div",{class:"empty"},"暂无工具,后续按需加入",-1)])]))}};export{p as default};

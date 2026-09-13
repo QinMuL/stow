@@ -19,6 +19,7 @@ const nav = [
   { to: '/push', ic: '✦', label: '全局配置',
     children: CONFIG_GROUPS.map((g) => ({ to: `/push/${g.key}`, label: g.label })) },
   { to: '/logs', ic: '≡', label: '系统日志' },
+  { to: '/tools', ic: '⚙', label: '系统工具' },
 ]
 
 // 展开状态:用户手动开合过才记,否则跟随当前路由(在配置页里就自动展开)
@@ -118,7 +119,7 @@ onMounted(() => { refresh(); checkVer() })
 
     <div class="main">
       <div class="topbar">
-        <!-- 手机端:项目标识在顶栏左侧(底部导航只剩三个菜单项)。
+        <!-- 手机端:项目标识在顶栏左侧(底部导航只留四个菜单项)。
              两份标记是有意的——CSS 没法把一个节点搬进另一个容器,按断点各显一份最稳 -->
         <div class="logo top-logo">
           <div class="logo-mark">S</div>
