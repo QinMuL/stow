@@ -62,20 +62,30 @@ def _fake_httpx(monkeypatch, resp):
 
 
 def test_check_version_ok(monkeypatch):
-    _fake_httpx(monkeypatch, _Resp(data={"tag_name": "v9.9.9"}))
+    _fake_httpx(monkeypatch, _Resp(data=[{"name": "v9.9.9"}, {"name": "v1.0.3"}]))
     r = upgrade.check_version(SimpleNamespace(proxy_url=""))
     assert r["has_update"] is True and r["latest"] == "v9.9.9"
     assert r["current"] == upgrade.__version__
 
 
 def test_check_version_up_to_date(monkeypatch):
-    _fake_httpx(monkeypatch, _Resp(data={"tag_name": f"v{upgrade.__version__}"}))
+    _fake_httpx(monkeypatch, _Resp(data=[{"name": f"v{upgrade.__version__}"}]))
     assert upgrade.check_version(SimpleNamespace(proxy_url=""))["has_update"] is False
+
+
+def test_check_version_picks_max_of_tags(monkeypatch):
+    """tags 乱序也取版本号最大者,且忽略非版本 tag。"""
+    _fake_httpx(monkeypatch, _Resp(data=[{"name": "v1.0.1"}, {"name": "demo"},
+                                          {"name": "v1.0.3"}, {"name": "v1.0.2"}]))
+    r = upgrade.check_version(SimpleNamespace(proxy_url=""))
+    assert r["latest"] == "v1.0.3"
+    assert r["has_update"] is False  # 最新 tag 恰是当前版本
 
 
 def test_check_version_404(monkeypatch):
     _fake_httpx(monkeypatch, _Resp(status_code=404))
-    assert "error" in upgrade.check_version(SimpleNamespace(proxy_url=""))
+    r = upgrade.check_version(SimpleNamespace(proxy_url=""))
+    assert "仓库不存在" in r["error"]
 
 
 def test_check_version_network_error(monkeypatch):

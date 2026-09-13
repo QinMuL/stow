@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 
 IMAGE = "ghcr.io/qinmul/stow:latest"
 REPO = "qinmul/stow"
-_GH_LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+# 版本口径看 git tags 而非 releases:我们发版只打 tag(如 v1.0.3),从未创建 GitHub
+# Release 页,releases/latest 恒 404;tags 接口按 tag 列表取版本号最大者,与镜像 tag 一致
+_GH_TAGS_URL = f"https://api.github.com/repos/{REPO}/tags?per_page=10"
 _CONTAINER = "stow"
 
 
@@ -41,7 +43,7 @@ def version_report(latest: str, current: str = __version__) -> dict:
 
 
 def check_version(cfg) -> dict:
-    """查 GitHub 最新 release。网络/限流/解析失败一律返回 error,绝不抛出。"""
+    """查 GitHub 最新 tag(列表里版本号最大者)。网络/限流/解析失败一律返回 error,绝不抛出。"""
     import httpx
 
     try:
@@ -49,11 +51,15 @@ def check_version(cfg) -> dict:
             proxy=cfg.proxy_url or None, timeout=8,
             headers={"Accept": "application/vnd.github+json", "User-Agent": "stow"},
         ) as c:
-            r = c.get(_GH_LATEST_URL)
+            r = c.get(_GH_TAGS_URL)
             if r.status_code == 404:
-                return {"error": "仓库无 release(仓库私有或尚未发布)"}
+                return {"error": "仓库不存在或无权访问(私有?)"}
             r.raise_for_status()
-            latest = (r.json() or {}).get("tag_name", "")
+            names = [(t or {}).get("name", "") for t in (r.json() or [])]
+            latest = max(
+                ((parse_ver(n), n) for n in names if parse_ver(n)),
+                default=((), ""),
+            )[1]
     except Exception as exc:  # noqa: BLE001 - 检测失败仅提示,不打断使用
         return {"error": f"检测失败:{type(exc).__name__} {str(exc)[:80]}"}
     return version_report(latest)
