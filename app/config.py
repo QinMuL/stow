@@ -63,7 +63,7 @@ class Config:
     tg_api_hash: str = ""
     monitor_channels: str = ""  # 逗号分隔:@username / t.me 链接 / chat_id
     # 下载/上传闭环的外部工具(v0.2):openlist 挂载其它网盘取资源,CD2 上传到 115
-    openlist_base_url: str = ""   # openlist 服务地址,如 http://127.0.0.1:5244
+    openlist_base_url: str = ""   # openlist 服务地址,如 http://127.0.0.1:5244(不写协议也自动补)
     openlist_token: str = ""      # openlist API token(敏感)
     openlist_path: str = ""       # openlist 侧的挂载路径(资源所在),如 /项目测试
     # 获取段(自动流):监控这些 openlist 目录,新资源自动**移动**到 openlist_dest_path
@@ -82,7 +82,7 @@ class Config:
     clean_enabled: bool = True            # 元数据清洗开关:仅在探到广告类脏数据时才清洗
     upload_interval_minutes: int = 5       # 上传段轮询间隔(分钟)
     upload_max_tasks: int = 2              # 上传并发上限(CD2 可同时跑多个;用户定 2)
-    cd2_address: str = ""         # CD2 gRPC 地址,如 127.0.0.1:19798
+    cd2_address: str = ""         # CD2 gRPC 地址,如 127.0.0.1:19798(带 http:// 也会自动剥)
     cd2_token: str = ""           # CD2 API token(敏感)
     cd2_username: str = ""        # 无令牌时的兜底登录账号
     cd2_password: str = ""        # 无令牌时的兜底登录密码(敏感)
@@ -222,6 +222,33 @@ def _clean(value: object) -> str:
     return s
 
 
+_URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+
+def _http_url(value: str) -> str:
+    """HTTP 类地址归一化:无 scheme 时补 http://(httpx 必需),剥末尾斜杠。
+
+    覆盖 proxy_url / openlist_base_url:用户填 127.0.0.1:5244 也能用
+    (2026-09-14 兼容;已有 socks5:// 等 scheme 的保持原样)。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if not _URL_SCHEME_RE.match(s):
+        s = "http://" + s
+    return s.rstrip("/")
+
+
+def _grpc_address(value: str) -> str:
+    """gRPC 地址归一化:剥 scheme 前缀与末尾斜杠(grpc 只认 host:port)。
+
+    覆盖 cd2_address:用户填 http://192.168.1.202:19798 也能用
+    (2026-09-14 兼容;此前整串被 gRPC 当域名解析报 Misformatted domain name)。
+    """
+    s = _URL_SCHEME_RE.sub("", str(value or "").strip())
+    return s.rstrip("/")
+
+
 def _dir(raw: dict, key: str, default: str) -> str:
     """目录配置:去空白;空值回退默认。"""
     return str(raw.get(key, default)).strip() or default
@@ -291,7 +318,7 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         tg_bot_token=_clean(raw.get("tg_bot_token")),
         tg_admin_ids=[int(x) for x in raw.get("tg_admin_ids", []) if str(x).strip().lstrip("-").isdigit()],
         tmdb_api_key=_clean(raw.get("tmdb_api_key")),
-        proxy_url=_clean(raw.get("proxy_url")),
+        proxy_url=_http_url(_clean(raw.get("proxy_url"))),
         github_token=_clean(raw.get("github_token")),
         pan115_cookie=_clean(raw.get("pan115_cookie")),
         channels=channels,
@@ -300,7 +327,7 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         tg_api_id=_int(raw.get("tg_api_id")),
         tg_api_hash=_clean(raw.get("tg_api_hash")),
         monitor_channels=str(raw.get("monitor_channels", "")).strip(),
-        openlist_base_url=_clean(raw.get("openlist_base_url")),
+        openlist_base_url=_http_url(_clean(raw.get("openlist_base_url"))),
         openlist_token=_clean(raw.get("openlist_token")),
         openlist_path=str(raw.get("openlist_path", "")).strip(),
         openlist_monitor_dirs=str(raw.get("openlist_monitor_dirs", "")).strip(),
@@ -313,7 +340,7 @@ def load_config(path: str | Path | None = None, strict: bool = False) -> Config:
         clean_enabled=str(raw.get("clean_enabled", True)).strip().lower() not in ("0", "false", "off", "关"),
         upload_interval_minutes=max(1, int(raw.get("upload_interval_minutes", 5) or 5)),
         upload_max_tasks=max(1, int(raw.get("upload_max_tasks", 2) or 2)),
-        cd2_address=_clean(raw.get("cd2_address")),
+        cd2_address=_grpc_address(_clean(raw.get("cd2_address"))),
         cd2_token=_clean(raw.get("cd2_token")),
         cd2_username=_clean(raw.get("cd2_username")),
         cd2_password=_clean(raw.get("cd2_password")),
