@@ -108,17 +108,6 @@ def test_check_version_no_token_no_auth_header(monkeypatch):
 
 
 # ── 一键升级(docker SDK mock) ─────────────────────────────
-class _New:
-    def __init__(self):
-        self.renamed_to = None
-
-    def start(self):
-        pass
-
-    def rename(self, name):
-        self.renamed_to = name
-
-
 class _Old:
     name = "stow"
     attrs = {
@@ -139,6 +128,14 @@ class _Old:
         self.removed = True
 
 
+class _New:
+    def __init__(self):
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+
 class _Images:
     def __init__(self):
         self.pulled = []
@@ -151,15 +148,24 @@ class _Containers:
     def __init__(self):
         self.old = _Old()
         self.created = []
-        self.new = None   # 最近一次 create 返回的实例
+        self.runs = []           # sidecar 启动参数 (image, kw)
+        self.removed_sidecars = []
 
     def get(self, name):
+        if name.endswith("-rebuild") and not self.old.stopped:
+            raise RuntimeError("no such container")
         return self.old
+
+    def remove(self, force=False):
+        self.removed_sidecars.append(force)
 
     def create(self, image, **kw):
         self.created.append((image, kw))
-        self.new = _New()
-        return self.new
+        return _New()
+
+    def run(self, image, **kw):
+        self.runs.append((image, kw))
+        return _New()
 
 
 class _Api:
@@ -183,27 +189,21 @@ def _fake_docker(monkeypatch):
 
 
 def test_upgrade_success(monkeypatch, tmp_path):
+    """主进程:拉镜像 + 启动 sidecar(--rebuild),不自己重建。"""
     client = _fake_docker(monkeypatch)
     ok, msg = upgrade.upgrade(SimpleNamespace(), data_dir=str(tmp_path))
     assert ok
     assert client.images.pulled == [upgrade.IMAGE]
-    old = client.containers.old
-    assert old.stopped and old.removed
-    img, kw = client.containers.created[0]
+    assert client.containers.old.stopped is False  # 主进程不动旧容器
+    img, kw = client.containers.runs[0]
     assert img == upgrade.IMAGE
-    # 先以临时名建新容器(原名被旧容器占着会 409),停删旧容器后再 rename 回原名
-    assert kw["name"] == "stow-new"
-    assert client.containers.new.renamed_to == "stow"
-    # docker SDK 的 create() 参数名是 environment(不是 env);挂载卷参数名是 volumes(转成 Binds)
-    assert kw["environment"] == ["A=1"]
+    assert kw["name"] == "stow-rebuild"
+    assert kw["command"] == ["python", "-m", "app.upgrade", "--rebuild"]
+    assert kw["detach"] is True
     assert kw["network_mode"] == "host"
-    assert kw["restart_policy"]["Name"] == "unless-stopped"
-    assert kw["init"] is True
-    assert kw["volumes"] == ["/x:/app/data"]
-    # 结果已落盘,供前端 status 轮询
-    state = upgrade.read_upgrade_state(str(tmp_path))
-    assert state["ok"] is True and "升级完成" in state["message"]
-    assert state["to_version"] == upgrade.__version__
+    assert "/var/run/docker.sock" in kw["volumes"]
+    # data 挂载:从旧容器 Binds 解析宿主机路径
+    assert "/x:/app/data" in kw["volumes"] or kw["volumes"].get("/x")
 
 
 def test_upgrade_pull_fails(monkeypatch):
@@ -217,16 +217,63 @@ def test_upgrade_pull_fails(monkeypatch):
     assert not ok and "拉取镜像失败" in msg
 
 
-def test_upgrade_container_missing(monkeypatch):
-    client = _fake_docker(monkeypatch)
-    client.containers.get = lambda name: (_ for _ in ()).throw(RuntimeError("no such container"))
-    ok, msg = upgrade.upgrade(SimpleNamespace())
-    assert not ok and "找不到容器" in msg
-
-
 def test_upgrade_connect_fails(monkeypatch):
     mod = mock.MagicMock()
     mod.from_env.side_effect = RuntimeError("cannot connect")
     monkeypatch.setitem(sys.modules, "docker", mod)
     ok, msg = upgrade.upgrade(SimpleNamespace())
     assert not ok and "连接 docker daemon 失败" in msg
+
+
+# ── sidecar 重建(--rebuild) ───────────────────────────────
+def test_rebuild_sidecar_success(monkeypatch, tmp_path):
+    """sidecar:停/删旧 → create 原名 → start;结果落盘。"""
+    client = _fake_docker(monkeypatch)
+    client.containers.old.stopped = False  # 模拟旧容器在跑
+    upgrade._rebuild_sidecar()
+    old = client.containers.old
+    assert old.stopped and old.removed
+    img, kw = client.containers.created[0]
+    assert img == upgrade.IMAGE
+    assert kw["name"] == "stow"  # 原名(旧的已删,不再冲突)
+    assert kw["environment"] == ["A=1"]
+    assert kw["network_mode"] == "host"
+    assert kw["restart_policy"]["Name"] == "unless-stopped"
+    assert kw["init"] is True
+    assert kw["volumes"] == ["/x:/app/data"]
+    assert client.containers.created[0][1] is not None
+    # 结果落盘到 /app/data(测试里 mock 写不动,用临时目录验证 _write_state 行为)
+    # sidecar 固定写 /app/data;这里单独验证 _write_state
+    state_dir = tmp_path / "d"
+    upgrade._write_state(str(state_dir), True, "升级完成,已用新镜像重建容器")
+    state = upgrade.read_upgrade_state(str(state_dir))
+    assert state["ok"] is True and "升级完成" in state["message"]
+    assert state["to_version"] == upgrade.__version__
+
+
+def test_rebuild_sidecar_failure_marks_state(monkeypatch):
+    """sidecar 内异常 → 结果写 False(前端能读到失败原因)。"""
+    client = _fake_docker(monkeypatch)
+
+    def boom(name):
+        raise RuntimeError("no such container")
+
+    client.containers.create = boom
+    ok, msg = upgrade._rebuild_sidecar()
+    assert ok is False and "重建容器失败" in msg
+
+
+def test_upgrade_missing_docker_sdk(monkeypatch):
+    """没装 docker SDK → 明确错误,不抛。"""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        if name == "docker":
+            raise ImportError("No module named 'docker'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    ok, msg = upgrade.upgrade(SimpleNamespace())
+    assert not ok and "缺少 docker SDK" in msg

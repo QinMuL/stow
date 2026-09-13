@@ -62,17 +62,15 @@ def check_version(cfg) -> dict:
 
 
 def upgrade(cfg, data_dir: str = "") -> tuple[bool, str]:
-    """执行升级:拉最新镜像 → 重建本容器(复制原容器配置)。返回 (成功, 消息)。
+    """一键升级:拉最新镜像 → 启动独立 sidecar 容器执行重建。返回 (成功, 消息)。
 
-    data_dir 非空时结果落盘到 {data_dir}/{_STATE_FILE}:重建会杀掉本进程,
-    只有落盘的状态能在新进程里被读回,前端据此轮询升级成败(2026-09-13 加)。
+    重建不能在当前容器里做:`container.stop()` 会把 stow(包括正在执行升级的
+    进程)一起杀掉,后面的 remove/rename/start 永远执行不到(2026-09-13 实测
+    留下 Exited 的 stow + Created 的 stow-new 脏状态)。所以主进程只负责
+    pull 镜像 + 拉起 sidecar(挂 docker.sock + data,运行新镜像里的
+    `python -m app.upgrade --rebuild`),重建在 sidecar 里完成,不受旧容器
+    生死影响。data_dir 非空时结果落盘,前端轮询升级成败。
     """
-    ok, msg = _upgrade_impl(cfg)
-    _write_state(data_dir, ok, msg)
-    return ok, msg
-
-
-def _upgrade_impl(cfg) -> tuple[bool, str]:
     try:
         import docker
     except ImportError:
@@ -87,14 +85,95 @@ def _upgrade_impl(cfg) -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001
         return False, f"拉取镜像失败:{str(exc)[:120]}"
     try:
-        container = client.containers.get(_CONTAINER)
+        _spawn_rebuilder(client, data_dir)
     except Exception as exc:  # noqa: BLE001
-        return False, f"找不到容器 {_CONTAINER}({str(exc)[:80]})"
+        return False, f"启动重建容器失败:{str(exc)[:120]}"
+    return True, "升级已启动:镜像已拉取,正在后台重建容器"
+
+
+def _spawn_rebuilder(client, data_dir: str = "") -> None:
+    """启动 sidecar 容器执行重建。sidecar 挂 docker.sock + data,跑新镜像的 --rebuild。"""
+    # 找宿主机上 data 目录的挂载路径(从当前容器 Binds 里解析 /app/data)
+    host_data = "./data"
     try:
-        _recreate(client, container)
-    except Exception as exc:  # noqa: BLE001
-        return False, f"重建容器失败:{str(exc)[:120]}"
-    return True, "升级完成,已用新镜像重建容器"
+        me = client.containers.get(_CONTAINER)
+        binds = (me.attrs.get("HostConfig") or {}).get("Binds") or []
+        for b in binds:
+            parts = b.split(":")
+            if len(parts) >= 2 and (parts[-1].rstrip("/") == "/app/data"):
+                host_data = parts[0]
+                break
+    except Exception:  # noqa: BLE001 - 解析不到就默认 ./data
+        pass
+    sidecar = f"{_CONTAINER}-rebuild"
+    # 清掉可能残留的旧 sidecar(上次失败留下的)
+    try:
+        old = client.containers.get(sidecar)
+        old.remove(force=True)
+    except Exception:  # noqa: BLE001
+        pass
+    client.containers.run(
+        IMAGE,
+        name=sidecar,
+        command=["python", "-m", "app.upgrade", "--rebuild"],
+        detach=True,
+        network_mode="host",
+        volumes={
+            "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"},
+            host_data: {"bind": "/app/data", "mode": "rw"},
+        },
+        restart_policy={"Name": "no"},
+    )
+
+
+def _rebuild_sidecar() -> None:
+    """sidecar 入口:停/删旧 stow → 用新镜像重建(复制原配置)→ 启动 → 落状态。
+
+    跑在新镜像的 sidecar 容器里;对旧 stow 的 stop/remove 不影响自己。
+    """
+    ok = False
+    msg = ""
+    try:
+        import docker
+
+        client = docker.from_env()
+        container = client.containers.get(_CONTAINER)
+        attrs = container.attrs
+        cfg = attrs.get("Config") or {}
+        hc = attrs.get("HostConfig") or {}
+        rp = hc.get("RestartPolicy") or {}
+        restart = {"Name": rp.get("Name") or "no"}
+        if restart["Name"] == "on-failure":
+            restart["MaximumRetryCount"] = rp.get("MaximumRetryCount") or 0
+        container.stop()
+        container.remove()
+        new = client.containers.create(
+            IMAGE,
+            name=_CONTAINER,
+            command=cfg.get("Cmd"),
+            entrypoint=cfg.get("Entrypoint"),
+            working_dir=cfg.get("WorkingDir"),
+            environment=cfg.get("Env"),
+            labels=cfg.get("Labels"),
+            # host 侧配置:create() 内部自动组装 HostConfig。
+            # 挂载卷参数名是 **volumes**(内部转成 HostConfig.Binds);
+            # 参数只认 RUN_HOST_CONFIG_KWARGS 里的键,未知键直接 reject。
+            volumes=hc.get("Binds"),
+            network_mode=hc.get("NetworkMode") or "default",
+            restart_policy=restart,
+            init=hc.get("Init"),
+            privileged=hc.get("Privileged"),
+            extra_hosts=hc.get("ExtraHosts"),
+            dns=hc.get("Dns"),
+        )
+        new.start()
+        ok = True
+        msg = "升级完成,已用新镜像重建容器"
+    except Exception as exc:  # noqa: BLE001 - sidecar 内捕获,结果写状态文件
+        ok, msg = False, f"重建容器失败:{str(exc)[:120]}"
+    _write_state("/app/data", ok, msg)
+    logger.info("sidecar 重建结果:%s %s", ok, msg)
+    return ok, msg
 
 
 def _write_state(data_dir: str, ok: bool, msg: str) -> None:
@@ -136,51 +215,10 @@ def read_upgrade_state(data_dir: str = "") -> dict:
         return {}
 
 
-def _recreate(client, container) -> None:
-    """按原容器配置重建(镜像换成已拉取的新版本)。
+def _rebuild_main() -> None:
+    """`python -m app.upgrade --rebuild` 入口:sidecar 里执行重建。"""
+    _rebuild_sidecar()
 
-    从 inspect attrs 复制关键字段:environment/cmd/entrypoint/working_dir/labels +
-    host 侧(binds/network_mode/restart_policy/init/privileged/extra_hosts/dns)。
-    docker SDK 的 containers.create(**kw) 会把 host 参数自动装进 HostConfig,
-    所以这些参数**平铺直传**,不要手动 create_host_config 再塞 host_config= 进去
-    (SDK 会把未消费的 kwargs 直接 reject,报 "run() got unexpected keyword arguments";
-    2026-09-13 实测翻车)。挂载卷参数名是 volumes(内部转成 HostConfig.Binds)。
 
-    顺序关键:先以**临时名**建新容器 → 停/删旧容器 → 新容器 rename 回原名。
-    不能先 create 原名(旧容器还占着名字 → 409 Conflict,2026-09-13 又翻车),
-    也不能先删旧再建(万一 create 失败旧容器就没了)。重建必然杀掉当前进程,
-    调用方需先回响应、再延时执行。
-    """
-    attrs = container.attrs
-    cfg = attrs.get("Config") or {}
-    hc = attrs.get("HostConfig") or {}
-    rp = hc.get("RestartPolicy") or {}
-    restart = {"Name": rp.get("Name") or "no"}
-    if restart["Name"] == "on-failure":
-        restart["MaximumRetryCount"] = rp.get("MaximumRetryCount") or 0
-    new_name = f"{container.name}-new"
-    new = client.containers.create(
-        IMAGE,
-        name=new_name,
-        command=cfg.get("Cmd"),
-        entrypoint=cfg.get("Entrypoint"),
-        working_dir=cfg.get("WorkingDir"),
-        environment=cfg.get("Env"),
-        labels=cfg.get("Labels"),
-        # host 侧配置:create() 内部自动组装 HostConfig。
-        # 注意挂载卷的参数名是 **volumes**(内部转成 HostConfig.Binds),
-        # 不是 binds —— docker SDK 7.x 的 create() 只认 RUN_HOST_CONFIG_KWARGS
-        # 里的键,未知键直接 reject(2026-09-13 两次实测翻车)。
-        volumes=hc.get("Binds"),
-        network_mode=hc.get("NetworkMode") or "default",
-        restart_policy=restart,
-        init=hc.get("Init"),
-        privileged=hc.get("Privileged"),
-        extra_hosts=hc.get("ExtraHosts"),
-        dns=hc.get("Dns"),
-    )
-    container.stop()
-    container.remove()
-    new.rename(container.name)
-    new.start()
-    logger.info("升级:容器 %s 已用新镜像重建", container.name)
+if __name__ == "__main__" and "--rebuild" in __import__("sys").argv:
+    _rebuild_main()
