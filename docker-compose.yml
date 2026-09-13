@@ -8,3 +8,5 @@ services:
     volumes:
       - ./data:/app/data
       - ./media:/app/media
+      # 一键升级(系统工具):容器内经 socket 调宿主机 docker daemon 拉镜像并重建自身
+      - /var/run/docker.sock:/var/run/docker.sock

@@ -14,3 +14,5 @@ pycryptodome>=3.20,<4
 # 上传段:CD2 gRPC 客户端(pb2 由 grpcio-tools 生成,protobuf 运行时需 >= 生成器版本)
 grpcio>=1.66,<2
 protobuf>=6.33,<7
+# 系统工具:一键升级走 docker SDK(unix socket 直连宿主机 daemon,需 compose 挂载 socket)
+docker>=7,<8

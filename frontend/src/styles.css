@@ -241,6 +241,13 @@ button.nav-item { width: 100%; background: none; border: 0; font: inherit; curso
 .missing { margin-top: 12px; display: flex; flex-direction: column; gap: 4px; }
 .missing li { list-style: none; color: var(--amber); font-size: 12.5px; font-family: var(--mono); }
 
+/* ── 系统工具:版本升级 ── */
+.ver-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; font-size: 13.5px; }
+.ver-row { display: flex; gap: 10px; align-items: baseline; }
+.ver-k { flex: none; width: 72px; color: var(--sub); }
+.ver-v { color: var(--text); }
+.ver-note { margin-top: 14px; color: var(--faint); font-size: 12.5px; }
+
 /* ── 登录页 ── */
 .bare { min-height: 100vh; display: grid; place-items: center; background:
   radial-gradient(1000px 500px at 70% -10%, rgba(232,163,61,.09), transparent), var(--bg); }

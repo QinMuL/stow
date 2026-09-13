@@ -342,6 +342,37 @@ def test_store_ed2k_file_info(tmp_path):
     s.close()
 
 
+# ── 系统工具:版本检测 / 一键升级 ────────────────────────────
+def test_tools_version_api(tmp_path, monkeypatch):
+    """未登录 401;登录后返回 check_version 结果(检测逻辑在 test_upgrade.py)。"""
+    from app import upgrade as up_mod
+
+    client = _client(tmp_path)
+    assert client.get("/api/tools/version").status_code == 401
+    token = _login(client)
+    monkeypatch.setattr(
+        up_mod, "check_version",
+        lambda cfg: {"current": "1.0.3", "latest": "v9.9.9", "has_update": True},
+    )
+    r = client.get("/api/tools/version", headers=_h(token))
+    assert r.status_code == 200
+    assert r.json()["has_update"] is True and r.json()["latest"] == "v9.9.9"
+
+
+def test_tools_upgrade_api(tmp_path, monkeypatch):
+    """立即返回「已启动」,真正升级在线程里延时执行(重建会杀掉进程)。"""
+    from app import upgrade as up_mod
+
+    client = _client(tmp_path)
+    assert client.post("/api/tools/upgrade").status_code == 401
+    token = _login(client)
+    monkeypatch.setattr(up_mod, "upgrade", lambda cfg: (True, "升级完成"))
+    r = client.post("/api/tools/upgrade", headers=_h(token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True and "已启动" in body["message"]
+
+
 def test_config_get_treats_placeholder_as_empty(tmp_path):
     """中文占位符不显示为「已保存」(与启动加载同口径)。"""
     import json as _json

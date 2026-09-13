@@ -1068,6 +1068,35 @@ def create_app(config_path: str | Path) -> FastAPI:
         threading.Thread(target=_exit_later, daemon=True).start()
         return {"success": True, "message": "服务将在 1 秒后重启(容器自动拉起)"}
 
+    @app.get("/api/tools/version")
+    def tools_version(request: Request) -> dict:
+        """系统工具:检测本项目是否有新版本(GitHub Releases latest vs __version__)。"""
+        _current_user(config_path, _auth_header(request))
+
+        from app.upgrade import check_version
+
+        return check_version(load_config(config_path))
+
+    @app.post("/api/tools/upgrade")
+    def tools_upgrade(request: Request) -> dict:
+        """系统工具:一键升级 —— 拉最新镜像并重建本容器(需要 docker socket)。"""
+        _current_user(config_path, _auth_header(request))
+
+        from app.upgrade import upgrade
+
+        def _run_later() -> None:
+            import time
+
+            time.sleep(2)  # 先让响应回给前端,再重建(重建会杀掉本进程)
+            try:
+                ok, msg = upgrade(load_config(config_path))
+                logger.info("一键升级结果:%s %s", ok, msg)
+            except Exception as exc:  # noqa: BLE001 - 升级失败只留日志
+                logger.error("一键升级异常:%s", exc, exc_info=exc)
+
+        threading.Thread(target=_run_later, daemon=True).start()
+        return {"success": True, "message": "升级已启动:拉取镜像并重建容器,页面会短暂断线"}
+
     # ── 前端(Vite 构建产物:index.html + /assets/*) ────────
     from fastapi.staticfiles import StaticFiles
 
