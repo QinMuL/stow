@@ -111,28 +111,32 @@ button.nav-item { width: 100%; background: none; border: 0; font: inherit; curso
    ⚠️ Chromium 里**只要设了标准属性** `scrollbar-width/scrollbar-color`,下面 `::-webkit-scrollbar`
    这套就会被**整个忽略**(两者只能选一个)——所以只用 webkit 版本:Chromium/Edge 效果到位,
    Firefox 会退回它自己的默认滚动条。要两全就得二选一,别两边都写。
-   `scrollbar-gutter: stable` 只给「内容会长高/变矮」的两处(主内容区、在途明细):
-   滚动条出现时不再把里面的文字整体推一下。 */
-.content, .ov-items { scrollbar-gutter: stable; }
+   `scrollbar-gutter: stable` 只给「内容会长高/变矮」的三处(主内容区、在途明细、
+   推送详情文件清单):滚动条出现时不再把里面的文字整体推一下。 */
+.content, .ov-items, .fd-files { scrollbar-gutter: stable; }
 .content::-webkit-scrollbar,
 .ov-items::-webkit-scrollbar,
 .log-list::-webkit-scrollbar,
-.modal-card::-webkit-scrollbar { width: 9px; height: 9px; }
+.modal-card::-webkit-scrollbar,
+.fd-files::-webkit-scrollbar { width: 9px; height: 9px; }
 .content::-webkit-scrollbar-track,
 .ov-items::-webkit-scrollbar-track,
 .log-list::-webkit-scrollbar-track,
-.modal-card::-webkit-scrollbar-track { background: transparent; }
+.modal-card::-webkit-scrollbar-track,
+.fd-files::-webkit-scrollbar-track { background: transparent; }
 .content::-webkit-scrollbar-thumb,
 .ov-items::-webkit-scrollbar-thumb,
 .log-list::-webkit-scrollbar-thumb,
-.modal-card::-webkit-scrollbar-thumb {
+.modal-card::-webkit-scrollbar-thumb,
+.fd-files::-webkit-scrollbar-thumb {
   background: #4a3f34; border-radius: 5px;
   border: 2px solid transparent; background-clip: content-box;
 }
 .content::-webkit-scrollbar-thumb:hover,
 .ov-items::-webkit-scrollbar-thumb:hover,
 .log-list::-webkit-scrollbar-thumb:hover,
-.modal-card::-webkit-scrollbar-thumb:hover { background: #7a6a58; background-clip: content-box; }
+.modal-card::-webkit-scrollbar-thumb:hover,
+.fd-files::-webkit-scrollbar-thumb:hover { background: #7a6a58; background-clip: content-box; }
 .page { max-width: 980px; margin: 0 auto; }
 .page-head { margin-bottom: 20px; }
 .page-title { font-size: 21px; font-weight: 700; }
