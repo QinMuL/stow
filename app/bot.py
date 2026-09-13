@@ -543,7 +543,7 @@ class StowBot:
 
         # **只要有一个成功就标记已推送**:否则下次重推会骚扰已经收到的那几个频道
         title = (details["title"] if details else media.title) or link.dedup_display
-        self.store.mark_pushed(link.key, title)
+        self.store.mark_pushed(link.key, title, link.provider)
         n = media.file_count or len(files)
         head = "✅ 已推送" + (f"({len(sent)}/{len(targets)} 个频道)" if len(targets) > 1 else "")
         text = f"{head} · {n} 文件 · 🎬 {title}" + (

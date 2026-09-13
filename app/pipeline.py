@@ -382,7 +382,7 @@ class SavePipeline:
         if not sent:
             task.attempts += 1   # 一条都没送出去:下轮重试(分享码不变,不会重复建)
             return
-        bot.store.mark_pushed(task.share_code, title)
+        bot.store.mark_pushed(task.share_code, title, "115")
         task.status = "done"
         logger.info("流水线推送成功:%s(%s)", task.name, task.share_code)
         await self._move_to(cfg.pipeline_dirs()[1], task)

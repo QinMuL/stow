@@ -242,6 +242,46 @@ def test_store_recent_and_stats(tmp_path):
     s.close()
 
 
+def test_store_recent_provider_and_legacy_fallback(tmp_path):
+    """最近推送带来源标签:新数据存 provider,老数据(无 provider)按去重 key 兜底(2026-09-13 加)。
+
+    兜底规则:ed2k 的 key 是 32 位 hex 文件 hash → ed2k;其余(115 分享码)算 115。
+    """
+    from app.store import Store
+
+    s = Store(tmp_path / "t.db")
+    s.mark_pushed("sw12345678", "某剧", "115")
+    s.mark_pushed("0123456789abcdef0123456789abcdef", "某片", "ed2k")
+    # 老数据:不传 provider(模拟旧版本写入),靠 key 兜底
+    s.mark_pushed("another115code", "老115")
+    s.mark_pushed("ABCDEF0123456789ABCDEF0123456789", "老ed2k")
+    rec = {r["code"]: r["provider"] for r in s.recent(10)}
+    assert rec["sw12345678"] == "115"
+    assert rec["0123456789abcdef0123456789abcdef"] == "ed2k"
+    assert rec["another115code"] == "115"                       # 非 32 位 hex → 115
+    assert rec["ABCDEF0123456789ABCDEF0123456789"] == "ed2k"    # 32 位 hex → ed2k
+    s.close()
+
+
+def test_store_migrates_pushed_provider_column(tmp_path):
+    """老库(建表时无 provider 列)打开后自动补列,不报错(2026-09-13 加)。"""
+    import sqlite3
+
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE pushed (code TEXT PRIMARY KEY, pushed_at REAL, title TEXT)")
+    conn.execute("INSERT INTO pushed(code, pushed_at, title) VALUES('old', 0, 'x')")
+    conn.commit()
+    conn.close()
+
+    from app.store import Store
+
+    s = Store(db)
+    rec = s.recent(1)
+    assert rec[0]["code"] == "old" and rec[0]["provider"] == "115"  # 老行 provider 兜底为 115
+    s.close()
+
+
 def test_config_get_treats_placeholder_as_empty(tmp_path):
     """中文占位符不显示为「已保存」(与启动加载同口径)。"""
     import json as _json

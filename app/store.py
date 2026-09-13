@@ -13,9 +13,13 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from pathlib import Path
+
+# ed2k 去重 key = 32 位十六进制文件 hash;老数据没有 provider 时靠它兜底判别(115 分享码不会恰好是这个形态)
+_ED2K_HASH_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 
 _TASK_FIELDS = (
     "share_code", "receive_code", "fid", "name", "uid", "status", "created_at", "attempts",
@@ -28,8 +32,12 @@ class Store:
         self._conn = sqlite3.connect(db_path)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS pushed ("
-            " code TEXT PRIMARY KEY, pushed_at REAL, title TEXT)"
+            " code TEXT PRIMARY KEY, pushed_at REAL, title TEXT, provider TEXT DEFAULT '')"
         )
+        # 迁移:老表(建表时还没有 provider 列)补一列;列已存在则跳过。
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(pushed)")}
+        if "provider" not in cols:
+            self._conn.execute("ALTER TABLE pushed ADD COLUMN provider TEXT DEFAULT ''")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS monitor_state ("
             " ref TEXT PRIMARY KEY, chat_id TEXT, title TEXT,"
@@ -63,21 +71,28 @@ class Store:
         ).fetchone()
         return row is not None
 
-    def mark_pushed(self, code: str, title: str = "") -> None:
+    def mark_pushed(self, code: str, title: str = "", provider: str = "") -> None:
         self._conn.execute(
-            "INSERT INTO pushed(code, pushed_at, title) VALUES(?,?,?) "
-            "ON CONFLICT(code) DO UPDATE SET pushed_at=excluded.pushed_at, title=excluded.title",
-            (code, time.time(), title),
+            "INSERT INTO pushed(code, pushed_at, title, provider) VALUES(?,?,?,?) "
+            "ON CONFLICT(code) DO UPDATE SET pushed_at=excluded.pushed_at, title=excluded.title,"
+            " provider=excluded.provider",
+            (code, time.time(), title, provider),
         )
         self._conn.commit()
 
     def recent(self, limit: int = 20) -> list[dict]:
         """最近推送(新→旧)。同时间戳按写入顺序决胜(Windows 时钟精度粗,连推会同戳)。"""
         rows = self._conn.execute(
-            "SELECT code, title, pushed_at FROM pushed ORDER BY pushed_at DESC, rowid DESC LIMIT ?",
+            "SELECT code, title, pushed_at, provider FROM pushed"
+            " ORDER BY pushed_at DESC, rowid DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [{"code": c, "title": t or c, "pushed_at": ts} for c, t, ts in rows]
+        out = []
+        for c, t, ts, p in rows:
+            # 老数据没有 provider,按去重 key 兜底:ed2k 的 key 是 32 位 hex 文件 hash,其余算 115
+            prov = p or ("ed2k" if _ED2K_HASH_RE.fullmatch(c) else "115")
+            out.append({"code": c, "title": t or c, "pushed_at": ts, "provider": prov})
+        return out
 
     def stats(self) -> dict:
         """推送统计:今日/累计。"""

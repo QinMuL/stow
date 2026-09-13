@@ -356,6 +356,10 @@ onUnmounted(() => timer && window.clearInterval(timer))
       <div v-if="pipe?.recent?.length" class="feed">
         <div v-for="it in pipe.recent" :key="it.code" class="feed-item">
           <span class="dot ok" style="width:7px;height:7px"></span>
+          <span class="feed-tag" :class="it.provider === 'ed2k' ? 'ed2k' : 'p115'"
+                :title="it.provider === 'ed2k' ? 'ed2k 链接' : '115 分享链接'">
+            {{ it.provider === 'ed2k' ? 'ed2k' : '115' }}
+          </span>
           <span class="t" :title="it.title">{{ it.title }}</span>
           <span class="c">{{ it.code }}</span>
           <span class="when">{{ timeAgo(it.pushed_at) }}</span>
