@@ -23,9 +23,9 @@ async function check() {
 }
 
 async function upgrade() {
-  if (!ver.value?.has_update) return
+  const target = ver.value?.has_update ? `到 v${ver.value.latest}` : '(拉取 latest 镜像)'
   if (!window.confirm(
-    `确认升级到 v${ver.value.latest}?\n将拉取新镜像并重建容器,页面会短暂断线。`
+    `确认一键升级${target}?\n将拉取新镜像并重建容器,页面会短暂断线。`
   )) return
   upgrading.value = true
   msg.value = { kind: '', text: '升级中:正在拉取新镜像并重建容器…' }
@@ -75,7 +75,7 @@ onUnmounted(() => window.clearTimeout(pollTimer))
 
     <div class="card">
       <h3>版本升级</h3>
-      <div class="desc">检测 GitHub 发布的最新版本;有更新时可一键拉取新镜像并重建容器</div>
+      <div class="desc">检测 GitHub 发布的最新版本;一键拉取最新镜像并重建容器(无新版本也可强制刷新)</div>
 
       <div class="ver-rows">
         <div class="ver-row">
@@ -101,8 +101,9 @@ onUnmounted(() => window.clearTimeout(pollTimer))
         <button class="btn ghost" :disabled="checking || upgrading" @click="check">
           {{ checking ? '检测中…' : '重新检测' }}
         </button>
-        <button v-if="ver?.has_update" class="btn primary" :disabled="checking || upgrading" @click="upgrade">
-          {{ upgrading ? '升级中…' : `一键升级到 v${ver.latest}` }}
+        <!-- 按钮常驻:版本号没变化时也能点,拉取 latest 镜像重建(强制刷新到最新镜像) -->
+        <button class="btn primary" :disabled="checking || upgrading" @click="upgrade">
+          {{ upgrading ? '升级中…' : (ver?.has_update ? `一键升级到 v${ver.latest}` : '一键升级(拉取 latest 镜像)') }}
         </button>
       </div>
 
