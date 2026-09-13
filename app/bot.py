@@ -90,6 +90,21 @@ _HELP = (
     "Bot 会读取分享 → 匹配 TMDB → 按链接类型推到对应频道。"
 )
 
+# 启动介绍:Bot 每次重启后主动推给管理员的一段「项目介绍语」(2026-09-13 用户要求)。
+# 与 /start 的欢迎语(使用说明)不同 —— 这条是让管理员一眼知道项目是干什么的。
+_STARTUP_INTRO = (
+    "📦 Stow · 网盘媒体管理工具\n\n"
+    "一个自托管的网盘媒体管理助手:把网盘、频道里的资源自动整理成规范媒体库,"
+    "并推送到你的 Telegram 频道。\n\n"
+    "核心能力:\n"
+    "· 链接推卡 —— 发 115 / ed2k 链接,自动识别作品并生成海报卡片\n"
+    "· 转存整理 —— 115 分享一键转存,自动按规范结构归档并建永久分享\n"
+    "· 下载上传 —— 监控网盘目录,自动下载 → 清洗命名 → 上传回网盘\n"
+    "· 频道监控 —— 盯住源频道,自动提取链接走同一条推卡链路\n"
+    "· Web 控制台 —— 浏览器里配置、看进度、查日志\n\n"
+    "发 /help 查看命令说明。"
+)
+
 # Bot 快捷命令菜单(点输入框旁的菜单按钮 / 打 "/" 就能看到)。
 # ⚠️ 新增命令时**必须**同时加进这里 —— tests/test_bot_commands.py 会比对
 # 「注册的 CommandHandler」与「菜单项」两个集合,漏一个就红,不需要人来提醒。
@@ -153,6 +168,10 @@ class StowBot:
             self._beat_task = asyncio.create_task(self._heartbeat_loop())
             # 注册 Bot 快捷命令菜单(点输入框旁的菜单/打 "/" 就能看到)
             await self._register_commands(app)
+            # 重启后主动推一条项目介绍给管理员(2026-09-13 用户要求)。
+            # 只推 tg_admin_ids[0](项目惯例);管理员不可达只告警、不阻塞启动(_notify_uid 内部容错)。
+            if self.cfg.tg_admin_ids:
+                await self._notify_uid(self.cfg.tg_admin_ids[0], _STARTUP_INTRO)
 
         builder = (
             Application.builder()

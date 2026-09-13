@@ -172,14 +172,11 @@ class ChannelMonitor:
             return
         self.state = STATE_RUNNING
         caught = await self._catchup()
+        # 「频道监控已就绪」只记日志、不再主动推给管理员(2026-09-13 用户要求取消弹送)。
+        # 账号未登录 / 频道不可达 / 断线恢复仍会告警,只有"正常运行"这条静默。
         logger.info(
             "频道监控就绪:%d 个频道%s",
             len(self._monitored), f",补扫漏档推送 {caught} 条" if caught else "",
-        )
-        await self._notify_once(
-            "monitor_started",
-            f"📡 频道监控已就绪:{len(self._monitored)} 个源频道"
-            + (f",补扫补推 {caught} 条 ed2k" if caught else ""),
         )
 
     async def stop_client(self) -> None:
