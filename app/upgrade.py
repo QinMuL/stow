@@ -1,4 +1,4 @@
-"""系统工具:版本检测。
+"""侧栏版本状态:版本检测。
 
 检测:GitHub Releases API 的最新 tag vs 本地 app.__version__,只读、带代理。
 带 github_token(配置项)时认证请求,绕开共享出口 IP 的匿名 API 限流(403)。

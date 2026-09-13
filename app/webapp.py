@@ -1166,7 +1166,7 @@ def create_app(config_path: str | Path) -> FastAPI:
 
     @app.get("/api/tools/version")
     def tools_version(request: Request) -> dict:
-        """系统工具:检测本项目是否有新版本(GitHub Releases latest vs __version__)。"""
+        """侧栏版本状态:检测本项目是否有新版本(GitHub Releases latest vs __version__)。"""
         _current_user(config_path, _auth_header(request))
 
         from app.upgrade import check_version

@@ -19,7 +19,6 @@ const nav = [
   { to: '/push', ic: '✦', label: '全局配置',
     children: CONFIG_GROUPS.map((g) => ({ to: `/push/${g.key}`, label: g.label })) },
   { to: '/logs', ic: '≡', label: '系统日志' },
-  { to: '/tools', ic: '⚙', label: '系统工具' },
 ]
 
 // 展开状态:用户手动开合过才记,否则跟随当前路由(在配置页里就自动展开)
@@ -55,12 +54,31 @@ async function refresh() {
   } catch { /* 401 已自动跳转 */ }
 }
 
+// 侧栏版本号旁的新版本状态(2026-09-13 从系统工具卡片移来):
+// 挂载时检一次,点状态可重检。用 github_token 认证,避免共享出口 IP 匿名限流 403。
+const ver = ref(null)   // { current, latest, has_update } | { error } | null = 检测中
+const verState = computed(() => {
+  if (ver.value === null) return { cls: '', txt: '检测中', tip: '正在检测 GitHub 最新版本' }
+  if (ver.value.error) return { cls: 'bad', txt: '检测失败', tip: ver.value.error }
+  if (ver.value.has_update) return { cls: 'up', txt: `新 ${ver.value.latest}`, tip: '有新版本可用,点击重新检测' }
+  return { cls: 'ok', txt: '已最新', tip: '已是最新版本,点击重新检测' }
+})
+
+async function checkVer() {
+  ver.value = null
+  try {
+    ver.value = await api('tools/version')
+  } catch (e) {
+    ver.value = { error: e.message }
+  }
+}
+
 function logout() {
   clearToken()
   router.push('/login')
 }
 
-onMounted(refresh)
+onMounted(() => { refresh(); checkVer() })
 </script>
 
 <template>
@@ -89,12 +107,18 @@ onMounted(refresh)
           </div>
         </template>
       </nav>
-      <div class="side-foot">{{ version }} · amber</div>
+      <div class="side-foot">
+        <span>{{ version }}</span>
+        <button class="ver-badge" :class="verState.cls && 'st-' + verState.cls"
+          :title="verState.tip" @click="checkVer">
+          <i class="dot"></i>{{ verState.txt }}
+        </button>
+      </div>
     </aside>
 
     <div class="main">
       <div class="topbar">
-        <!-- 手机端:项目标识在顶栏左侧(底部导航只留四个菜单项)。
+        <!-- 手机端:项目标识在顶栏左侧(底部导航只剩三个菜单项)。
              两份标记是有意的——CSS 没法把一个节点搬进另一个容器,按断点各显一份最稳 -->
         <div class="logo top-logo">
           <div class="logo-mark">S</div>

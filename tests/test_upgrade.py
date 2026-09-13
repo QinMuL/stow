@@ -1,4 +1,4 @@
-"""系统工具:版本检测(GitHub API mock,不触网)。一键升级功能已移除。"""
+"""侧栏版本状态:版本检测(GitHub API mock,不触网)。一键升级功能已移除。"""
 
 from __future__ import annotations
 

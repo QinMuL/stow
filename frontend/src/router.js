@@ -15,7 +15,6 @@ const routes = [
       { path: 'push', redirect: `/push/${DEFAULT_CONFIG_GROUP}` },
       { path: 'push/:group', name: 'push', component: () => import('./views/PushConfig.vue') },
       { path: 'logs', name: 'logs', component: () => import('./views/Logs.vue') },
-      { path: 'tools', name: 'tools', component: () => import('./views/SystemTools.vue') },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/overview' }, // 旧链接(/system 等)回总览

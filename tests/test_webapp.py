@@ -403,7 +403,7 @@ def test_store_migrates_pushed_revoke_columns(tmp_path):
     s.close()
 
 
-# ── 系统工具:版本检测 / 一键升级 ────────────────────────────
+# ── 侧栏版本状态:版本检测 ──────────────────────────────────
 def test_tools_version_api(tmp_path, monkeypatch):
     """未登录 401;登录后返回 check_version 结果(检测逻辑在 test_upgrade.py)。"""
     from app import upgrade as up_mod
@@ -413,7 +413,7 @@ def test_tools_version_api(tmp_path, monkeypatch):
     token = _login(client)
     monkeypatch.setattr(
         up_mod, "check_version",
-        lambda cfg: {"current": "1.0.3", "latest": "v9.9.9", "has_update": True},
+        lambda cfg: {"current": up_mod.__version__, "latest": "v9.9.9", "has_update": True},
     )
     r = client.get("/api/tools/version", headers=_h(token))
     assert r.status_code == 200
