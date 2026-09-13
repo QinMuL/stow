@@ -214,6 +214,27 @@ button.nav-item { width: 100%; background: none; border: 0; font: inherit; curso
 /* 最近推送:可点击展开 + 搜索历史 */
 .feed-item { cursor: pointer; }
 .feed-item:hover { background: rgba(255, 255, 255, 0.02); }
+/* 失效撤卡(2026-09-13):已失效记录整体置灰,标题划线 */
+.feed-item.dead { opacity: .55; }
+.feed-item.dead .t { text-decoration: line-through; }
+.feed-dead { flex: none; font-size: 12px; }
+/* 最近推送卡片头:标题 + 左右模块切换 tab */
+.feed-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-bottom: 10px; }
+.feed-tabs { display: flex; gap: 4px; padding: 3px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: var(--r-s); }
+.feed-tab { border: none; background: none; color: var(--faint); font-size: 12px;
+  padding: 5px 12px; border-radius: calc(var(--r-s) - 3px); cursor: pointer; }
+.feed-tab:hover { color: var(--text); }
+.feed-tab.on { background: var(--amber-soft); color: var(--amber-strong); }
+.feed-msg { color: var(--amber); font-size: 12.5px; padding: 2px 0 8px; }
+/* 撤卡入口按钮 */
+.fd-revoke { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.fd-revoke-btn { padding: 6px 12px; border-radius: var(--r-s); border: 1px solid rgba(217,108,79,.45);
+  background: rgba(217,108,79,.08); color: var(--bad); cursor: pointer; font-size: 12px; }
+.fd-revoke-btn:hover { background: rgba(217,108,79,.16); }
+.fd-revoke-btn:disabled { opacity: .5; cursor: default; }
+.fd-v.dead { color: var(--bad); }
 .chev { color: var(--faint); font-size: 11px; transition: transform .15s; flex: none; }
 .chev.open { transform: rotate(180deg); }
 .feed-search { display: flex; gap: 8px; margin-bottom: 6px; }

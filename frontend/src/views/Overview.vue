@@ -210,6 +210,53 @@ async function doSearch() {
   }
 }
 
+// ── 失效撤卡模块(2026-09-13)──────────────────────────────
+// 最近推送卡片内左右切换:「推送记录」/「失效撤卡」两个视图。
+// 撤卡:自动检测(115 分享失效)→ 删频道卡片消息 → 标记失效。
+const feedTab = ref('records')       // records | revoked
+const revokedItems = ref([])         // 已失效记录(失效撤卡视图)
+const revoking = ref('')             // 正在撤卡的 code
+const feedMsg = ref('')              // 操作反馈(撤卡结果)
+
+async function loadRevoked() {
+  try {
+    const d = await api('push/revoked?limit=50')
+    revokedItems.value = d.items || []
+  } catch (e) {
+    feedMsg.value = e.message
+  }
+}
+
+function switchTab(tab) {
+  feedTab.value = tab
+  if (tab === 'revoked' && !revokedItems.value.length) loadRevoked()
+}
+
+async function revoke(it, force = false) {
+  if (revoking.value) return
+  revoking.value = it.code
+  feedMsg.value = ''
+  try {
+    const d = await api('push/revoke', { code: it.code, force }, 'POST')
+    if (d.still_valid) {
+      // 分享仍有效:二次确认后再 force
+      if (window.confirm(d.message)) {
+        return revoke(it, true)
+      }
+      return
+    }
+    const del = d.total ? `,已撤 ${d.deleted}/${d.total} 条消息` : ''
+    feedMsg.value = `✅ ${it.title?.slice(0, 30) || it.code} 已标记失效${del}`
+    it.revoked_at = Date.now() / 1000
+    it.revoked_reason = d.reason || '手动撤卡'
+    loadRevoked()   // 同步失效撤卡视图
+  } catch (e) {
+    feedMsg.value = e.message
+  } finally {
+    revoking.value = ''
+  }
+}
+
 // D 方案:手写迷你**曲线**图(无依赖)——两条序列合成一张图,共用一把 0 起刻度。
 // 坐标系固定(700×110),靠 preserveAspectRatio="none" 横向拉伸铺满容器宽度;
 // 曲线用 vector-effect="non-scaling-stroke" 保证线宽不被拉伸变形——代价是**不能画圆点**
@@ -424,61 +471,107 @@ onUnmounted(() => timer && window.clearInterval(timer))
       </div>
     </div>
 
-    <!-- 最近推送(可搜索、点击展开详情) -->
+    <!-- 最近推送 / 失效撤卡(左右切换两个模块) -->
     <div class="card">
-      <h3>最近推送</h3>
-      <div class="feed-search">
-        <input v-model="searchQ" class="search-input" type="text"
-          placeholder="搜索历史推送(标题 / 分享码)…" @keyup.enter="doSearch" />
-        <button class="search-btn" :disabled="searchLoading" @click="doSearch">
-          {{ searchLoading ? '…' : '搜索' }}
-        </button>
-        <button v-if="searchItems" class="search-clear" title="清除搜索"
-          @click="searchQ = ''; searchItems = null">✕</button>
+      <div class="feed-head">
+        <h3 style="margin-bottom:0">最近推送</h3>
+        <div class="feed-tabs">
+          <button class="feed-tab" :class="{ on: feedTab === 'records' }"
+            @click="switchTab('records')">推送记录</button>
+          <button class="feed-tab" :class="{ on: feedTab === 'revoked' }"
+            @click="switchTab('revoked')">
+            失效撤卡<template v-if="revokedItems.length"> ({{ revokedItems.length }})</template>
+          </button>
+        </div>
       </div>
-      <div v-if="feedItems.length" class="feed">
-        <template v-for="it in feedItems" :key="it.code">
-          <div class="feed-item" @click="toggle(it)">
-            <span class="dot ok" style="width:7px;height:7px"></span>
-            <span class="feed-tag" :class="it.provider === 'ed2k' ? 'ed2k' : 'p115'"
-                  :title="it.provider === 'ed2k' ? 'ed2k 链接' : '115 分享链接'">
+
+      <!-- 操作反馈 -->
+      <div v-if="feedMsg" class="feed-msg">{{ feedMsg }}</div>
+
+      <!-- 视图一:推送记录(可搜索、点击展开详情) -->
+      <template v-if="feedTab === 'records'">
+        <div class="feed-search">
+          <input v-model="searchQ" class="search-input" type="text"
+            placeholder="搜索历史推送(标题 / 分享码)…" @keyup.enter="doSearch" />
+          <button class="search-btn" :disabled="searchLoading" @click="doSearch">
+            {{ searchLoading ? '…' : '搜索' }}
+          </button>
+          <button v-if="searchItems" class="search-clear" title="清除搜索"
+            @click="searchQ = ''; searchItems = null">✕</button>
+        </div>
+        <div v-if="feedItems.length" class="feed">
+          <template v-for="it in feedItems" :key="it.code">
+            <div class="feed-item" :class="{ dead: it.revoked_at }" @click="toggle(it)">
+              <span class="dot ok" style="width:7px;height:7px"></span>
+              <span v-if="it.revoked_at" class="feed-dead" title="已失效撤卡">💀</span>
+              <span class="feed-tag" :class="it.provider === 'ed2k' ? 'ed2k' : 'p115'"
+                    :title="it.provider === 'ed2k' ? 'ed2k 链接' : '115 分享链接'">
+                {{ it.provider === 'ed2k' ? 'ed2k' : '115' }}
+              </span>
+              <span class="t" :title="it.title">{{ it.title }}</span>
+              <span class="c">{{ it.code }}</span>
+              <span class="when">{{ timeAgo(it.pushed_at) }}</span>
+              <span class="chev" :class="{ open: expandedCode === it.code }">▾</span>
+            </div>
+            <div v-if="expandedCode === it.code" class="feed-detail">
+              <!-- ed2k:标题 / 文件名(含来源) / 大小 / 时间 / 完整链接 -->
+              <template v-if="it.provider === 'ed2k'">
+                <div class="fd-row"><span class="fd-k">标题</span><span class="fd-v">{{ it.title }}</span></div>
+                <div class="fd-row"><span class="fd-k">来源</span><span class="fd-v">{{ sourceLabel(it.source) }}</span></div>
+                <div class="fd-row"><span class="fd-k">文件名</span><span class="fd-v mono">{{ it.file_name || '—' }}</span></div>
+                <div class="fd-row"><span class="fd-k">大小</span><span class="fd-v">{{ fmtSize(it.file_size) }}</span></div>
+                <div class="fd-row"><span class="fd-k">时间</span><span class="fd-v">{{ fmtTime(it.pushed_at) }}</span></div>
+                <div class="fd-row"><span class="fd-k">链接</span><span class="fd-v mono">{{ it.url || it.code }}</span></div>
+              </template>
+              <!-- 115:分享码 / 时间 / 链接 / 文件清单(按需读取) -->
+              <template v-else>
+                <div class="fd-row"><span class="fd-k">分享码</span><span class="fd-v mono">{{ it.code }}</span></div>
+                <div class="fd-row"><span class="fd-k">来源</span><span class="fd-v">{{ sourceLabel(it.source) }}</span></div>
+                <div class="fd-row"><span class="fd-k">时间</span><span class="fd-v">{{ fmtTime(it.pushed_at) }}</span></div>
+                <div class="fd-row"><span class="fd-k">链接</span><span class="fd-v mono">{{ it.url || ('https://115.com/s/' + it.code) }}</span></div>
+                <div v-if="detailMap[it.code]?.loading" class="fd-loading">正在读取分享内容…</div>
+                <div v-else-if="detailMap[it.code]?.error" class="fd-error">{{ detailMap[it.code].error }}</div>
+                <div v-else-if="detailMap[it.code]?.files" class="fd-files">
+                  <div class="fd-files-h">文件清单 ({{ detailMap[it.code].files.length }})</div>
+                  <div v-for="(f, i) in detailMap[it.code].files" :key="i" class="fd-file">
+                    <span class="fd-file-name">{{ f.is_dir ? '📁 ' + f.name : f.name }}</span>
+                    <span v-if="!f.is_dir" class="fd-file-size">{{ fmtSize(f.size) }}</span>
+                  </div>
+                </div>
+              </template>
+              <!-- 失效状态 + 撤卡入口 -->
+              <div v-if="it.revoked_at" class="fd-row">
+                <span class="fd-k">失效</span>
+                <span class="fd-v dead">{{ fmtTime(it.revoked_at) }} · {{ it.revoked_reason || '已撤卡' }}</span>
+              </div>
+              <div v-else class="fd-revoke">
+                <button class="fd-revoke-btn" :disabled="revoking === it.code"
+                  title="检测分享是否失效;失效则撤回频道卡片并标记" @click="revoke(it)">
+                  {{ revoking === it.code ? '撤卡中…' : '💀 标记失效并撤卡' }}
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+        <div v-else class="empty">{{ searchItems ? '没有匹配的记录' : '还没有推送记录 —— 在 Telegram 给 Bot 发一条 115 分享链接试试' }}</div>
+      </template>
+
+      <!-- 视图二:失效撤卡(已失效记录列表) -->
+      <template v-else>
+        <div v-if="revokedItems.length" class="feed">
+          <div v-for="it in revokedItems" :key="it.code" class="feed-item dead">
+            <span class="dot bad" style="width:7px;height:7px"></span>
+            <span class="feed-dead" title="已失效">💀</span>
+            <span class="feed-tag" :class="it.provider === 'ed2k' ? 'ed2k' : 'p115'">
               {{ it.provider === 'ed2k' ? 'ed2k' : '115' }}
             </span>
             <span class="t" :title="it.title">{{ it.title }}</span>
             <span class="c">{{ it.code }}</span>
-            <span class="when">{{ timeAgo(it.pushed_at) }}</span>
-            <span class="chev" :class="{ open: expandedCode === it.code }">▾</span>
+            <span class="when">{{ fmtTime(it.revoked_at) }}</span>
           </div>
-          <div v-if="expandedCode === it.code" class="feed-detail">
-            <!-- ed2k:标题 / 文件名(含来源) / 大小 / 时间 / 完整链接 -->
-            <template v-if="it.provider === 'ed2k'">
-              <div class="fd-row"><span class="fd-k">标题</span><span class="fd-v">{{ it.title }}</span></div>
-              <div class="fd-row"><span class="fd-k">来源</span><span class="fd-v">{{ sourceLabel(it.source) }}</span></div>
-              <div class="fd-row"><span class="fd-k">文件名</span><span class="fd-v mono">{{ it.file_name || '—' }}</span></div>
-              <div class="fd-row"><span class="fd-k">大小</span><span class="fd-v">{{ fmtSize(it.file_size) }}</span></div>
-              <div class="fd-row"><span class="fd-k">时间</span><span class="fd-v">{{ fmtTime(it.pushed_at) }}</span></div>
-              <div class="fd-row"><span class="fd-k">链接</span><span class="fd-v mono">{{ it.url || it.code }}</span></div>
-            </template>
-            <!-- 115:分享码 / 时间 / 链接 / 文件清单(按需读取) -->
-            <template v-else>
-              <div class="fd-row"><span class="fd-k">分享码</span><span class="fd-v mono">{{ it.code }}</span></div>
-              <div class="fd-row"><span class="fd-k">来源</span><span class="fd-v">{{ sourceLabel(it.source) }}</span></div>
-              <div class="fd-row"><span class="fd-k">时间</span><span class="fd-v">{{ fmtTime(it.pushed_at) }}</span></div>
-              <div class="fd-row"><span class="fd-k">链接</span><span class="fd-v mono">{{ it.url || ('https://115.com/s/' + it.code) }}</span></div>
-              <div v-if="detailMap[it.code]?.loading" class="fd-loading">正在读取分享内容…</div>
-              <div v-else-if="detailMap[it.code]?.error" class="fd-error">{{ detailMap[it.code].error }}</div>
-              <div v-else-if="detailMap[it.code]?.files" class="fd-files">
-                <div class="fd-files-h">文件清单 ({{ detailMap[it.code].files.length }})</div>
-                <div v-for="(f, i) in detailMap[it.code].files" :key="i" class="fd-file">
-                  <span class="fd-file-name">{{ f.is_dir ? '📁 ' + f.name : f.name }}</span>
-                  <span v-if="!f.is_dir" class="fd-file-size">{{ fmtSize(f.size) }}</span>
-                </div>
-              </div>
-            </template>
-          </div>
-        </template>
-      </div>
-      <div v-else class="empty">{{ searchItems ? '没有匹配的记录' : '还没有推送记录 —— 在 Telegram 给 Bot 发一条 115 分享链接试试' }}</div>
+        </div>
+        <div v-else class="empty">还没有失效记录 —— 在推送记录里对某条点「标记失效并撤卡」后,会出现在这里</div>
+      </template>
     </div>
   </div>
 </template>

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -339,6 +340,66 @@ def test_store_ed2k_file_info(tmp_path):
     s.mark_pushed("sw123", "某剧", "115", "https://115.com/s/sw123", "save")
     p115 = next(r for r in s.recent(10) if r["code"] == "sw123")
     assert "file_name" not in p115 and "file_size" not in p115
+    s.close()
+
+
+def test_store_push_msg_and_revoke(tmp_path):
+    """失效撤卡:消息 ID 追加存储、失效标记、revoked 列表(2026-09-13 加)。"""
+    from app.store import Store
+
+    s = Store(tmp_path / "t.db")
+    s.mark_pushed("sw123", "某剧", "115", "https://115.com/s/sw123", "save")
+    # 一卡多频道:追加两条消息
+    s.add_push_msg("sw123", -100111, 10)
+    s.add_push_msg("sw123", -100222, 20)
+    rec = s.get_pushed("sw123")
+    assert rec["msg_ids"] == '[{"chat_id": "-100111", "message_id": 10},' \
+                             ' {"chat_id": "-100222", "message_id": 20}]'
+    assert rec["revoked_at"] is None
+    assert s.revoked(10) == []
+    # 标记失效后:recent 带标记,revoked 能列出
+    s.mark_revoked("sw123", "分享已失效")
+    rec = s.get_pushed("sw123")
+    assert rec["revoked_at"] and rec["revoked_reason"] == "分享已失效"
+    rv = s.revoked(10)
+    assert len(rv) == 1 and rv[0]["code"] == "sw123" and rv[0]["revoked_reason"] == "分享已失效"
+    # recent 里的失效行带标记(前端据此显示灰标)
+    rec = next(r for r in s.recent(10) if r["code"] == "sw123")
+    assert rec["revoked_at"] and rec["revoked_reason"] == "分享已失效"
+    # 记录不存在的 add_push_msg 静默跳过
+    s.add_push_msg("nope", -100, 1)
+    assert s.get_pushed("nope") is None
+    s.close()
+
+
+def test_store_revoke_legacy_no_msg_ids(tmp_path):
+    """老数据(无 msg_ids)标记失效不报错,msg_ids 为空(2026-09-13 加)。"""
+    from app.store import Store
+
+    s = Store(tmp_path / "t.db")
+    s.mark_pushed("old", "老记录", "115")
+    s.mark_revoked("old", "手动标记(无消息 ID 可撤)")
+    rec = s.get_pushed("old")
+    assert rec["msg_ids"] == "" and rec["revoked_at"] and rec["revoked_reason"].startswith("手动标记")
+    s.close()
+
+
+def test_store_migrates_pushed_revoke_columns(tmp_path):
+    """老库(建表时无 msg_ids/revoked_at/revoked_reason 列)打开后自动补列(2026-09-13 加)。"""
+    import sqlite3
+
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE pushed (code TEXT PRIMARY KEY, pushed_at REAL, title TEXT)")
+    conn.execute("INSERT INTO pushed(code, pushed_at, title) VALUES('old', 0, 'x')")
+    conn.commit()
+    conn.close()
+
+    from app.store import Store
+
+    s = Store(db)
+    rec = s.get_pushed("old")
+    assert rec["msg_ids"] == "" and rec["revoked_at"] is None and rec["revoked_reason"] == ""
     s.close()
 
 
@@ -1123,3 +1184,199 @@ def test_upload_items_show_transferred_bytes(tmp_path, monkeypatch):
     items = client.get("/api/pipeline", headers=_h(token)).json()["segments"][2]["items"]
     assert items[0]["progress"] == 40.0
     assert items[0]["note"] == "上传中 · 2.0/5.0 GB"
+
+
+# ── 失效撤卡 API(2026-09-13)───────────────────────────────
+def _seed_pushed(client, tmp_path, code="sw123", provider="115", msg_ids="[]",
+                 reason=None):
+    """造一条带消息 ID 的推送记录;reason 非空时预标记失效。"""
+    import json as _json
+
+    from app.store import Store
+
+    s = Store(tmp_path / "stow.db")
+    s.mark_pushed(code, "某剧", provider, f"https://115.com/s/{code}" if provider == "115" else "",
+                  "save")
+    if msg_ids:
+        for m in _json.loads(msg_ids):
+            s.add_push_msg(code, m["chat_id"], m["message_id"])
+    if reason:
+        s.mark_revoked(code, reason)
+    s.close()
+
+
+def test_push_revoke_requires_auth(tmp_path):
+    client = _client(tmp_path)
+    assert client.post("/api/push/revoke", json={"code": "x"}).status_code == 401
+    assert client.get("/api/push/revoked").status_code == 401
+
+
+def test_push_revoke_not_found(tmp_path):
+    client = _client(tmp_path)
+    token = _login(client)
+    r = client.post("/api/push/revoke", json={"code": "nope"}, headers=_h(token))
+    assert r.status_code == 404
+
+
+def test_push_revoke_115_still_valid_asks_confirm(tmp_path, monkeypatch):
+    """115 分享仍有效 → 不自动撤,返回 still_valid 让前端二次确认。"""
+    import app.pan115 as pan
+
+    client = _client(tmp_path)
+    token = _login(client)
+    _seed_pushed(client, tmp_path, msg_ids='[{"chat_id": -100, "message_id": 1}]')
+
+    class FakeReader:
+        async def read_share(self, link):
+            return []
+
+    monkeypatch.setattr(pan, "Pan115Reader", lambda cookie: FakeReader())
+    r = client.post("/api/push/revoke", json={"code": "sw123"}, headers=_h(token))
+    body = r.json()
+    assert r.status_code == 200 and body["still_valid"] is True
+    # 未被标记失效
+    assert client.get("/api/push/revoked", headers=_h(token)).json()["items"] == []
+
+
+def test_push_revoke_115_dead_deletes_and_marks(tmp_path, monkeypatch):
+    """115 已失效 → 删频道消息 + 标记失效;deleted/total 正确。"""
+    import app.pan115 as pan
+    import app.webapp as web
+
+    client = _client(tmp_path)
+    token = _login(client)
+    _seed_pushed(client, tmp_path,
+                  msg_ids='[{"chat_id": -100, "message_id": 1},'
+                          ' {"chat_id": -200, "message_id": 2}]')
+
+    class FakeReader:
+        async def read_share(self, link):
+            raise pan.ShareDead("gone")
+
+    monkeypatch.setattr(pan, "Pan115Reader", lambda cookie: FakeReader())
+    deleted = []
+
+    async def fake_del(token, chat_id, message_id, proxy_url=""):
+        deleted.append((chat_id, message_id))
+        return True, ""
+
+    monkeypatch.setattr(web, "_tg_delete_message", fake_del)
+    r = client.post("/api/push/revoke", json={"code": "sw123"}, headers=_h(token))
+    body = r.json()
+    assert r.status_code == 200 and body["success"] is True
+    assert body["deleted"] == 2 and body["total"] == 2
+    assert body["reason"] == "分享已失效"
+    assert set(deleted) == {("-100", 1), ("-200", 2)}
+    # 已进失效列表
+    items = client.get("/api/push/revoked", headers=_h(token)).json()["items"]
+    assert items[0]["code"] == "sw123" and items[0]["revoked_reason"] == "分享已失效"
+    # 已失效记录再查历史带标记
+    hist = client.get("/api/history", headers=_h(token)).json()["items"]
+    assert hist[0]["revoked_at"] and hist[0]["revoked_reason"] == "分享已失效"
+
+
+def test_push_revoke_force_skips_check(tmp_path, monkeypatch):
+    """force=true 跳过检测直接撤(分享仍有效时用户确认后走这条)。"""
+    import app.webapp as web
+
+    client = _client(tmp_path)
+    token = _login(client)
+    _seed_pushed(client, tmp_path, msg_ids='[{"chat_id": -100, "message_id": 9}]')
+    called = []
+
+    async def fake_del(token, chat_id, message_id, proxy_url=""):
+        called.append(message_id)
+        return True, ""
+
+    monkeypatch.setattr(web, "_tg_delete_message", fake_del)
+    # 不 mock Pan115Reader —— force 不会走到检测
+    r = client.post("/api/push/revoke", json={"code": "sw123", "force": True}, headers=_h(token))
+    assert r.status_code == 200 and r.json()["success"] is True
+    assert called == [9] and r.json()["deleted"] == 1
+    assert r.json()["reason"] == "手动撤卡"
+
+
+def test_push_revoke_without_msg_ids_marks_only(tmp_path, monkeypatch):
+    """老数据无消息 ID:无法删消息,只落失效标记(deleted=0,total=0)。"""
+    import app.webapp as web
+
+    client = _client(tmp_path)
+    token = _login(client)
+    _seed_pushed(client, tmp_path, msg_ids="[]")
+
+    async def fake_del(token, chat_id, message_id, proxy_url=""):
+        return True, ""
+
+    monkeypatch.setattr(web, "_tg_delete_message", fake_del)
+    r = client.post("/api/push/revoke", json={"code": "sw123"}, headers=_h(token))
+    body = r.json()
+    assert body["success"] is True and body["total"] == 0 and body["deleted"] == 0
+    assert "无消息 ID" in body["reason"]
+    assert client.get("/api/push/revoked", headers=_h(token)).json()["items"][0]["code"] == "sw123"
+
+
+def test_push_revoke_delete_failure_still_marks(tmp_path, monkeypatch):
+    """删消息失败(如消息已被删)不阻塞标记失效;失败原因带出。"""
+    import app.pan115 as pan
+    import app.webapp as web
+
+    client = _client(tmp_path)
+    token = _login(client)
+    _seed_pushed(client, tmp_path, msg_ids='[{"chat_id": -100, "message_id": 5}]')
+
+    class FakeReader:
+        async def read_share(self, link):
+            raise pan.ShareDead("gone")
+
+    monkeypatch.setattr(pan, "Pan115Reader", lambda cookie: FakeReader())
+
+    async def fake_del(token, chat_id, message_id, proxy_url=""):
+        return False, "message not found"
+
+    monkeypatch.setattr(web, "_tg_delete_message", fake_del)
+    r = client.post("/api/push/revoke", json={"code": "sw123"}, headers=_h(token))
+    body = r.json()
+    assert body["success"] is True and body["deleted"] == 0 and body["total"] == 1
+    assert body["results"][0]["desc"] == "message not found"
+    assert client.get("/api/push/revoked", headers=_h(token)).json()["items"][0]["code"] == "sw123"
+
+
+def test_tg_delete_message_no_token(tmp_path, monkeypatch):
+    """缺 token/chat_id/message_id → (False, 原因),不发请求。"""
+    import app.webapp as web
+
+    ok, desc = asyncio.run(web._tg_delete_message("", "-100", 1))
+    assert ok is False and "缺少凭据" in desc
+
+
+def test_tg_delete_message_http_error(tmp_path, monkeypatch):
+    """Telegram 返回非 ok(如 400) → (False, description)。"""
+    import app.webapp as web
+
+    class FakeResp:
+        status_code = 400
+
+        def json(self):
+            return {"ok": False, "description": "Bad Request: message to delete not found"}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            self._kw = kw
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None):
+            self.url, self.body = url, json
+            return FakeResp()
+
+    async def go():
+        monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+        ok, desc = await web._tg_delete_message("T0KEN", "-100", 1, "http://proxy")
+        return ok, desc
+
+    ok, desc = asyncio.run(go())
+    assert ok is False and "not found" in desc

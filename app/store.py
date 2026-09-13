@@ -54,6 +54,15 @@ class Store:
             self._conn.execute("ALTER TABLE pushed ADD COLUMN url TEXT DEFAULT ''")
         if "source" not in cols:
             self._conn.execute("ALTER TABLE pushed ADD COLUMN source TEXT DEFAULT ''")
+        # 失效撤卡(2026-09-13):msg_ids 存推卡消息的 JSON 数组
+        # [{"chat_id": -100xxx, "message_id": 123}, ...](一个链接可能投了多个频道);
+        # revoked_at/revoked_reason 记录失效标记(撤卡后写)
+        if "msg_ids" not in cols:
+            self._conn.execute("ALTER TABLE pushed ADD COLUMN msg_ids TEXT DEFAULT ''")
+        if "revoked_at" not in cols:
+            self._conn.execute("ALTER TABLE pushed ADD COLUMN revoked_at REAL")
+        if "revoked_reason" not in cols:
+            self._conn.execute("ALTER TABLE pushed ADD COLUMN revoked_reason TEXT DEFAULT ''")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS monitor_state ("
             " ref TEXT PRIMARY KEY, chat_id TEXT, title TEXT,"
@@ -102,13 +111,20 @@ class Store:
         self._conn.commit()
 
     @staticmethod
-    def _item(c: str, t: str, ts: float, p: str, u: str, src: str = "") -> dict:
-        """pushed 行 → 展示 dict;老数据没有 provider/source 时按去重 key 兜底。"""
+    def _item(c: str, t: str, ts: float, p: str, u: str, src: str = "",
+              msgs: str = "", revoked_at=None, revoked_reason: str = "") -> dict:
+        """pushed 行 → 展示 dict;老数据没有 provider/source 时按去重 key 兜底。
+
+        msgs/revoked_at/revoked_reason 是失效撤卡(2026-09-13)新增列,
+        recent/search/revoked 都带出来,前端据此显示失效标记与撤卡入口。
+        """
         from app.links import ed2k_file
 
         prov = p or ("ed2k" if _ED2K_HASH_RE.fullmatch(c) else "115")
         d = {"code": c, "title": t or c, "pushed_at": ts, "provider": prov,
-             "url": u or "", "source": src or _DEFAULT_SOURCE}
+             "url": u or "", "source": src or _DEFAULT_SOURCE,
+             "msg_ids": msgs or "", "revoked_at": revoked_at,
+             "revoked_reason": revoked_reason or ""}
         # ed2k 的文件名/大小内嵌在链接里(url 列存了完整 URI),展开详情直接给;
         # 115 的文件清单走 /api/share/files 按需读,不带这两个键
         if prov == "ed2k":
@@ -119,7 +135,8 @@ class Store:
     def recent(self, limit: int = 20) -> list[dict]:
         """最近推送(新→旧)。同时间戳按写入顺序决胜(Windows 时钟精度粗,连推会同戳)。"""
         rows = self._conn.execute(
-            "SELECT code, title, pushed_at, provider, url, source FROM pushed"
+            "SELECT code, title, pushed_at, provider, url, source, msg_ids, revoked_at,"
+            " revoked_reason FROM pushed"
             " ORDER BY pushed_at DESC, rowid DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -129,10 +146,56 @@ class Store:
         """按关键词搜推送历史(标题/分享码/完整链接模糊匹配),新→旧。"""
         like = f"%{q}%"
         rows = self._conn.execute(
-            "SELECT code, title, pushed_at, provider, url, source FROM pushed"
+            "SELECT code, title, pushed_at, provider, url, source, msg_ids, revoked_at,"
+            " revoked_reason FROM pushed"
             " WHERE title LIKE ? OR code LIKE ? OR url LIKE ?"
             " ORDER BY pushed_at DESC, rowid DESC LIMIT ?",
             (like, like, like, limit),
+        ).fetchall()
+        return [self._item(*r) for r in rows]
+
+    def get_pushed(self, code: str) -> dict | None:
+        """单条推送记录(撤卡/详情用);不存在返回 None。"""
+        row = self._conn.execute(
+            "SELECT code, title, pushed_at, provider, url, source, msg_ids, revoked_at,"
+            " revoked_reason FROM pushed WHERE code = ?",
+            (code,),
+        ).fetchone()
+        return self._item(*row) if row else None
+
+    def add_push_msg(self, code: str, chat_id, message_id: int) -> None:
+        """记录推卡消息(chat_id + message_id),支持一卡多频道追加。"""
+        import json as _json
+
+        cur = self._conn.execute("SELECT msg_ids FROM pushed WHERE code = ?", (code,)).fetchone()
+        if cur is None:
+            return  # 记录不存在(理论上不会:push_link 先 mark_pushed 再投递)
+        try:
+            msgs = _json.loads(cur[0] or "[]")
+        except ValueError:
+            msgs = []
+        msgs.append({"chat_id": str(chat_id), "message_id": int(message_id)})
+        self._conn.execute(
+            "UPDATE pushed SET msg_ids = ? WHERE code = ?",
+            (_json.dumps(msgs, ensure_ascii=False), code),
+        )
+        self._conn.commit()
+
+    def mark_revoked(self, code: str, reason: str = "") -> None:
+        """标记推送失效(撤卡后写)。已标记过则只更新失效时间。"""
+        self._conn.execute(
+            "UPDATE pushed SET revoked_at = ?, revoked_reason = ? WHERE code = ?",
+            (time.time(), reason[:200], code),
+        )
+        self._conn.commit()
+
+    def revoked(self, limit: int = 50) -> list[dict]:
+        """已失效(撤卡)的推送,新→旧。"""
+        rows = self._conn.execute(
+            "SELECT code, title, pushed_at, provider, url, source, msg_ids, revoked_at,"
+            " revoked_reason FROM pushed WHERE revoked_at IS NOT NULL"
+            " ORDER BY revoked_at DESC, rowid DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         return [self._item(*r) for r in rows]
 

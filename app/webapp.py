@@ -41,6 +41,26 @@ STATE = {"bot_running": False, "bot_error": ""}
 _STATIC = Path(__file__).parent.parent / "static" / "index.html"
 _bearer_lock = threading.Lock()
 
+
+async def _tg_delete_message(token: str, chat_id, message_id, proxy_url: str = "") -> tuple[bool, str]:
+    """调 Telegram Bot API 删一条消息。token 为空/参数缺失 → (False, 原因)。"""
+    import httpx
+
+    if not token or not chat_id or not message_id:
+        return False, "缺少凭据(未配置 Bot token 或未记录消息 ID)"
+    try:
+        async with httpx.AsyncClient(proxy=proxy_url or None, timeout=10) as c:
+            r = await c.post(
+                f"https://api.telegram.org/bot{token}/deleteMessage",
+                json={"chat_id": str(chat_id), "message_id": int(message_id)},
+            )
+            d = r.json()
+        if r.status_code == 200 and d.get("ok"):
+            return True, ""
+        return False, (d.get("description") or f"HTTP {r.status_code}")[:80]
+    except Exception as exc:  # noqa: BLE001 - 网络/超时都算失败,可重试
+        return False, f"{type(exc).__name__}:{str(exc)[:60]}"
+
 # ── 链路健康探测(带 TTL 缓存,避免页面刷新打爆外部服务) ────
 _PROXY_TTL = 60.0    # 代理探测:60s
 _PAN115_TTL = 300.0  # cookie 校验:5min(真实请求 115)
@@ -358,6 +378,11 @@ class PipelineRun(BaseModel):
 
 class PipelineDismiss(BaseModel):
     share_code: str = ""   # 待处理清单里「流水线违规/超时」条目的 share_code
+
+
+class PushRevoke(BaseModel):
+    code: str = ""        # pushed 记录的去重 key(ed2k hash / 115 分享码)
+    force: bool = False   # 跳过失效检测,直接撤卡(分享仍有效但用户要撤时)
 
 
 class MonitorPhone(BaseModel):
@@ -1026,6 +1051,77 @@ def create_app(config_path: str | Path) -> FastAPI:
                 if it["provider"] == "115" and it["url"]:
                     it["password"] = (parse_qs(urlparse(it["url"]).query).get("password") or [""])[0]
             return {"items": items, **store.stats()}
+        finally:
+            store.close()
+
+    @app.get("/api/push/revoked")
+    def push_revoked(request: Request, limit: int = 50) -> dict:
+        """失效撤卡模块:已标记失效(撤卡)的推送记录,新→旧。"""
+        _current_user(config_path, _auth_header(request))
+        store = Store(load_config(config_path).db_path)
+        try:
+            return {"items": store.revoked(max(1, min(limit, 200)))}
+        finally:
+            store.close()
+
+    @app.post("/api/push/revoke")
+    async def push_revoke(body: PushRevoke, request: Request) -> dict:
+        """标记推送失效并撤卡:先删频道里的卡片消息,再写失效标记。
+
+        - 自动检测(仅 115,非 force):调 115 读分享,失效(ShareDead)才撤;
+          仍有效 → 返回 still_valid,前端二次确认后带 force 重发
+        - 撤卡走 Telegram Bot API(deleteMessage),不依赖 Bot 进程在跑;
+          老数据没有 msg_ids 时无法删消息,只落失效标记
+        """
+        _current_user(config_path, _auth_header(request))
+        code = (body.code or "").strip()
+        if not code:
+            raise HTTPException(status_code=400, detail="缺少推送记录 key")
+        cfg = load_config(config_path)
+        store = Store(cfg.db_path)
+        try:
+            rec = store.get_pushed(code)
+            if rec is None:
+                raise HTTPException(status_code=404, detail="推送记录不存在")
+
+            reason = ""
+            if not body.force and rec["provider"] == "115":
+                from app.pan115 import Pan115Reader, ShareDead, ShareLink
+
+                reader = Pan115Reader(cfg.pan115_cookie)
+                try:
+                    await reader.read_share(ShareLink(code))
+                except ShareDead:
+                    reason = "分享已失效"
+                except Exception:  # noqa: BLE001 - 检测失败不阻塞手动撤卡
+                    pass
+                else:
+                    # 分享仍有效:不自动撤,让用户确认(force)后再撤
+                    return {"success": False, "still_valid": True,
+                            "message": "该 115 分享仍有效,确认仍要撤卡吗?"}
+
+            # 撤卡:逐条删频道消息(未存过 message_id 的老数据跳过,只标记失效)
+            import json as _json
+
+            results = []
+            try:
+                msgs = _json.loads(rec["msg_ids"] or "[]")
+            except ValueError:
+                msgs = []
+            if not msgs:
+                reason = reason or "手动标记(无消息 ID 可撤)"
+            for m in msgs:
+                ok, desc = await _tg_delete_message(
+                    cfg.tg_bot_token, m.get("chat_id", ""), m.get("message_id"),
+                    cfg.proxy_url,
+                )
+                results.append({"chat_id": m.get("chat_id", ""),
+                                "message_id": m.get("message_id"), "ok": ok,
+                                "desc": desc or ""})
+            deleted = sum(1 for r in results if r["ok"])
+            store.mark_revoked(code, reason or "手动撤卡")
+            return {"success": True, "code": code, "deleted": deleted,
+                    "total": len(msgs), "results": results, "reason": reason or "手动撤卡"}
         finally:
             store.close()
 

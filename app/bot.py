@@ -522,9 +522,12 @@ class StowBot:
         uncertain: list[str] = []
         for target in targets:
             try:
-                await self._deliver(media, details, link, files, target,
-                                    quality_info=quality_info)
+                mid = await self._deliver(media, details, link, files, target,
+                                          quality_info=quality_info)
                 sent.append(target)
+                # 记下消息 ID(chat_id + message_id),失效撤卡时据此逐条删
+                if mid:
+                    self.store.add_push_msg(link.key, target, mid)
             except DeliveryUncertain as exc:
                 # 超时≠失败:消息可能已送达,重试会重复投递
                 logger.warning("投递超时(结果不确定)%s:%s", target, exc)
@@ -615,7 +618,8 @@ class StowBot:
                 await asyncio.sleep(exc.retry_after + 1)
 
     async def _deliver(self, media, details: dict | None, link: ParsedLink, files, target: str,
-                      quality_info: list[str] | None = None) -> None:
+                      quality_info: list[str] | None = None) -> int | None:
+        """投递卡片到单频道;返回消息 message_id(供撤卡),失败抛异常。"""
         async with self._push_lock:
             markup = None
             if details and details.get("tmdb_id"):
@@ -631,13 +635,13 @@ class StowBot:
                 caption = card.render_caption(media, details, link, files,
                                               quality_info=quality_info)
                 try:
-                    await self._send_with_retry(lambda: self._bot_ref.send_photo(
+                    sent = await self._send_with_retry(lambda: self._bot_ref.send_photo(
                         target, photo=photo,
                         caption=caption, parse_mode=ParseMode.HTML,
                         reply_markup=markup,
                     ))
                     await asyncio.sleep(2)  # 限速
-                    return
+                    return getattr(sent, "message_id", None)
                 except TimedOut as exc:
                     # 超时≠失败:消息可能已送达,重试/回退都会造成重复投递
                     raise DeliveryUncertain(
@@ -647,11 +651,12 @@ class StowBot:
                     logger.warning("send_photo 失败,回退纯文本:%s", exc)
             text = card.render_text(media, details, link, files,
                                     quality_info=quality_info)
-            await self._send_with_retry(lambda: self._bot_ref.send_message(
+            sent = await self._send_with_retry(lambda: self._bot_ref.send_message(
                 target, text, parse_mode=ParseMode.HTML,
                 reply_markup=markup,
             ))
             await asyncio.sleep(2)  # 限速
+            return getattr(sent, "message_id", None)
 
     _bot_ref = None  # run() 时注入
 
