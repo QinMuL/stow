@@ -136,14 +136,19 @@ async function dismiss(a) {
   }
 }
 
-// 历史搜索 + 详情展开(2026-09-13):搜索 pushed 全部历史,点击展开 ed2k 字段 / 115 文件清单
+// 历史搜索 + 分页浏览 + 详情展开(2026-09-14 加翻页:最近推送块可看全部历史)
 const searchQ = ref('')
-const searchItems = ref(null)   // null = 显示默认最近推送;数组 = 搜索结果
+const feedItems = ref([])      // 当前页的推送记录
 const searchLoading = ref(false)
+const page = ref(0)            // 当前页(0 起)
+const PAGE_SIZE = 20
+const total = ref(0)
 const expandedCode = ref('')    // 展开详情的条目 code
 const detailMap = ref({})       // code → { loading, files, error }(115 分享文件清单)
 
-const feedItems = computed(() => searchItems.value ?? pipe.value?.recent ?? [])
+const hasPrev = computed(() => page.value > 0)
+const hasNext = computed(() => (page.value + 1) * PAGE_SIZE < total.value)
+const pageText = computed(() => total.value ? `第 ${page.value + 1} 页 · 共 ${total.value} 条` : '')
 
 function fmtSize(n) {
   if (n == null || n === '') return '—'
@@ -196,18 +201,44 @@ async function load115Files(it) {
   }
 }
 
-async function doSearch() {
+async function loadRecords() {
   const q = searchQ.value.trim()
-  if (!q) { searchItems.value = null; return }
   searchLoading.value = true
   try {
-    const d = await api('history?q=' + encodeURIComponent(q) + '&limit=50')
-    searchItems.value = d.items
+    const qs = `history?limit=${PAGE_SIZE}&offset=${page.value * PAGE_SIZE}` +
+      (q ? '&q=' + encodeURIComponent(q) : '')
+    const d = await api(qs)
+    feedItems.value = d.items || []
+    total.value = d.total || 0
+    err.value = ''
   } catch (e) {
     err.value = e.message
   } finally {
     searchLoading.value = false
   }
+}
+
+function doSearch() {          // 搜索(回到第一页)
+  page.value = 0
+  loadRecords()
+}
+
+function clearSearch() {       // 清除搜索,回到全部记录
+  searchQ.value = ''
+  page.value = 0
+  loadRecords()
+}
+
+function prevPage() {
+  if (!hasPrev.value) return
+  page.value--
+  loadRecords()
+}
+
+function nextPage() {
+  if (!hasNext.value) return
+  page.value++
+  loadRecords()
 }
 
 // ── 失效撤卡模块(2026-09-13)──────────────────────────────
@@ -358,6 +389,7 @@ function fmtMoved(v) {
 
 onMounted(() => {
   load()
+  loadRecords()                             // 最近推送块:分页浏览全部历史
   timer = window.setInterval(load, 10000)   // 与日志页一致:10s 自动刷新
 })
 onUnmounted(() => timer && window.clearInterval(timer))
@@ -517,8 +549,7 @@ onUnmounted(() => timer && window.clearInterval(timer))
           <button class="search-btn" :disabled="searchLoading" @click="doSearch">
             {{ searchLoading ? '…' : '搜索' }}
           </button>
-          <button v-if="searchItems" class="search-clear" title="清除搜索"
-            @click="searchQ = ''; searchItems = null">✕</button>
+          <button v-if="searchQ" class="search-clear" title="清除搜索" @click="clearSearch">✕</button>
         </div>
         <div v-if="feedItems.length" class="feed">
           <template v-for="it in feedItems" :key="it.code">
@@ -574,7 +605,14 @@ onUnmounted(() => timer && window.clearInterval(timer))
             </div>
           </template>
         </div>
-        <div v-else class="empty">{{ searchItems ? '没有匹配的记录' : '还没有推送记录 —— 在 Telegram 给 Bot 发一条 115 分享链接试试' }}</div>
+        <div v-else class="empty">{{ searchQ ? '没有匹配的记录' : '还没有推送记录 —— 在 Telegram 给 Bot 发一条 115 分享链接试试' }}</div>
+
+        <!-- 翻页:全部历史可分页浏览(2026-09-14) -->
+        <div v-if="feedItems.length && total > PAGE_SIZE" class="feed-pager">
+          <button class="link-btn" :disabled="!hasPrev" @click="prevPage">← 上一页</button>
+          <span class="feed-page">{{ pageText }}</span>
+          <button class="link-btn" :disabled="!hasNext" @click="nextPage">下一页 →</button>
+        </div>
       </template>
 
       <!-- 视图二:失效撤卡(已失效记录列表) -->

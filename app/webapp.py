@@ -78,22 +78,31 @@ _HEARTBEAT_STALE = 180.0             # Bot 心跳超过这么久没跳 = 连丢 
 
 
 async def _check_proxy(proxy_url: str) -> dict:
-    """经配置代理探测 api.telegram.org(Bot 的实际依赖);返回可达性与延迟。"""
+    """经配置代理探测 api.telegram.org(Bot 的实际依赖);返回可达性与延迟。
+
+    2026-09-14 加重试容错:代理轻微波动(瞬时握手超时)时自动重试,**连续 3 次失败**
+    才判不可达——否则一次抖动就让健康判据挂 red,页面一直显示"代理不可达"。
+    """
     import httpx
 
-    t0 = time.monotonic()
-    try:
-        async with httpx.AsyncClient(proxy=proxy_url or None, timeout=5) as c:
-            await c.get("https://api.telegram.org")
-        return {
-            "configured": bool(proxy_url), "url": proxy_url, "ok": True,
-            "latency_ms": round((time.monotonic() - t0) * 1000), "error": "",
-        }
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "configured": bool(proxy_url), "url": proxy_url, "ok": False,
-            "latency_ms": None, "error": str(exc)[:80],
-        }
+    last_err = ""
+    for attempt in range(3):
+        t0 = time.monotonic()
+        try:
+            async with httpx.AsyncClient(proxy=proxy_url or None, timeout=5) as c:
+                await c.get("https://api.telegram.org")
+            return {
+                "configured": bool(proxy_url), "url": proxy_url, "ok": True,
+                "latency_ms": round((time.monotonic() - t0) * 1000), "error": "",
+            }
+        except Exception as exc:  # noqa: BLE001 - 波动重试,连续失败才报
+            last_err = str(exc)[:80]
+            if attempt < 2:
+                await asyncio.sleep(0.5)
+    return {
+        "configured": bool(proxy_url), "url": proxy_url, "ok": False,
+        "latency_ms": None, "error": last_err,
+    }
 
 
 def _check_pan115(cookie: str) -> dict:
@@ -1040,14 +1049,17 @@ def create_app(config_path: str | Path) -> FastAPI:
         }
 
     @app.get("/api/history")
-    def history(request: Request, limit: int = 20, q: str = "") -> dict:
-        """总览数据:最近推送(或按 q 搜索历史)+ 今日/累计统计。"""
+    def history(request: Request, limit: int = 20, q: str = "", offset: int = 0) -> dict:
+        """推送历史(分页):按 q 搜索或浏览全部,返回 items + total(翻页用)。"""
         _current_user(config_path, _auth_header(request))
         cfg = load_config(config_path)
         store = Store(cfg.db_path)
         try:
             limit = max(1, min(limit, 100))
-            items = store.search(q.strip(), limit) if q.strip() else store.recent(limit)
+            offset = max(0, offset)
+            needle = q.strip()
+            items = store.search(needle, limit, offset)
+            total = store.search_total(needle)
             # ed2k 的文件名/大小已在 store._item 里解析;这里只补 115 的访问码
             # (从完整 url 提取,供前端读文件清单用)
             from urllib.parse import parse_qs, urlparse
@@ -1055,7 +1067,7 @@ def create_app(config_path: str | Path) -> FastAPI:
             for it in items:
                 if it["provider"] == "115" and it["url"]:
                     it["password"] = (parse_qs(urlparse(it["url"]).query).get("password") or [""])[0]
-            return {"items": items, **store.stats()}
+            return {**store.stats(), "items": items, "total": total}
         finally:
             store.close()
 

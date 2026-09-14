@@ -230,6 +230,63 @@ def test_history_endpoint(tmp_path):
     assert body["items"][0]["title"] == "影B"
 
 
+def test_history_pagination(tmp_path):
+    """历史分页:offset 翻页 + total 总数 + q 过滤后的 total(2026-09-14)。"""
+    import urllib.parse
+
+    from app.store import Store
+
+    client = _client(tmp_path)
+    token = _login(client)
+    s = Store(tmp_path / "stow.db")
+    for i in range(5):
+        s.mark_pushed(f"c{i}", f"剧{i}")
+    s.close()
+
+    r = client.get("/api/history?limit=2&offset=0", headers=_h(token)).json()
+    assert r["total"] == 5
+    assert [i["code"] for i in r["items"]] == ["c4", "c3"]     # 最新在前
+    r2 = client.get("/api/history?limit=2&offset=2", headers=_h(token)).json()
+    assert [i["code"] for i in r2["items"]] == ["c2", "c1"]
+    r3 = client.get("/api/history?limit=2&offset=4", headers=_h(token)).json()
+    assert [i["code"] for i in r3["items"]] == ["c0"]
+
+    rq = client.get("/api/history?q=" + urllib.parse.quote("剧1") + "&limit=10",
+                    headers=_h(token)).json()
+    assert rq["total"] == 1 and rq["items"][0]["code"] == "c1"
+
+
+def test_check_proxy_retries_on_flake(monkeypatch):
+    """代理轻微波动:重试后恢复 ok;连续失败才判不可达(2026-09-14)。"""
+    import app.webapp as web
+
+    class _FC:
+        def __init__(self, fail):
+            self.fail = fail
+            self.calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            self.calls += 1
+            if self.calls <= self.fail:
+                raise OSError("connection reset")
+            return None
+
+    fc = _FC(2)                                    # 前两次失败(同一连接生命周期内的波动)
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kw: fc)
+    r = asyncio.run(web._check_proxy("http://127.0.0.1:7897"))
+    assert r["ok"] is True                                           # 第 3 次成功 → 不误报
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kw: _FC(99))  # 全部失败
+    r = asyncio.run(web._check_proxy("http://127.0.0.1:7897"))
+    assert r["ok"] is False and "connection reset" in r["error"]
+
+
 def test_store_recent_and_stats(tmp_path):
     from app.store import Store
 

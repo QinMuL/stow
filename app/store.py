@@ -142,17 +142,33 @@ class Store:
         ).fetchall()
         return [self._item(*r) for r in rows]
 
-    def search(self, q: str, limit: int = 50) -> list[dict]:
-        """按关键词搜推送历史(标题/分享码/完整链接模糊匹配),新→旧。"""
+    def search(self, q: str, limit: int = 50, offset: int = 0) -> list[dict]:
+        """按关键词搜推送历史(标题/分享码/完整链接模糊匹配),新→旧;支持翻页。
+
+        q 为空 = 全部记录(最近推送分页浏览用)。
+        """
         like = f"%{q}%"
         rows = self._conn.execute(
             "SELECT code, title, pushed_at, provider, url, source, msg_ids, revoked_at,"
             " revoked_reason FROM pushed"
             " WHERE title LIKE ? OR code LIKE ? OR url LIKE ?"
-            " ORDER BY pushed_at DESC, rowid DESC LIMIT ?",
-            (like, like, like, limit),
+            " ORDER BY pushed_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            (like, like, like, limit, offset),
         ).fetchall()
         return [self._item(*r) for r in rows]
+
+    def search_total(self, q: str = "") -> int:
+        """历史记录总数(翻页用);q 为空 = 全部。"""
+        if q:
+            like = f"%{q}%"
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM pushed"
+                " WHERE title LIKE ? OR code LIKE ? OR url LIKE ?",
+                (like, like, like),
+            ).fetchone()
+        else:
+            row = self._conn.execute("SELECT COUNT(*) FROM pushed").fetchone()
+        return int(row[0] or 0)
 
     def get_pushed(self, code: str) -> dict | None:
         """单条推送记录(撤卡/详情用);不存在返回 None。"""
