@@ -484,6 +484,7 @@ class StowBot:
         self, link: ParsedLink, *, status=None, prefix: str = "",
         files=None, media=None, details: dict | None = None,
         quality_info: list[str] | None = None, source: str = "manual",
+        extra_links: list[str] | None = None,
     ) -> PushResult:
         """链接 → 卡片 → 归属频道(手动推送与频道监控共用同一条链路)。
 
@@ -494,6 +495,8 @@ class StowBot:
         既省一次 TMDB 搜索,也避免**再解析一遍文件名** —— ed2k 链接里是我们自己刚改好的
         新名,重解析会把带全角冒号/连字符的标题切碎(实测 `韩国制造：k-pop体验` → `pop体验`),
         于是标题对不上、改搜"pop体验"又把真人秀搜了回来。
+
+        `extra_links`:伴行字幕的 ed2k 链接列表,与主链接渲染在同一张卡上(处理段传)。
         """
         label = _PRESET_LABEL[link.provider]
         targets = self.cfg.channels_for(link.provider)
@@ -523,7 +526,7 @@ class StowBot:
         for target in targets:
             try:
                 mid = await self._deliver(media, details, link, files, target,
-                                          quality_info=quality_info)
+                                          quality_info=quality_info, extra_links=extra_links)
                 sent.append(target)
                 # 记下消息 ID(chat_id + message_id),失效撤卡时据此逐条删
                 if mid:
@@ -618,7 +621,8 @@ class StowBot:
                 await asyncio.sleep(exc.retry_after + 1)
 
     async def _deliver(self, media, details: dict | None, link: ParsedLink, files, target: str,
-                      quality_info: list[str] | None = None) -> int | None:
+                      quality_info: list[str] | None = None,
+                      extra_links: list[str] | None = None) -> int | None:
         """投递卡片到单频道;返回消息 message_id(供撤卡),失败抛异常。"""
         async with self._push_lock:
             markup = None
@@ -633,7 +637,8 @@ class StowBot:
                 photo = await self.tmdb.fetch_image(url)
             if photo:
                 caption = card.render_caption(media, details, link, files,
-                                              quality_info=quality_info)
+                                              quality_info=quality_info,
+                                              extra_links=extra_links)
                 try:
                     sent = await self._send_with_retry(lambda: self._bot_ref.send_photo(
                         target, photo=photo,
@@ -650,7 +655,7 @@ class StowBot:
                 except Exception as exc:  # noqa: BLE001 - 海报发送失败回退纯文本
                     logger.warning("send_photo 失败,回退纯文本:%s", exc)
             text = card.render_text(media, details, link, files,
-                                    quality_info=quality_info)
+                                    quality_info=quality_info, extra_links=extra_links)
             sent = await self._send_with_retry(lambda: self._bot_ref.send_message(
                 target, text, parse_mode=ParseMode.HTML,
                 reply_markup=markup,

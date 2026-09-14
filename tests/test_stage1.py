@@ -84,6 +84,33 @@ def test_card_ed2k_footer():
     assert "ed2k 资源" in text and "<code>" in text
 
 
+def test_card_footer_includes_subtitle_links():
+    """伴行字幕 ed2k 链接与主链接渲染在同一张卡上(2026-09-14)。"""
+    from app.media import analyze_share
+
+    m = analyze_share(_files("The.Movie.2023.1080p.mkv"))
+    subs = [
+        "ed2k://|file|The.Movie.2023.1080p.zh.srt|123|" + "a" * 32 + "|/",
+        "ed2k://|file|The.Movie.2023.1080p.en.srt|456|" + "b" * 32 + "|/",
+    ]
+    link = ParsedLink("ed2k", _ED2K, _ED2K, file_hash="0" * 32)
+    text = card.render_caption(m, None, link, None, extra_links=subs)
+    assert "ed2k 资源" in text and _ED2K in text
+    assert "📑 字幕" in text
+    assert "The.Movie.2023.1080p.zh.srt" in text
+    assert "The.Movie.2023.1080p.en.srt" in text
+    assert len(text) <= 1024
+
+
+def test_card_without_extra_links_has_no_subtitle_block():
+    """不传字幕链接时卡片不出现「📑 字幕」区(行为与原来一致)。"""
+    from app.media import analyze_share
+
+    m = analyze_share(_files("The.Movie.2023.1080p.mkv"))
+    text = card.render_caption(m, None, ParsedLink("ed2k", _ED2K, _ED2K, file_hash="0" * 32))
+    assert "📑 字幕" not in text
+
+
 def test_channel_routing_preset():
     from app.config import ChannelConfig, Config
 

@@ -465,12 +465,67 @@ def test_concurrent_scans_do_not_double_process(tmp_path, monkeypatch):
 def test_chain_moves_sidecar_files_together(tmp_path, monkeypatch):
     chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch)
     (bot.cfg.openlist_dir / "飞到我心上.2026.WEB-DL.S01E12.zh.srt").write_text("sub", encoding="utf-8")
+    (bot.cfg.openlist_dir / "飞到我心上.2026.WEB-DL.S01E12.sup").write_bytes(b"sup")  # PGS 图形字幕
     (bot.cfg.openlist_dir / "banner.jpg").write_bytes(b"jpg")
     asyncio.run(chain.scan_now())
     names = {p.name for p in Path(bot.cfg.clouddrive_dir).iterdir()}
     vid = next(n for n in names if n.endswith(".mkv"))
     assert f"{vid[:-len('.mkv')]}.zh.srt" in names              # 字幕跟着视频走并同步改名
+    assert f"{vid[:-len('.mkv')]}.sup" in names                 # .sup 图形字幕也伴行(2026-09-14 补)
     assert "banner.jpg" not in names                            # 无关图片不动
+
+
+def test_chain_pushes_subtitle_ed2k_links_with_video(tmp_path, monkeypatch):
+    """伴行字幕也生成 ed2k 链接,与视频链接一起推在同一张卡上(2026-09-14)。
+
+    链接文件名必须用**改名后**的规范名(与归档后落盘一致),而不是源字幕名。
+    """
+    chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch)
+    (bot.cfg.openlist_dir / "飞到我心上.2026.WEB-DL.S01E12.zh.srt").write_text("sub", encoding="utf-8")
+    (bot.cfg.openlist_dir / "飞到我心上.2026.WEB-DL.S01E12.sup").write_bytes(b"sup")
+    (bot.cfg.openlist_dir / "banner.jpg").write_bytes(b"jpg")
+    asyncio.run(chain.scan_now())
+    subs = bot.push_kw.get("extra_links") or []
+    assert len(subs) == 2, f"应带 2 个字幕链接,实际 {len(subs)}"
+    assert all(u.startswith("ed2k://|file|飞到我心上.2026.S01E12") for u in subs)
+    assert any(".zh.srt|" in u for u in subs)         # 规范名 + 语言标记
+    assert any(".sup|" in u for u in subs)            # .sup 图形字幕也带
+    assert not any("banner" in u for u in subs)               # 无关图片不生成链接
+
+
+def test_chain_no_subtitles_means_no_extra_links(tmp_path, monkeypatch):
+    """没有伴行字幕时 push_link 不带字幕链接(行为与原来一致)。"""
+    chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch)
+    asyncio.run(chain.scan_now())
+    assert not (bot.push_kw.get("extra_links") or [])
+
+
+def test_match_sidecar_rejects_digit_boundary():
+    """加固(2026-09-14):前缀匹配后紧跟数字 → 拒绝(防 E1 误配 E10)。"""
+    from app.processor import _match_sidecar
+
+    p = ("Show.S01E1",)
+    assert _match_sidecar("Show.S01E10.zh.srt", p) is None     # 数字边界 → 拒绝
+    assert _match_sidecar("Show.S01E1.zh.srt", p) == "Show.S01E1"
+    assert _match_sidecar("Show.S01E1.sup", p) == "Show.S01E1"  # 图形字幕同样匹配
+    # 前缀完整时不受影响
+    assert _match_sidecar("Show.S01E01.zh.srt", ("Show.S01E01",)) == "Show.S01E01"
+    assert _match_sidecar("Show.S01E02.zh.srt", ("Show.S01E01",)) is None
+
+
+def test_chain_s01e1_does_not_take_s01e10_subtitle(tmp_path, monkeypatch):
+    """集成:前导零不统一的下载命名下,E1 视频不带走 E10 的字幕(推卡与归档一致)。"""
+    chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch,
+                           name="飞到我心上.2026.WEB-DL.S01E1.mkv")
+    (bot.cfg.openlist_dir / "飞到我心上.2026.WEB-DL.S01E10.zh.srt").write_text("sub", encoding="utf-8")
+    (bot.cfg.openlist_dir / "飞到我心上.2026.WEB-DL.S01E1.zh.srt").write_text("sub", encoding="utf-8")
+    asyncio.run(chain.scan_now())
+    subs = bot.push_kw.get("extra_links") or []
+    assert len(subs) == 1, f"应只带 E1 字幕,实际 {len(subs)}"
+    assert ".S01E10" not in subs[0]
+    # 归档侧同样只带走 E1 字幕
+    names = {p.name for p in Path(bot.cfg.clouddrive_dir).iterdir()}
+    assert not any(".S01E10" in n for n in names)
 
 
 def test_chain_blocks_unrecognized_and_notifies(tmp_path, monkeypatch):

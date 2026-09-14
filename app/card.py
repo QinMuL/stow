@@ -309,10 +309,15 @@ def _render_season_block(details: dict, media: AggregatedMedia) -> str:
     return "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
 
-def _render_footer(link: ParsedLink) -> str:
-    """链接区:115 网盘 / ed2k 资源(明文完整链接)。"""
+def _render_footer(link: ParsedLink, extra_links: list[str] | None = None) -> str:
+    """链接区:主链接(115 网盘 / ed2k 资源)+ 可选字幕 ed2k 链接(处理段伴行字幕)。"""
     label = "ed2k 资源" if link.provider == "ed2k" else "115 网盘"
-    return f"<blockquote>🔗 {label}\n<code>{_esc(link.url)}</code></blockquote>"
+    lines = [f"🔗 {label}", f"<code>{_esc(link.url)}</code>"]
+    subs = [u for u in (extra_links or []) if u]
+    if subs:
+        lines.append("📑 字幕")
+        lines += [f"<code>{_esc(u)}</code>" for u in subs]
+    return "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
 
 # ── 文件清单自然排序 ───────────────────────────────────────
@@ -447,6 +452,7 @@ def render_caption(
     link: ParsedLink,
     files: list[ShareFile] | None = None,
     quality_info: list[str] | None = None,
+    extra_links: list[str] | None = None,
 ) -> str:
     """海报下方 caption(≤1024)。details 为 TMDB 归一化详情,未匹配传 None。"""
     details = details or _pseudo_details(media)
@@ -454,7 +460,7 @@ def render_caption(
         _render_head(details, media),
         _render_quality_block(media, quality_info),
         _render_season_block(details, media),
-        _render_footer(link),
+        _render_footer(link, extra_links),
         files,
         _esc(details.get("overview") or ""),
         _CAPTION_LIMIT,
@@ -467,6 +473,7 @@ def render_text(
     link: ParsedLink,
     files: list[ShareFile] | None = None,
     quality_info: list[str] | None = None,
+    extra_links: list[str] | None = None,
 ) -> str:
     """无海报时的完整消息(≤4096)。与 caption 同一截断阶梯,限额更高。"""
     details = details or _pseudo_details(media)
@@ -474,7 +481,7 @@ def render_text(
         _render_head(details, media),
         _render_quality_block(media, quality_info),
         _render_season_block(details, media),
-        _render_footer(link),
+        _render_footer(link, extra_links),
         files,
         _esc(details.get("overview") or ""),
         _TEXT_LIMIT,

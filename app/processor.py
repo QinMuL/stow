@@ -39,12 +39,29 @@ logger = logging.getLogger(__name__)
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".ts", ".m2ts", ".mov", ".wmv", ".flv",
               ".rmvb", ".webm", ".mpg", ".mpeg", ".iso", ".m4v"}
 # 字幕单独拎出来:取件段清理源目录时按「有没有视频/字幕」判定要不要删,
-# 它只认这个子集(不含 .nfo/.jpg 这类伴行美术与元数据)
-SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub"}
+# 它只认这个子集(不含 .nfo/.jpg 这类伴行美术与元数据)。
+# .sup = PGS 图形字幕(4K UHD WEB-DL 常见,2026-09-14 补);.vtt = WebVTT;
+# .idx = VobSub 索引(与 .sub 成对)
+SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub", ".sup", ".vtt", ".idx"}
 SIDECAR_EXTS = SUBTITLE_EXTS | {".nfo", ".jpg", ".jpeg", ".png"}
 
 _GATE_NEVER = float("inf")   # 守门返回它 = 一直不符合(如小于体积下限),不必"等一会再看"
 _BUSY_RETRY_SECONDS = 5.0    # 撞上"已有扫描在跑"时,重排一次触发(不丢通知)
+
+
+def _match_sidecar(name: str, prefixes: tuple[str, ...]) -> str | None:
+    """按前缀匹配伴行文件;返回命中的前缀(未命中 None)。
+
+    加固(2026-09-14):前缀匹配后**紧跟的字符不能是数字** —— 否则 `S01E1` 前缀会把
+    `S01E10.zh.srt` 也当成 E1 的伴行(下载命名前导零不统一时)。字幕标记(.zh/.srt/.sup)
+    首字符都是 `.`,数字边界只可能来自"前缀截断在多位数集号中间"。
+    """
+    for x in prefixes:
+        if name.startswith(x):
+            if name[len(x):][:1].isdigit():
+                continue
+            return x
+    return None
 
 
 class ProcessChain:
@@ -279,6 +296,8 @@ class ProcessChain:
             logger.info("处理段跳过推卡(已推送过):%s", final.name)
         else:
             self._phase("推卡中", path)
+            # 伴行字幕也生成 ed2k,与视频链接推在同一张卡上(2026-09-14 用户要求)
+            sub_links = await self._subtitle_links(final, src_stem)
             # 把已算好的 media/details 传下去:省一次 TMDB 搜索,也避免重解析我们自己刚改的名字
             result = await self.bot.push_link(
                 link, media=media, details=details,
@@ -286,6 +305,7 @@ class ProcessChain:
                 # 画质行按**改名后**的名字解析:那里才有 ffprobe 实测的分辨率/HDR/编码/
                 # 色深/帧率/音频(源文件名常常只有 WEB-DL 一个词,直接用它画质行会退化)
                 quality_info=get_quality_info(final.name),
+                extra_links=sub_links,
                 source="process",
             )
             if not result.ok:
@@ -369,6 +389,32 @@ class ProcessChain:
             return need
         return None
 
+    async def _subtitle_links(self, final: Path, src_stem: str) -> list[str]:
+        """伴行字幕的 ed2k 链接列表(与视频链接推在同一张卡上)。
+
+        只对**会随视频归档**的字幕生成链接(与 `_move_to_clouddrive` 同款前缀匹配);
+        链接文件名用**改名后**的规范名(与归档后实际落盘一致)。
+        单条字幕哈希失败只跳过该条,不阻塞视频推卡。
+        """
+        prefixes = tuple(x for x in (final.stem, src_stem) if x)
+        links: list[str] = []
+        for side in sorted(final.parent.iterdir()):
+            if not side.is_file() or side.suffix.lower() not in SIDECAR_EXTS:
+                continue
+            matched = _match_sidecar(side.name, prefixes)
+            if matched is None:
+                continue
+            extra = side.name[len(matched):]           # 如 ".zh.srt" / ".sup"
+            try:
+                size, root = await ed2k_hash_file(str(side))
+            except Exception as exc:  # noqa: BLE001 - 单条字幕失败不影响视频推卡
+                logger.warning("处理段字幕哈希失败(跳过):%s:%s", side.name, exc)
+                continue
+            links.append(ed2k_uri(f"{final.stem}{extra}", size, root))
+        if links:
+            logger.info("处理段伴行字幕 ed2k:%s", "、".join(f"{u.split('|')[2]}" for u in links))
+        return links
+
     def _move_to_clouddrive(self, path: Path, *, stems: list[str] | None = None) -> Path:
         """视频 + 字幕/图片伴行一起移入 clouddrive(CD2 上传源)。
 
@@ -385,7 +431,7 @@ class ProcessChain:
         for side in siblings:
             if not side.is_file() or side.suffix.lower() not in SIDECAR_EXTS:
                 continue
-            matched = next((x for x in prefixes if side.name.startswith(x)), None)
+            matched = _match_sidecar(side.name, prefixes)
             if matched is None:
                 continue
             extra = side.name[len(matched):]           # 如 ".zh.srt" / ".srt"

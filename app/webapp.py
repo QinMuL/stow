@@ -762,10 +762,14 @@ def create_app(config_path: str | Path) -> FastAPI:
         queue_files, queue_bytes = _dir_usage(cfg.openlist_dir)
         # 处理段的"当前在做什么"由处理段自己上报(阶段名 + 哈希/清洗的真进度):
         # 正在处理的那个显示「处理中 · 哈希中 62%」,其余才是「排队中」(原先一律排队中、进度 0)
+        from app.processor import VIDEO_EXTS  # 惰性导入,避开模块级导入环
+
         cur = processor.current_snapshot() if processor is not None else {}
         process_items = []
+        # 只列视频文件:字幕/图片等伴行不参与处理(processor 里会跳过),列出来只会
+        # 显示成永远"排队中"——孤立字幕就成了"卡在处理阶段"(2026-09-14 修)
         for p in sorted(Path(cfg.openlist_dir).glob("*")):
-            if p.is_file():
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
                 active = bool(cur) and cur.get("name") == p.name
                 process_items.append({
                     "name": p.name, "size": p.stat().st_size,

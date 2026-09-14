@@ -1144,6 +1144,29 @@ def test_process_items_split_processing_vs_queued(tmp_path, monkeypatch):
     assert by["排队.mkv"]["note"] == "排队中" and by["排队.mkv"]["progress"] == 0.0
 
 
+def test_process_items_exclude_non_video(tmp_path):
+    """处理段在途明细只列视频:字幕/图片等伴行不显示为「排队中」。
+
+    字幕在 processor 里本就会被跳过(非视频),但原先前端把落地点**所有**文件都列为
+    「排队中」→ 孤立字幕永远显示成"卡在处理阶段"(2026-09-14 修)。
+    """
+    import json as _json
+
+    media = tmp_path / "media/openlist"
+    media.mkdir(parents=True)
+    (media / "片.mkv").write_bytes(b"x" * 100)
+    (media / "片.srt").write_bytes(b"x" * 100)
+    (media / "poster.jpg").write_bytes(b"x" * 100)
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({"data_dir": str(tmp_path), "media_root": str(tmp_path / "media")}),
+                 encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+    items = client.get("/api/pipeline", headers=_h(token)).json()["segments"][1]["items"]
+    assert [i["name"] for i in items] == ["片.mkv"]
+    assert not any(i["name"].endswith((".srt", ".jpg")) for i in items)
+
+
 def test_upload_items_show_transferred_bytes(tmp_path, monkeypatch):
     """上传在途明细带「已传/总量 GB」—— 百分比跳变时也能看出在动。"""
     import json as _json
