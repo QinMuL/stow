@@ -255,8 +255,21 @@ button.nav-item { width: 100%; background: none; border: 0; font: inherit; curso
 .feed-pager-jump { display: inline-flex; align-items: center; gap: 6px; }
 .page-input { width: 52px; padding: 3px 6px; border-radius: var(--r-s);
   border: 1px solid var(--line-strong); background: var(--panel-2); color: var(--text);
-  font-size: 12px; font-family: var(--mono); text-align: center; }
+  font-size: 12px; font-family: var(--mono); text-align: center;
+  -moz-appearance: textfield; appearance: textfield; }   /* 去掉原生上下箭头(2026-09-15) */
+.page-input::-webkit-outer-spin-button,
+.page-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .page-input:focus { outline: none; border-color: var(--amber); }
+/* 排序三选下拉菜单(2026-09-15) */
+.feed-sort { position: relative; display: inline-flex; }
+.sort-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20;
+  background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: var(--r-m);
+  box-shadow: var(--shadow); padding: 4px; min-width: 132px;
+  display: flex; flex-direction: column; gap: 2px; }
+.sort-item { border: none; background: none; color: var(--sub); font-size: 12.5px;
+  text-align: left; padding: 6px 10px; border-radius: var(--r-s); cursor: pointer; }
+.sort-item:hover { color: var(--text); background: var(--amber-soft); }
+.sort-item.on { color: var(--amber-strong); font-weight: 600; }
 /* 撤卡入口按钮 */
 .fd-revoke { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
 .fd-revoke-btn { padding: 6px 12px; border-radius: var(--r-s); border: 1px solid rgba(217,108,79,.45);

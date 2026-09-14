@@ -142,18 +142,23 @@ class Store:
         ).fetchall()
         return [self._item(*r) for r in rows]
 
-    def search(self, q: str, limit: int = 50, offset: int = 0, order: str = "desc") -> list[dict]:
+    def search(self, q: str, limit: int = 50, offset: int = 0, sort: str = "time_desc") -> list[dict]:
         """按关键词搜推送历史(标题/分享码/完整链接模糊匹配);支持翻页与排序。
 
-        q 为空 = 全部记录(最近推送分页浏览用);order: desc(新→旧,默认) | asc(旧→新)。
+        q 为空 = 全部记录(最近推送分页浏览用)。
+        sort: time_desc(时间新→旧,默认) | time_asc(时间旧→新) | title_asc(标题 A-Z)。
         """
         like = f"%{q}%"
-        direction = "ASC" if order == "asc" else "DESC"   # 白名单,防注入
+        order_by = {
+            "time_desc": "pushed_at DESC, rowid DESC",
+            "time_asc": "pushed_at ASC, rowid ASC",
+            "title_asc": "title ASC, pushed_at DESC, rowid DESC",
+        }.get(sort, "pushed_at DESC, rowid DESC")   # 白名单,防注入
         rows = self._conn.execute(
             "SELECT code, title, pushed_at, provider, url, source, msg_ids, revoked_at,"
             " revoked_reason FROM pushed"
             " WHERE title LIKE ? OR code LIKE ? OR url LIKE ?"
-            f" ORDER BY pushed_at {direction}, rowid {direction} LIMIT ? OFFSET ?",
+            f" ORDER BY {order_by} LIMIT ? OFFSET ?",
             (like, like, like, limit, offset),
         ).fetchall()
         return [self._item(*r) for r in rows]

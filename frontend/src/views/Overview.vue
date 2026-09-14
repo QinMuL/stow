@@ -143,7 +143,14 @@ const searchLoading = ref(false)
 const page = ref(0)            // 当前页(0 起)
 const PAGE_SIZE = 10
 const total = ref(0)
-const order = ref('desc')      // 排序:desc 新→旧 / asc 旧→新
+// 排序:点击「排序」弹出三选菜单(2026-09-15)
+const SORTS = [
+  { key: 'time_desc', label: '时间 新→旧' },
+  { key: 'time_asc', label: '时间 旧→新' },
+  { key: 'title_asc', label: '标题 A-Z' },
+]
+const sort = ref('time_desc')
+const sortOpen = ref(false)
 const jumpPage = ref('')       // 页码输入框(1 起)
 const expandedCode = ref('')    // 展开详情的条目 code
 const detailMap = ref({})       // code → { loading, files, error }(115 分享文件清单)
@@ -209,7 +216,7 @@ async function loadRecords() {
   const q = searchQ.value.trim()
   searchLoading.value = true
   try {
-    const qs = `history?limit=${PAGE_SIZE}&offset=${page.value * PAGE_SIZE}&order=${order.value}` +
+    const qs = `history?limit=${PAGE_SIZE}&offset=${page.value * PAGE_SIZE}&sort=${sort.value}` +
       (q ? '&q=' + encodeURIComponent(q) : '')
     const d = await api(qs)
     feedItems.value = d.items || []
@@ -233,8 +240,13 @@ function clearSearch() {       // 清除搜索,回到全部记录
   loadRecords()
 }
 
-function toggleOrder() {       // 排序切换(新→旧 / 旧→新),回到第一页
-  order.value = order.value === 'desc' ? 'asc' : 'desc'
+function toggleSortMenu() {    // 排序菜单展开/收起
+  sortOpen.value = !sortOpen.value
+}
+
+function selectSort(key) {     // 选中排序,回到第一页
+  sort.value = key
+  sortOpen.value = false
   page.value = 0
   loadRecords()
 }
@@ -634,8 +646,16 @@ onUnmounted(() => timer && window.clearInterval(timer))
               placeholder="页码" @keyup.enter="gotoPage" />
             <button class="link-btn" @click="gotoPage">跳转</button>
           </span>
-          <button class="link-btn" :title="order === 'desc' ? '切换到旧→新' : '切换到新→旧'"
-            @click="toggleOrder">{{ order === 'desc' ? '新→旧' : '旧→新' }}</button>
+          <span class="feed-sort">
+            <button class="link-btn" @click="toggleSortMenu">
+              排序 ▾<template v-if="!sortOpen">
+                · {{ SORTS.find(s => s.key === sort)?.label }}</template>
+            </button>
+            <div v-if="sortOpen" class="sort-menu">
+              <button v-for="s in SORTS" :key="s.key" class="sort-item"
+                :class="{ on: sort === s.key }" @click="selectSort(s.key)">{{ s.label }}</button>
+            </div>
+          </span>
         </div>
       </template>
 

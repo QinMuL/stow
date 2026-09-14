@@ -1050,8 +1050,8 @@ def create_app(config_path: str | Path) -> FastAPI:
 
     @app.get("/api/history")
     def history(request: Request, limit: int = 20, q: str = "", offset: int = 0,
-                order: str = "desc") -> dict:
-        """推送历史(分页):按 q 搜索或浏览全部,返回 items + total;order 新→旧/旧→新。"""
+                sort: str = "time_desc") -> dict:
+        """推送历史(分页):按 q 搜索或浏览全部,返回 items + total;sort 三种排序。"""
         _current_user(config_path, _auth_header(request))
         cfg = load_config(config_path)
         store = Store(cfg.db_path)
@@ -1059,7 +1059,7 @@ def create_app(config_path: str | Path) -> FastAPI:
             limit = max(1, min(limit, 100))
             offset = max(0, offset)
             needle = q.strip()
-            items = store.search(needle, limit, offset, order)
+            items = store.search(needle, limit, offset, sort)
             total = store.search_total(needle)
             # ed2k 的文件名/大小已在 store._item 里解析;这里只补 115 的访问码
             # (从完整 url 提取,供前端读文件清单用)

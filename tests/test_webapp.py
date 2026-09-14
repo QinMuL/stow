@@ -255,9 +255,12 @@ def test_history_pagination(tmp_path):
                     headers=_h(token)).json()
     assert rq["total"] == 1 and rq["items"][0]["code"] == "c1"
 
-    # 排序切换:旧→新
-    ra = client.get("/api/history?limit=2&offset=0&order=asc", headers=_h(token)).json()
+    # 排序:时间旧→新
+    ra = client.get("/api/history?limit=2&offset=0&sort=time_asc", headers=_h(token)).json()
     assert [i["code"] for i in ra["items"]] == ["c0", "c1"]
+    # 排序:标题 A-Z(标题 剧0→剧4 升序)
+    rt = client.get("/api/history?limit=3&offset=0&sort=title_asc", headers=_h(token)).json()
+    assert [i["code"] for i in rt["items"]] == ["c0", "c1", "c2"]
 
 
 def test_check_proxy_retries_on_flake(monkeypatch):
