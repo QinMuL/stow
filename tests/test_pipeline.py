@@ -48,7 +48,11 @@ class FakeReader:
 
 
 class FakeSaver:
+    def __init__(self) -> None:
+        self.names: list[str] = []          # ensure_dir 收到的目录名(验证归档目标用)
+
     async def ensure_dir(self, name, parent_cid=None):
+        self.names.append(name)
         return 999
 
     async def save_share(self, link, parent_cid=None):
@@ -184,6 +188,36 @@ def test_violated_status_persisted(tmp_path):
     assert bot.store.pipeline_task_stats() == {"violated": 1}   # 状态已落库
     assert bot.reader.moved and bot.reader.moved[0][0] == 666   # 移入违规目录
     assert any("审核未通过" in t for t in bot.notified)
+
+
+def test_published_move_target_is_plain_subdir_name(tmp_path):
+    """回归(2026-09-15):审核通过后归档目标必须是 root/已发布,不是嵌套的 root/同名/已发布。
+
+    根因:pipeline_dirs()[1] 在数字 root 下返回 "数字/已发布" 完整路径,_move_to 收到后
+    在 root 内再 ensure_dir 逐级创建出 root/同名/已发布,监控/流水线内容全归档进错误目录。
+    """
+    from app.config import ChannelConfig
+    from app.pan115 import ShareFile
+
+    bot = _bot(tmp_path)
+    bot.cfg.channels = [ChannelConfig(chat_id="-1001", preset="115", title="x")]  # 让推送成功
+    bot.reader.status = {"violating": False, "expired": False, "auditing": False}
+
+    class OkReader(FakeReader):
+        async def read_share(self, link):
+            return [ShareFile("剧名 (2024) {tmdb-1}.mkv", 100, False)]
+
+    bot.reader = OkReader()
+    pipeline = SavePipeline(bot)
+    task = PipelineTask(share_code="swsok001", receive_code="abcd", fid=777,
+                        name="剧名 (2024) {tmdb-1}", uid=5406560010)
+    pipeline.tasks["swsok001"] = task
+
+    asyncio.run(pipeline._check_once(task))
+    assert task.status == "done"
+    # 归档目标:ensure_dir 收到**纯子目录名**"已发布"(不是 "数字/已发布"),fs_move 落它
+    assert bot.saver.names == ["已发布"]
+    assert bot.reader.moved == [(777, 999)]
 
 
 def test_timeout_status_persisted(tmp_path):

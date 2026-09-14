@@ -388,7 +388,9 @@ class SavePipeline:
         bot.store.mark_pushed(task.share_code, title, "115", link.url, task.source)
         task.status = "done"
         logger.info("流水线推送成功:%s(%s)", task.name, task.share_code)
-        await self._move_to(cfg.pipeline_dirs()[1], task)
+        # 传**纯子目录名**"已发布",不能传 pipeline_dirs()[1](数字 root 下会被拼成
+        # "数字/已发布",_move_to 再把它当完整路径嵌套创建出 root/同名/已发布 —— 2026-09-15 修)
+        await self._move_to("已发布", task)
         label = f"🎬 {title}" + (f" ({details['year']})" if details and details["year"] else "")
         await bot._notify_uid(task.uid, f"✅ 分享「{task.name}」审核通过并已推送({label});已移入已发布目录。")
 

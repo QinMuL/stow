@@ -262,7 +262,7 @@ button.nav-item { width: 100%; background: none; border: 0; font: inherit; curso
 .page-input:focus { outline: none; border-color: var(--amber); }
 /* 排序三选下拉菜单(2026-09-15) */
 .feed-sort { position: relative; display: inline-flex; }
-.sort-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20;
+.sort-menu { position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 20;   /* 往上弹(翻页条贴底,向下会溢出) */
   background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: var(--r-m);
   box-shadow: var(--shadow); padding: 4px; min-width: 132px;
   display: flex; flex-direction: column; gap: 2px; }
