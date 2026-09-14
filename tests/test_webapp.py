@@ -366,9 +366,15 @@ def test_store_push_msg_and_revoke(tmp_path):
     # recent 里的失效行带标记(前端据此显示灰标)
     rec = next(r for r in s.recent(10) if r["code"] == "sw123")
     assert rec["revoked_at"] and rec["revoked_reason"] == "分享已失效"
-    # 记录不存在的 add_push_msg 静默跳过
+    # 记录不存在的 add_push_msg 自动建占位并写入(投递先于 mark_pushed;2026-09-14 修)
     s.add_push_msg("nope", -100, 1)
-    assert s.get_pushed("nope") is None
+    rec = s.get_pushed("nope")
+    assert rec is not None and rec["msg_ids"] == '[{"chat_id": "-100", "message_id": 1}]'
+    # 占位随后被 mark_pushed 补全标题等字段,msg_ids 不丢
+    s.mark_pushed("nope", "补全标题", "ed2k", "ed2k://x", "process")
+    rec = s.get_pushed("nope")
+    assert rec["title"] == "补全标题" and rec["source"] == "process"
+    assert rec["msg_ids"] == '[{"chat_id": "-100", "message_id": 1}]'
     s.close()
 
 
@@ -1356,6 +1362,117 @@ def test_tg_delete_message_no_token(tmp_path, monkeypatch):
 
     ok, desc = asyncio.run(web._tg_delete_message("", "-100", 1))
     assert ok is False and "缺少凭据" in desc
+
+
+def test_push_backfill_recovers_msg_ids_and_deletes(tmp_path, monkeypatch):
+    """历史记录(msg_ids 空)经频道反查回填后,已失效记录能真正删卡(2026-09-14 修)。"""
+    import json as _json
+
+    from app.store import Store
+
+    class _Resp:
+        def __init__(self, status_code, data):
+            self.status_code = status_code
+            self._data = data
+
+        def json(self):
+            return self._data
+
+    class _FakeHttp:
+        def __init__(self, history):
+            self.history = history
+            self.calls: list[tuple[str, dict]] = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, **kw):
+            self.calls.append((url, json or {}))
+            if "getChatHistory" in url:
+                return _Resp(200, {"ok": True, "result": {"messages": self.history}})
+            if "deleteMessage" in url:
+                return _Resp(200, {"ok": True, "result": True})
+            return _Resp(404, {})
+
+    (tmp_path / "media").mkdir(parents=True)
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({
+        "data_dir": str(tmp_path), "media_root": str(tmp_path / "media"),
+        "tg_bot_token": "123:tok", "proxy_url": "",
+        "channels": [{"chat_id": "-100111", "preset": "ed2k", "title": "x"}],
+    }), encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+
+    code = "a" * 32
+    uri = f"ed2k://|file|某片.mkv|100|{code}|/"
+    s = Store(tmp_path / "stow.db")
+    s.mark_pushed(code, "某片", "ed2k", uri, "process")
+    s.mark_revoked(code, "手动撤卡")
+    s.close()
+
+    fake = _FakeHttp([{"message_id": 77, "text": f"🔗 ed2k 资源\n<code>{uri}</code>"}])
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kw: fake)
+
+    r = client.post("/api/push/backfill", headers=_h(token)).json()
+    assert r["backfilled"] == 1 and r["repaired"] == 1 and r["deleted"] == 1
+    assert r["failed"] == []
+    rec = Store(tmp_path / "stow.db").get_pushed(code)
+    assert rec["msg_ids"] == '[{"chat_id": "-100111", "message_id": 77}]'
+    assert sum(1 for u, _ in fake.calls if "deleteMessage" in u) == 1
+
+
+def test_push_backfill_skips_records_already_having_msg_ids(tmp_path, monkeypatch):
+    """已有 msg_ids 的记录不回填(不重复追加消息 ID)。"""
+    import json as _json
+
+    from app.store import Store
+
+    class _Resp:
+        def __init__(self, status_code, data):
+            self.status_code = status_code
+            self._data = data
+
+        def json(self):
+            return self._data
+
+    class _FakeHttp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, **kw):
+            if "getChatHistory" in url:
+                return _Resp(200, {"ok": True, "result": {"messages": []}})
+            return _Resp(200, {"ok": True, "result": True})
+
+    (tmp_path / "media").mkdir(parents=True)
+    p = tmp_path / "config.json"
+    p.write_text(_json.dumps({
+        "data_dir": str(tmp_path), "media_root": str(tmp_path / "media"),
+        "tg_bot_token": "123:tok", "proxy_url": "",
+        "channels": [{"chat_id": "-100111", "preset": "ed2k", "title": "x"}],
+    }), encoding="utf-8")
+    client = TestClient(create_app(p))
+    token = _login(client)
+
+    code = "b" * 32
+    uri = f"ed2k://|file|已有.mkv|100|{code}|/"
+    s = Store(tmp_path / "stow.db")
+    s.mark_pushed(code, "已有", "ed2k", uri, "process")
+    s.add_push_msg(code, -100222, 9)              # 已有消息 ID
+    s.close()
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kw: _FakeHttp())
+    r = client.post("/api/push/backfill", headers=_h(token)).json()
+    assert r["backfilled"] == 0 and r["repaired"] == 0
+    rec = Store(tmp_path / "stow.db").get_pushed(code)
+    assert rec["msg_ids"] == '[{"chat_id": "-100222", "message_id": 9}]'  # 未被追加
 
 
 def test_tg_delete_message_http_error(tmp_path, monkeypatch):

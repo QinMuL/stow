@@ -164,12 +164,22 @@ class Store:
         return self._item(*row) if row else None
 
     def add_push_msg(self, code: str, chat_id, message_id: int) -> None:
-        """记录推卡消息(chat_id + message_id),支持一卡多频道追加。"""
+        """记录推卡消息(chat_id + message_id),支持一卡多频道追加。
+
+        记录不存在时**先建占位**(2026-09-14 修):`push_link` 是**先投递后 mark_pushed**,
+        原来静默跳过导致 msg_ids 永远为空 —— 撤卡只能标记失效,删不了频道里的卡片。
+        占位记录会被随后执行的 `mark_pushed`(ON CONFLICT UPDATE)补全标题等字段。
+        """
         import json as _json
 
         cur = self._conn.execute("SELECT msg_ids FROM pushed WHERE code = ?", (code,)).fetchone()
         if cur is None:
-            return  # 记录不存在(理论上不会:push_link 先 mark_pushed 再投递)
+            self._conn.execute(
+                "INSERT INTO pushed(code, pushed_at, title, provider, url, source, msg_ids)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (code, time.time(), "", "", "", _DEFAULT_SOURCE, "[]"),
+            )
+            cur = ("[]",)
         try:
             msgs = _json.loads(cur[0] or "[]")
         except ValueError:

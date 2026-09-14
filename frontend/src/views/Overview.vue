@@ -257,6 +257,27 @@ async function revoke(it, force = false) {
   }
 }
 
+// 历史撤卡补救(2026-09-14):早前 msg_ids 丢失,撤卡删不了频道卡片。
+// 从频道历史反查消息 ID 回填,并对已失效记录重试删卡。
+const backfilling = ref(false)
+async function backfill() {
+  if (backfilling.value) return
+  backfilling.value = true
+  feedMsg.value = ''
+  try {
+    const d = await api('push/backfill', {}, 'POST')
+    const head = `✅ 回填 ${d.backfilled} 条消息 ID`
+    feedMsg.value = d.deleted
+      ? `${head},重试撤卡删除 ${d.deleted} 条` + (d.failed?.length ? `(${d.failed.length} 失败)` : '')
+      : (d.error || head)
+    loadRevoked()
+  } catch (e) {
+    feedMsg.value = e.message
+  } finally {
+    backfilling.value = false
+  }
+}
+
 // D 方案:手写迷你**曲线**图(无依赖)——两条序列合成一张图,共用一把 0 起刻度。
 // 坐标系固定(700×110),靠 preserveAspectRatio="none" 横向拉伸铺满容器宽度;
 // 曲线用 vector-effect="non-scaling-stroke" 保证线宽不被拉伸变形——代价是**不能画圆点**
@@ -559,6 +580,12 @@ onUnmounted(() => timer && window.clearInterval(timer))
       <!-- 视图二:失效撤卡(已失效记录列表) -->
       <template v-else>
         <div v-if="revokedItems.length" class="feed">
+          <div class="feed-tool">
+            <button class="link-btn" :disabled="backfilling" @click="backfill()"
+              title="早期记录丢失了消息 ID,撤卡删不了频道卡片;从频道历史反查回填后重试删除">
+              {{ backfilling ? '回填中…' : '🛠 回填历史消息并重试撤卡' }}
+            </button>
+          </div>
           <div v-for="it in revokedItems" :key="it.code" class="feed-item dead">
             <span class="dot bad" style="width:7px;height:7px"></span>
             <span class="feed-dead" title="已失效">💀</span>
