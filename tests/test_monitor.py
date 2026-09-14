@@ -544,3 +544,66 @@ def test_runtime_status_exposes_login_phone(tmp_path):
     asyncio.run(mon.login_cancel())
     rs = mon.runtime_status()
     assert rs["login_phone"] == "" and rs["login_stage"] == ""
+
+
+# ── 历史撤卡补救(Telethon 方案,2026-09-14) ─────────────────
+def test_backfill_pushed_ids_recovers_and_revokes(tmp_path, monkeypatch):
+    """用户账号读推送频道历史 → 回填 msg_ids → 已失效记录重试删卡。"""
+    from app.config import ChannelConfig
+    from app.store import Store
+
+    msg = FakeMessage(77, f"🔗 ed2k 资源\n{_ED2K_A}")
+    mon, bot, _ = _monitor(tmp_path, messages={-100777: [msg]})
+    bot.cfg.channels = [ChannelConfig(chat_id="-100777", preset="ed2k", title="x")]
+    # 一条 msg_ids 空的已失效记录(撤卡 bug 产物);backfill 读 cfg.db_path(stow.db)
+    s = Store(bot.cfg.db_path)
+    s.mark_pushed(_HASH_A, "某片", "ed2k", _ED2K_A, "process")
+    s.mark_revoked(_HASH_A, "手动撤卡")
+    s.close()
+
+    deleted: list[int] = []
+
+    async def fake_del(token, chat_id, message_id, proxy_url=""):
+        deleted.append(message_id)
+        return True, ""
+
+    monkeypatch.setattr("app.channel_monitor._tg_delete_message", fake_del)
+    r = asyncio.run(mon.backfill_pushed_ids())
+    assert r["backfilled"] == 1 and r["repaired"] == 1 and r["deleted"] == 1
+    assert r["failed"] == []
+    rec = Store(bot.cfg.db_path).get_pushed(_HASH_A)
+    assert rec["msg_ids"] == '[{"chat_id": "-100777", "message_id": 77}]'
+    assert deleted == [77]
+
+
+def test_backfill_pushed_ids_skips_existing_msg_ids(tmp_path, monkeypatch):
+    """已有 msg_ids 的记录不回填;无匹配链接则全 0。"""
+    from app.config import ChannelConfig
+    from app.store import Store
+
+    msg = FakeMessage(88, f"🔗 ed2k 资源\n{_ED2K_B}")     # 频道里只有另一条链接
+    mon, bot, _ = _monitor(tmp_path, messages={-100777: [msg]})
+    bot.cfg.channels = [ChannelConfig(chat_id="-100777", preset="ed2k", title="x")]
+    s = Store(bot.cfg.db_path)
+    s.mark_pushed(_HASH_A, "某片", "ed2k", _ED2K_A, "process")
+    s.add_push_msg(_HASH_A, -100999, 5)                   # 已有消息 ID
+    s.close()
+    r = asyncio.run(mon.backfill_pushed_ids())
+    assert r["backfilled"] == 0 and r["repaired"] == 0 and r["deleted"] == 0
+    rec = Store(bot.cfg.db_path).get_pushed(_HASH_A)
+    assert rec["msg_ids"] == '[{"chat_id": "-100999", "message_id": 5}]'  # 未被追加
+
+
+def test_backfill_pushed_ids_requires_account(tmp_path, monkeypatch):
+    """缺 api_id/hash 或账号未登录 → 返回 error,不触网。"""
+    from app.config import ChannelConfig
+
+    mon, bot, _ = _monitor(tmp_path)
+    bot.cfg.tg_api_id = 0
+    r = asyncio.run(mon.backfill_pushed_ids())
+    assert "error" in r
+
+    mon2, bot2, _ = _monitor(tmp_path, authorized=False)
+    bot2.cfg.channels = [ChannelConfig(chat_id="-100777", preset="ed2k", title="x")]
+    r2 = asyncio.run(mon2.backfill_pushed_ids())
+    assert "error" in r2 and "未登录" in r2["error"]

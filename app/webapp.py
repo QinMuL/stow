@@ -62,81 +62,6 @@ async def _tg_delete_message(token: str, chat_id, message_id, proxy_url: str = "
         return False, f"{type(exc).__name__}:{str(exc)[:60]}"
 
 
-async def _backfill_msg_ids(cfg, store) -> dict:
-    """历史撤卡补救:反查推送频道最近消息,回填缺失的 msg_ids;已失效记录重试删卡。
-
-    背景(2026-09-14 修):`add_push_msg` 曾因"投递先于 mark_pushed、记录不存在"而静默
-    丢弃,历史记录的 msg_ids 全空 → 撤卡只能标记失效、删不了频道卡片。此接口用 Bot API
-    `getChatHistory` 反查频道里的卡片消息,按链接匹配回填 message_id,并把**已标记失效**
-    的记录重新执行删除。Bot 需是该频道的管理员(推送卡片本身就需要这个权限)。
-    """
-    import json as _json
-
-    import httpx
-
-    from app.links import parse_all
-
-    if not (cfg.tg_bot_token and cfg.channels):
-        return {"backfilled": 0, "repaired": 0, "deleted": 0,
-                "failed": [], "error": "未配置 Bot token 或推送频道"}
-    backfilled = 0
-    repaired: list[str] = []
-    async with httpx.AsyncClient(proxy=cfg.proxy_url or None, timeout=15) as c:
-        for ch in cfg.channels:
-            chat_id = str(ch.chat_id)
-            offset = 0
-            for _ in range(2):                    # 每频道最近 200 条(100/页)
-                try:
-                    r = await c.post(
-                        f"https://api.telegram.org/bot{cfg.tg_bot_token}/getChatHistory",
-                        json={"chat_id": chat_id, "limit": 100, "offset": offset},
-                    )
-                    d = r.json()
-                except Exception as exc:  # noqa: BLE001 - 网络失败跳过该页
-                    logger.debug("getChatHistory 失败(%s):%s", chat_id, exc)
-                    break
-                if r.status_code != 200 or not d.get("ok"):
-                    break
-                msgs = (d.get("result") or {}).get("messages") or []
-                if not msgs:
-                    break
-                for m in msgs:
-                    text = m.get("text") or m.get("caption") or ""
-                    mid = m.get("message_id")
-                    if not text or not mid:
-                        continue
-                    for link in parse_all(str(text)):
-                        rec = store.get_pushed(link.key)
-                        if rec is None or rec["msg_ids"]:
-                            continue
-                        store.add_push_msg(link.key, chat_id, mid)
-                        backfilled += 1
-                        if rec.get("revoked_at"):
-                            repaired.append(link.key)
-                offset = int(msgs[-1].get("message_id") or 0)
-    # 已失效的记录:重新执行删卡
-    deleted = 0
-    failed: list[str] = []
-    for code in repaired:
-        rec = store.get_pushed(code)
-        if not rec:
-            continue
-        try:
-            msgs = _json.loads(rec["msg_ids"] or "[]")
-        except ValueError:
-            msgs = []
-        for m in msgs:
-            ok, desc = await _tg_delete_message(
-                cfg.tg_bot_token, m.get("chat_id", ""), m.get("message_id"), cfg.proxy_url)
-            if ok:
-                deleted += 1
-            else:
-                failed.append(desc or "删除失败")
-    logger.info("失效撤卡补救:回填 %d 条消息 ID,重试删除 %d 条(%d 失败)",
-                backfilled, deleted, len(failed))
-    return {"backfilled": backfilled, "repaired": len(repaired),
-            "deleted": deleted, "failed": failed[:5]}
-
 # ── 链路健康探测(带 TTL 缓存,避免页面刷新打爆外部服务) ────
 _PROXY_TTL = 60.0    # 代理探测:60s
 _PAN115_TTL = 300.0  # cookie 校验:5min(真实请求 115)
@@ -1206,19 +1131,26 @@ def create_app(config_path: str | Path) -> FastAPI:
             store.close()
 
     @app.post("/api/push/backfill")
-    async def push_backfill(request: Request) -> dict:
-        """失效撤卡补救:反查频道历史回填消息 ID,并对已失效记录重试删卡。
+    def push_backfill(request: Request) -> dict:
+        """失效撤卡补救:用用户账号(Telethon)反查频道历史回填消息 ID,并重试删卡。
 
-        历史记录(2026-09-14 前的 bug 产物)msg_ids 全空,撤卡删不了频道卡片;
-        此接口从推送频道最近消息里按链接匹配回填,并重新执行已失效记录的删卡。
+        Bot API 没有 getChatHistory(2026-09-14 实测 404),读不了历史;
+        改用监控用的用户账号在 Bot 事件循环里 iter_messages 匹配回填。
         """
         _current_user(config_path, _auth_header(request))
-        cfg = load_config(config_path)
-        store = Store(cfg.db_path)
+        mon = STATE.get("monitor")
+        if mon is None:
+            raise HTTPException(status_code=503, detail="Bot 未运行,无法回填")
+        loop = STATE.get("bot_loop")
+        if loop is None:
+            raise HTTPException(status_code=503, detail="Bot 事件循环未就绪,请稍后重试")
+        fut = asyncio.run_coroutine_threadsafe(mon.backfill_pushed_ids(), loop)
         try:
-            return await _backfill_msg_ids(cfg, store)
-        finally:
-            store.close()
+            return fut.result(timeout=180)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"回填失败:{str(exc)[:120]}") from exc
 
     @app.get("/api/share/files")
     async def share_files(request: Request, code: str, password: str = "") -> dict:

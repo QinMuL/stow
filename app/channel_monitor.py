@@ -28,6 +28,7 @@ _WATCHDOG_INTERVAL = 60    # 连接状态巡检(断线告警/恢复通知)
 _CATCHUP_LIMIT = 100       # 补扫每频道最多回溯消息数(停机恢复)
 _RETRY_DELAY = 30          # 单条推送失败后重试间隔(秒)
 _LOGIN_TTL = 600           # 登录会话有效期(秒,超时需重新获取验证码)
+_BACKFILL_LIMIT = 200      # 撤卡回填每频道最多回溯消息数
 
 STATE_DISABLED = "disabled"   # 已登录但未配置源频道
 STATE_NO_API = "no-api"       # 缺 api_id/api_hash
@@ -73,6 +74,26 @@ def normalize_ref(ref: str) -> str | int:
         return int("-100" + m.group(1)) if "c/" in ref else m.group(1)
     raw = ref.strip().removeprefix("@")
     return int(raw) if raw.lstrip("-").isdigit() else raw
+
+
+async def _tg_delete_message(token: str, chat_id, message_id, proxy_url: str = "") -> tuple[bool, str]:
+    """调 Telegram Bot API 删一条消息(撤卡回填后的重试删除)。"""
+    import httpx
+
+    if not token or not chat_id or not message_id:
+        return False, "缺少凭据(未配置 Bot token 或未记录消息 ID)"
+    try:
+        async with httpx.AsyncClient(proxy=proxy_url or None, timeout=10) as c:
+            r = await c.post(
+                f"https://api.telegram.org/bot{token}/deleteMessage",
+                json={"chat_id": str(chat_id), "message_id": int(message_id)},
+            )
+            d = r.json()
+        if r.status_code == 200 and d.get("ok"):
+            return True, ""
+        return False, (d.get("description") or f"HTTP {r.status_code}")[:80]
+    except Exception as exc:  # noqa: BLE001 - 网络/超时都算失败,可重试
+        return False, f"{type(exc).__name__}:{str(exc)[:60]}"
 
 
 class ChannelMonitor:
@@ -193,6 +214,79 @@ class ChannelMonitor:
                 await client.disconnect()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("断开监控客户端失败:%s", exc)
+
+    async def backfill_pushed_ids(self) -> dict:
+        """历史撤卡补救:用用户账号读推送频道历史,回填缺失的 msg_ids,并重试删卡。
+
+        2026-09-14 改 Telethon 方案:Bot API 没有 `getChatHistory`,拿不到历史消息;
+        改用监控用的用户账号(MTProto,在推送频道里即可读历史),按链接匹配回填
+        message_id,并把**已标记失效**的记录重新执行删除。
+        在 Bot 事件循环里执行(Web 侧经 run_coroutine_threadsafe 投递)。
+        """
+        import json as _json
+
+        from app.links import parse_all
+        from app.store import Store
+
+        cfg = self.bot.cfg
+        if not cfg.tg_api_id or not cfg.tg_api_hash:
+            return {"error": "未配置频道监控账号(tg_api_id/hash)"}
+        if not cfg.channels:
+            return {"error": "未配置推送频道"}
+        store = Store(cfg.db_path)
+        temp_client = self._client is None
+        client = self._client
+        try:
+            if client is None:
+                client = await self._make_client()
+            if client is None or not await client.is_user_authorized():
+                return {"error": "频道监控账号未登录(Web 配置页登录后重试)"}
+            backfilled = 0
+            repaired: list[str] = []
+            for ch in cfg.channels:
+                chat_id = int(ch.chat_id)
+                try:
+                    async for msg in client.iter_messages(chat_id, limit=_BACKFILL_LIMIT):
+                        text = getattr(msg, "message", "") or ""
+                        if not text or not getattr(msg, "id", None):
+                            continue
+                        for link in parse_all(text):
+                            rec = store.get_pushed(link.key)
+                            if rec is None or rec["msg_ids"]:
+                                continue
+                            store.add_push_msg(link.key, str(chat_id), msg.id)
+                            backfilled += 1
+                            if rec.get("revoked_at"):
+                                repaired.append(link.key)
+                except Exception as exc:  # noqa: BLE001 - 单频道失败不拖垮其余
+                    logger.warning("撤卡回填读频道历史失败(%s):%s", chat_id, exc)
+            # 已失效的记录:重新执行删卡(Bot API deleteMessage 即可)
+            deleted = 0
+            failed: list[str] = []
+            for code in repaired:
+                rec = store.get_pushed(code)
+                if not rec:
+                    continue
+                try:
+                    msgs = _json.loads(rec["msg_ids"] or "[]")
+                except ValueError:
+                    msgs = []
+                for m in msgs:
+                    ok, desc = await _tg_delete_message(
+                        cfg.tg_bot_token, m.get("chat_id", ""), m.get("message_id"), cfg.proxy_url)
+                    if ok:
+                        deleted += 1
+                    else:
+                        failed.append(desc or "删除失败")
+            logger.info("失效撤卡补救:回填 %d 条消息 ID,重试删除 %d 条(%d 失败)",
+                        backfilled, deleted, len(failed))
+            return {"backfilled": backfilled, "repaired": len(repaired),
+                    "deleted": deleted, "failed": failed[:5]}
+        finally:
+            store.close()
+            if temp_client and client is not None and self._client is client:
+                await client.disconnect()
+                self._client = None
 
     async def _watchdog_loop(self) -> None:
         """连接巡检:断线/恢复各告警一次,避免监控静默失效无人知晓。"""
