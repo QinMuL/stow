@@ -255,6 +255,10 @@ def test_history_pagination(tmp_path):
                     headers=_h(token)).json()
     assert rq["total"] == 1 and rq["items"][0]["code"] == "c1"
 
+    # 排序切换:旧→新
+    ra = client.get("/api/history?limit=2&offset=0&order=asc", headers=_h(token)).json()
+    assert [i["code"] for i in ra["items"]] == ["c0", "c1"]
+
 
 def test_check_proxy_retries_on_flake(monkeypatch):
     """代理轻微波动:重试后恢复 ok;连续失败才判不可达(2026-09-14)。"""

@@ -141,14 +141,18 @@ const searchQ = ref('')
 const feedItems = ref([])      // 当前页的推送记录
 const searchLoading = ref(false)
 const page = ref(0)            // 当前页(0 起)
-const PAGE_SIZE = 20
+const PAGE_SIZE = 10
 const total = ref(0)
+const order = ref('desc')      // 排序:desc 新→旧 / asc 旧→新
+const jumpPage = ref('')       // 页码输入框(1 起)
 const expandedCode = ref('')    // 展开详情的条目 code
 const detailMap = ref({})       // code → { loading, files, error }(115 分享文件清单)
 
 const hasPrev = computed(() => page.value > 0)
 const hasNext = computed(() => (page.value + 1) * PAGE_SIZE < total.value)
-const pageText = computed(() => total.value ? `第 ${page.value + 1} 页 · 共 ${total.value} 条` : '')
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
+const pageText = computed(() => total.value
+  ? `第 ${page.value + 1}/${totalPages.value} 页 · 共 ${total.value} 条` : '')
 
 function fmtSize(n) {
   if (n == null || n === '') return '—'
@@ -205,7 +209,7 @@ async function loadRecords() {
   const q = searchQ.value.trim()
   searchLoading.value = true
   try {
-    const qs = `history?limit=${PAGE_SIZE}&offset=${page.value * PAGE_SIZE}` +
+    const qs = `history?limit=${PAGE_SIZE}&offset=${page.value * PAGE_SIZE}&order=${order.value}` +
       (q ? '&q=' + encodeURIComponent(q) : '')
     const d = await api(qs)
     feedItems.value = d.items || []
@@ -226,6 +230,19 @@ function doSearch() {          // 搜索(回到第一页)
 function clearSearch() {       // 清除搜索,回到全部记录
   searchQ.value = ''
   page.value = 0
+  loadRecords()
+}
+
+function toggleOrder() {       // 排序切换(新→旧 / 旧→新),回到第一页
+  order.value = order.value === 'desc' ? 'asc' : 'desc'
+  page.value = 0
+  loadRecords()
+}
+
+function gotoPage() {          // 页码输入框跳转(1 起,越界钳制)
+  const n = parseInt(jumpPage.value, 10)
+  if (!Number.isFinite(n) || n < 1) return
+  page.value = Math.min(n - 1, totalPages.value - 1)
   loadRecords()
 }
 
@@ -612,6 +629,13 @@ onUnmounted(() => timer && window.clearInterval(timer))
           <button class="link-btn" :disabled="!hasPrev" @click="prevPage">← 上一页</button>
           <span class="feed-page">{{ pageText }}</span>
           <button class="link-btn" :disabled="!hasNext" @click="nextPage">下一页 →</button>
+          <span class="feed-pager-jump">
+            <input v-model="jumpPage" class="page-input" type="number" min="1" :max="totalPages"
+              placeholder="页码" @keyup.enter="gotoPage" />
+            <button class="link-btn" @click="gotoPage">跳转</button>
+          </span>
+          <button class="link-btn" :title="order === 'desc' ? '切换到旧→新' : '切换到新→旧'"
+            @click="toggleOrder">{{ order === 'desc' ? '新→旧' : '旧→新' }}</button>
         </div>
       </template>
 
