@@ -513,6 +513,21 @@ def test_match_sidecar_rejects_digit_boundary():
     assert _match_sidecar("Show.S01E02.zh.srt", ("Show.S01E01",)) is None
 
 
+def test_match_sidecar_tolerates_extra_dot():
+    """回归(2026-09-15):字幕名多打一个点仍能匹配上视频。
+
+    线上案例:视频 `哦我的鬼神大人.2015.S01E01.NF.WEB-DL.mkv`、字幕
+    `哦我的鬼神大人.2015..S01E01.NF.WEB-DL.srt`(`2015` 后两个点)——严格 startswith
+    失败导致字幕永远落单。token 化前缀匹配应命中。
+    """
+    from app.processor import _match_sidecar
+
+    p = ("哦我的鬼神大人.2015.S01E01.NF.WEB-DL",)
+    assert _match_sidecar("哦我的鬼神大人.2015..S01E01.NF.WEB-DL.srt", p) == p[0]
+    # 数字边界保护仍然生效
+    assert _match_sidecar("哦我的鬼神大人.2015..S01E10.NF.WEB-DL.srt", p) is None
+
+
 def test_chain_s01e1_does_not_take_s01e10_subtitle(tmp_path, monkeypatch):
     """集成:前导零不统一的下载命名下,E1 视频不带走 E10 的字幕(推卡与归档一致)。"""
     chain, bot, _ = _chain(tmp_path, monkeypatch=monkeypatch,

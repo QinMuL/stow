@@ -50,17 +50,38 @@ _BUSY_RETRY_SECONDS = 5.0    # 撞上"已有扫描在跑"时,重排一次触发(
 
 
 def _match_sidecar(name: str, prefixes: tuple[str, ...]) -> str | None:
-    """按前缀匹配伴行文件;返回命中的前缀(未命中 None)。
+    """按"松散前缀"匹配伴行文件;返回命中的前缀(未命中 None)。
 
-    加固(2026-09-14):前缀匹配后**紧跟的字符不能是数字** —— 否则 `S01E1` 前缀会把
-    `S01E10.zh.srt` 也当成 E1 的伴行(下载命名前导零不统一时)。字幕标记(.zh/.srt/.sup)
-    首字符都是 `.`,数字边界只可能来自"前缀截断在多位数集号中间"。
+    2026-09-15 重写(线上案例):视频 `哦我的鬼神大人.2015.S01E01.NF.WEB-DL.mkv`,
+    字幕 `哦我的鬼神大人.2015..S01E01.NF.WEB-DL.srt` —— 下载源在 `2015` 后多打了一个点,
+    严格 `startswith` 完全匹配失败,字幕永远落单。改为**按非字母数字切分 token 后做前缀
+    比较**:多余的点/连字符被分词吸收,只要 token 序列前缀一致就命中。
+    保护(2026-09-14):前缀 token 后紧跟的字符不能是数字 —— 否则 `S01E1` 会把
+    `S01E10.zh.srt` 也当成 E1 的伴行(下载命名前导零不统一时)。
     """
+    import re as _re
+
+    def _tokens(s: str) -> list[str]:
+        return _re.split(r"[^A-Za-z0-9]+", s)
+
+    name_tokens = _tokens(name)
     for x in prefixes:
-        if name.startswith(x):
-            if name[len(x):][:1].isdigit():
-                continue
-            return x
+        p_tokens = _tokens(x)
+        if len(name_tokens) < len(p_tokens) or name_tokens[: len(p_tokens)] != p_tokens:
+            continue
+        # 数字边界:前缀在 name 里的结束位置,后一个字符不能是数字
+        # (用原始 name 定位:找到 p_tokens 拼回 name 的位置)
+        idx = 0
+        for t in p_tokens:
+            idx = name.find(t, idx)
+            if idx < 0:
+                break
+            idx += len(t)
+        if idx < 0:
+            continue
+        if idx < len(name) and name[idx].isdigit():
+            continue
+        return x
     return None
 
 
@@ -389,6 +410,24 @@ class ProcessChain:
             return need
         return None
 
+    def _sidecar_suffix(self, name: str, prefix: str) -> str:
+        """字幕名去掉"命中的前缀部分"后的剩余(如 `.zh.srt` / `.sup`)。
+
+        松散匹配下 prefix 未必是 name 的字面前缀(可能隔了个点),不能用
+        `name[len(prefix):]`。改为:按 token 在 name 里逐个定位前缀 token,
+        剩余从最后一个 token 结尾处开始。
+        """
+        import re as _re
+
+        tokens = _re.split(r"[^A-Za-z0-9]+", prefix)
+        idx = 0
+        for t in tokens:
+            idx = name.find(t, idx)
+            if idx < 0:
+                break
+            idx += len(t)
+        return name[idx:] if idx >= 0 else name
+
     async def _subtitle_links(self, final: Path, src_stem: str) -> list[str]:
         """伴行字幕的 ed2k 链接列表(与视频链接推在同一张卡上)。
 
@@ -404,7 +443,7 @@ class ProcessChain:
             matched = _match_sidecar(side.name, prefixes)
             if matched is None:
                 continue
-            extra = side.name[len(matched):]           # 如 ".zh.srt" / ".sup"
+            extra = self._sidecar_suffix(side.name, matched)   # 如 ".zh.srt" / ".sup"
             try:
                 size, root = await ed2k_hash_file(str(side))
             except Exception as exc:  # noqa: BLE001 - 单条字幕失败不影响视频推卡
@@ -434,7 +473,7 @@ class ProcessChain:
             matched = _match_sidecar(side.name, prefixes)
             if matched is None:
                 continue
-            extra = side.name[len(matched):]           # 如 ".zh.srt" / ".srt"
+            extra = self._sidecar_suffix(side.name, matched)   # 如 ".zh.srt" / ".srt"
             new_name = f"{path.stem}{extra}"           # 跟随视频新名
             shutil.move(str(side), str(dest_dir / new_name))
             logger.info("处理段伴行文件一并归档:%s → %s", side.name, new_name)
