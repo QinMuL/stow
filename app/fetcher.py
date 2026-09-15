@@ -337,16 +337,24 @@ class ResourceFetcher:
         """是否该为这个源条目提交搬运。"""
         row = self.bot.store.get_fetch(src)
         if row:
-            # ⚠️ cleanup 必须在这里一起跳过:它表示"内容已经搬走了、只是源文件没删掉"。
-            # 本地文件此时多半已被处理段移走(落地点是空的),`_local_path` 兜底救不了,
-            # 漏了这行就会把同一个文件**再搬一次**(重复下载 + 重复处理 + 115 重复入库)。
-            if row["status"] in ("moving", "done", "cleanup"):
-                return False                       # 在途 / 已完成 / 待清理源:跳过
+            if row["status"] == "moving":
+                return False                       # 在途:等结算
             if row["status"] == "failed":
                 if row["attempts"] >= MAX_ATTEMPTS:
                     return False                   # 重试超限:交人工
                 if time.time() - float(row["updated_at"] or 0) < RETRY_BACKOFF_SECONDS:
                     return False                   # 退避中:本轮不重试
+            if row["status"] in ("done", "cleanup"):
+                # 曾经搬完(done)或"搬完只是源没删掉"(cleanup)。源文件若还躺在监控目录里:
+                #   大小与记录一致 → 同一份内容(残留/重传同件),跳过 —— 否则会重复搬
+                #   (cleanup 时本地多半已被处理段移走,`_local_path` 兜底救不了)
+                #   大小与记录不同 → **源被替换/重传了新内容**,要重新搬
+                #   (2026-09-15 实测:冬城猎凶 S01E10 搬完后源重传,大小 8056674406→
+                #    8065723769,因早前的无条件 early-return 一直躺在监控目录不搬)
+                if size == int(row["src_size"] or 0):
+                    return False
+                logger.info("获取段:源重传且大小不同(记录 %s → 现在 %s),重新搬:%s",
+                            row["src_size"], size, src)
         # 本地已存在 → 说明已经搬进来了(人工搬过、或重启前搬完),直接记账完成。
         # 目录不做大小比对:openlist 报目录 size=0,而本地目录 st_size 随文件系统变
         # (drvfs 512 / ext4 4096),比了必然失配 → 反复提交
@@ -505,6 +513,18 @@ class ResourceFetcher:
             parent, _, name = row["src_path"].rpartition("/")
             attempts = int(row["attempts"] or 0)
             size = int(row["src_size"] or 0)
+            # 源若已被替换(大小不同),删的就是**没搬过的新文件** —— 不删,
+            # 交给扫描轮按"重传新内容"重新搬(与 _should_fetch 同款判定,2026-09-15)
+            try:
+                items = await self.client.list_dir(parent or "/")
+            except OpenListError as exc:
+                logger.debug("列源目录失败,清理源跳过本轮:%s:%s", row["src_path"], exc)
+                continue
+            cur = next((it for it in items if str(it.get("name") or "") == name), None)
+            if cur is not None and not cur.get("is_dir") and int(cur.get("size") or 0) != size:
+                logger.info("获取段:源已重传(大小 %s ≠ %s),不再删,等扫描轮重搬:%s",
+                            cur.get("size"), size, row["src_path"])
+                continue
             try:
                 await self.client.remove(parent or "/", [name])
             except OpenListError as exc:

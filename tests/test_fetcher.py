@@ -598,6 +598,33 @@ def test_should_fetch_skips_cleanup_status(tmp_path):
     assert f._should_fetch(src, 1000, "a.mkv") is False
 
 
+def test_should_fetch_refetches_when_source_size_changed(tmp_path):
+    """done 记录在、但源文件大小变了 → 视为重传新内容,重新搬(2026-09-15)。
+
+    线上案例:冬城猎凶 S01E10 搬完后源被重传,大小 8056674406→8065723769,
+    旧逻辑对 done 无条件 early-return,文件永远躺在监控目录不搬。
+    """
+    f, bot, _ = _fetcher(tmp_path)
+    src = f"{_MON}/冬城猎凶.2026.WEB-DL.S01E10.mkv"
+    bot.store.save_fetch(src, 8056674406, status="done", task_id="old")
+    assert f._should_fetch(src, 8065723769, "冬城猎凶.2026.WEB-DL.S01E10.mkv") is True
+    # 大小仍一致 → 同一份内容,继续跳过
+    assert f._should_fetch(src, 8056674406, "冬城猎凶.2026.WEB-DL.S01E10.mkv") is False
+
+
+def test_cleanup_skips_replaced_source(tmp_path):
+    """cleanup 时源文件已被替换(大小不同)→ 不再删,避免删掉没搬过的新文件。"""
+    f, bot, client = _fetcher(tmp_path, files=[{"name": "S01", "size": 0, "is_dir": True}])
+    src = f"{_MON}/S01/a.mkv"
+    client.items[f"{_MON}/S01"] = [{"name": "a.mkv", "size": 999, "is_dir": False}]
+    bot.store.save_fetch(src, 1000, status="cleanup", attempts=1, error="500")
+
+    asyncio.run(f._retry_cleanup({"done": 0, "failed": 0}))
+
+    assert client.items[f"{_MON}/S01"]                       # 新文件(999)还在,没被删
+    assert bot.store.get_fetch(src)["status"] == "cleanup"   # 状态不变,等扫描轮重搬
+
+
 def test_verify_source_gone_failure_marks_cleanup_without_notify(tmp_path):
     """补删第一次失败:记成 cleanup 待后续重试,**不当场打扰人**。"""
     f, bot, client = _fetcher(tmp_path)
